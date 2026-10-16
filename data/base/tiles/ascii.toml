@@ -1,0 +1,5 @@
+# ASCII tileset. Entities reference these ids; edit a glyph/color here and the
+# running game updates immediately.
+"terrain.floor"   = { glyph = ".", fg = "#3a3a3a" }
+"terrain.wall"    = { glyph = "#", fg = "#8a8a8a" }
+"creature.player" = { glyph = "@", fg = "#ffffff" }

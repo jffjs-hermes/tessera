@@ -1,0 +1,16 @@
+[package]
+name = "tessera-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+font8x8 = "0.3.1"
+pollster = "1.0.1"
+tracing = "0.1.44"
+wgpu = "30.0.1"
+winit = "0.30.13"
+tessera-core = { path = "../tessera-core" }

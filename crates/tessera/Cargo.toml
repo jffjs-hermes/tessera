@@ -1,0 +1,16 @@
+[package]
+name = "tessera"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+notify = "8.2.0"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tessera-core = { path = "../tessera-core" }
+tessera-render = { path = "../tessera-render" }
+winit = "0.30.13"
