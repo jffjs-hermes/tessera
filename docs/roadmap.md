@@ -1,5 +1,7 @@
 # Roadmap
 
+Summary only; the full plan and rationale are in [architecture.md](architecture.md).
+
 Language: Rust. Rendering: wgpu instanced cells; glyph atlas now, sprites later via tile ids.
 Scripting: Luau via mlua. Desktop only.
 
