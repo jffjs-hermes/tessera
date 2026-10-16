@@ -146,12 +146,12 @@ impl TileRegistry {
                 }
             };
             let fg = match r.fg.as_deref() {
-                Some(s) => Rgb::parse(s).map_err(&bad)?,
+                Some(s) => Rgb::parse(s).map_err(bad)?,
                 None => Rgb::WHITE,
             };
             let bg = match r.bg.as_deref() {
                 None | Some("none") => None,
-                Some(s) => Some(Rgb::parse(s).map_err(&bad)?),
+                Some(s) => Some(Rgb::parse(s).map_err(bad)?),
             };
             self.tiles.insert(
                 id,
