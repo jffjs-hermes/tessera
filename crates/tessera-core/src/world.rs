@@ -1,4 +1,4 @@
-//! `World`: the M2 integration seam that ties the blueprint library, the
+//! `World`: the integration seam that ties the blueprint library, the
 //! engine's hecs components, and the dynamic part store together behind
 //! spawning from data and fail-closed content hot reload.
 //!
@@ -74,10 +74,10 @@ impl SpawnError {
     }
 }
 
-/// The M2 `World`: a shared, hot-reloadable blueprint library plus the
+/// The `World`: a shared, hot-reloadable blueprint library plus the
 /// registries and spawner seams needed to instantiate entities from data.
 ///
-/// `World` is cheap to share (`Arc`<`RwLock`>`BluepritLibrary`) and is locked
+/// `World` is cheap to share (`Arc`<`RwLock`>`BlueprintLibrary`) and is locked
 /// only during the brief resolution reads in [`Self::spawn_blueprint`].
 pub struct World {
     /// Resolved blueprints, swapped as a whole on hot reload.
@@ -618,7 +618,7 @@ parts.Render = { tile = "creature.player.v2" }
 
     #[test]
     fn reserved_handlers_table_is_a_load_error() {
-        // M2 scope: a reserved `handlers` table must error, not be ignored.
+        // A reserved `handlers` table must error, not be ignored.
         let v = MemVfs::new().with(
             "blueprints/h.toml",
             r##"[X]
