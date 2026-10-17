@@ -1,0 +1,8 @@
+# Determinism guard (docs/determinism.md, rule 3).
+# std HashMap/HashSet randomize iteration order per process, which breaks replays.
+# Enforced by `cargo clippy`, so CI fails instead of relying on review.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is randomized per process; use BTreeMap (see docs/determinism.md)" },
+    { path = "std::collections::HashSet", reason = "iteration order is randomized per process; use BTreeSet (see docs/determinism.md)" },
+    { path = "std::hash::RandomState", reason = "randomized hashing breaks determinism; see docs/determinism.md" },
+]
