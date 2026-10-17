@@ -66,9 +66,9 @@ parts.Render    = { tile = "creature.humanoid" }
 parts.Stats     = { strength = 10, agility = 10 }
 parts.Throwable = {}          # mod-defined, unknown to the engine core
 
-[Snapjaw]
+[Goblin]
 inherits = "Humanoid"
-parts.Render = { tile = "creature.snapjaw" }
+parts.Render = { tile = "creature.goblin" }
 parts.Stats  = { strength = 18, agility = 6 }   # overrides parent value
 ```
 
@@ -86,7 +86,7 @@ Rules:
   collecting every id, resolution walks each chain parent→child. A part overrides a
   parent part with the same name (whole-part replace, not deep merge — deep merge of
   arbitrary part payloads is deferred to M5 patching, where it belongs).
-- **Diagnostics carry `file + id`:** `unknown parent 'Humaniod' for 'Snapjaw'
+- **Diagnostics carry `file + id`:** `unknown parent 'Humaniod' for 'Goblin'
   (data/base/blueprints/creatures.toml)` and `inheritance cycle: A -> B -> C -> A
   (defined at <file>:<id>, cycle entered at <file>:<id>)`. Errors are collected per
   load pass where possible so one typo doesn't hide ten others; on any error the
@@ -119,7 +119,7 @@ Rules:
 
 ### Registry-shaped base data
 
-Ship `data/base/blueprints/` with `Actor → Humanoid → {Player, Snapjaw}` so M2
+Ship `data/base/blueprints/` with `Actor → Humanoid → {Player, Goblin}` so M2
 demonstrates the whole chain end-to-end, and the hardcoded `@` in `main.rs` becomes
 data-driven (`[Player]` with `parts.Render = { tile = "creature.player" }`).
 
@@ -161,7 +161,7 @@ From [determinism.md](../determinism.md), applied here:
   resolution with cycle/unknown-parent diagnostics, typed part deserialization,
   `BlueprintLibrary`, spawn-from-data.
 - Hot reload of `blueprints/` with keep-old-on-error swap.
-- `data/base/blueprints/creatures.toml` (Actor/Humanoid/Player/Snapjaw) +
+- `data/base/blueprints/creatures.toml` (Actor/Humanoid/Player/Goblin) +
   `data/base/blueprints/objects.toml` if useful; wire the existing `@` player to
   `[Player]`.
 - Unit tests via `MemVfs`: inheritance chains, overrides, cycle + unknown parent +
