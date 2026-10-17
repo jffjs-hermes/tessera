@@ -1,14 +1,18 @@
-//! Tessera M1 demo: a movable `@` on a hardcoded map, drawn from the tile registry.
-//! Edit `data/base/tiles/ascii.toml` while running and the screen updates.
+//! Tessera M2 demo: a data-driven `@` spawned from `[Player]` (a blueprint with
+//! `parts.Render = { tile = "creature.player" }`), drawn from the tile registry.
+//! Edit `data/base/blueprints/` while running and the blueprint library reloads
+//! (new spawns use the new library; existing entities keep their parts).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use notify::{RecursiveMode, Watcher};
+use tessera_core::ecs::EntityBroker;
 use tessera_core::map::Map;
 use tessera_core::tiles::TileRegistry;
 use tessera_core::vfs::DirVfs;
+use tessera_core::world::{RenderTile, World};
 use tessera_render::atlas::Atlas;
 use tessera_render::{Cell, Renderer};
 use winit::application::ApplicationHandler;
@@ -20,7 +24,8 @@ use winit::window::{Window, WindowId};
 
 const GRID_W: u32 = 80;
 const GRID_H: u32 = 50;
-const PLAYER_TILE: &str = "creature.player";
+/// The `[Player]` blueprint id in `data/base/blueprints/creatures.toml`.
+const PLAYER_BLUEPRINT: &str = "Player";
 
 enum UserEvent {
     ContentChanged,
@@ -53,14 +58,38 @@ fn parse_args() -> Result<Args> {
 struct Content {
     tiles: TileRegistry,
     atlas: Atlas,
+    /// Shared, hot-reloadable blueprint library + registries.
+    world: World,
+}
+
+/// Build the M2 world: register the engine's known part types, then load the
+/// blueprint set. On any error returns an anyhow error carrying `file + id`
+/// diagnostics from the loader.
+fn build_world(vfs: &DirVfs) -> Result<World> {
+    let mut world = World::new();
+    // Engine component seam: `parts.Render` deserializes into a `RenderTile`
+    // hecs component (tile id resolved against the atlas/tile registry at draw).
+    world
+        .register_component::<RenderTile>("Render")
+        .map_err(|e| anyhow::anyhow!("registering engine part 'Render': {e}"))?;
+    world
+        .load(vfs)
+        .map_err(|e| anyhow::anyhow!("loading blueprints: {e}"))?;
+    Ok(world)
 }
 
 fn load_content(data: &std::path::Path) -> Result<Content> {
-    let tiles = TileRegistry::load(&DirVfs::new(data))?;
+    let vfs = DirVfs::new(data);
+    let tiles = TileRegistry::load(&vfs)?;
     let mut chars = tiles.glyph_chars();
     chars.push('?');
     let atlas = Atlas::build(&chars);
-    Ok(Content { tiles, atlas })
+    let world = build_world(&vfs)?;
+    Ok(Content {
+        tiles,
+        atlas,
+        world,
+    })
 }
 
 struct App {
@@ -70,7 +99,11 @@ struct App {
     _watcher: Option<notify::RecommendedWatcher>,
     content: Content,
     map: Map,
-    player: (i32, i32),
+    /// The live `[Player]` entity, spawned from data on startup and untouched by
+    /// later blueprint reloads (existing entities keep their parts — M2).
+    broker: EntityBroker,
+    player: hecs::Entity,
+    player_pos: (i32, i32),
     frames_drawn: u32,
     atlas_dirty: bool,
 }
@@ -93,12 +126,20 @@ impl App {
                 bg: [b[0], b[1], b[2], 1.0],
             });
         };
+        // Read the player's tile id from its live RenderTile each frame so the
+        // draw path stays data-driven (spawned from `[Player]`, not hardcoded).
+        let player_tile = self
+            .broker
+            .world()
+            .get::<&RenderTile>(self.player)
+            .ok()
+            .map_or_else(|| "creature.player.missing".to_string(), |r| r.tile.clone());
         for y in 0..self.map.height {
             for x in 0..self.map.width {
                 let terrain = self.map.tile_id(x, y);
-                if (x as i32, y as i32) == self.player {
+                if (x as i32, y as i32) == self.player_pos {
                     let under = self.content.tiles.get(terrain).clone();
-                    push(x, y, PLAYER_TILE, Some(&under));
+                    push(x, y, &player_tile, Some(&under));
                 } else {
                     push(x, y, terrain, None);
                 }
@@ -108,9 +149,9 @@ impl App {
     }
 
     fn try_move(&mut self, dx: i32, dy: i32) {
-        let (nx, ny) = (self.player.0 + dx, self.player.1 + dy);
+        let (nx, ny) = (self.player_pos.0 + dx, self.player_pos.1 + dy);
         if self.map.is_walkable(nx, ny) {
-            self.player = (nx, ny);
+            self.player_pos = (nx, ny);
         }
     }
 
@@ -221,6 +262,13 @@ fn main() -> Result<()> {
     let args = parse_args()?;
     let content = load_content(&args.data)
         .with_context(|| format!("loading content from {}", args.data.display()))?;
+    // Spawn the player from `[Player]` blueprint data (M2), stamping the engine
+    // RenderTile component. The single live entity is kept across later reloads.
+    let mut broker = EntityBroker::new();
+    let player = content
+        .world
+        .spawn_blueprint(PLAYER_BLUEPRINT, &mut broker)
+        .with_context(|| format!("spawning {PLAYER_BLUEPRINT:?}"))?;
     let map = Map::demo(GRID_W as usize, GRID_H as usize);
     for id in map.missing_tile_ids(&content.tiles) {
         tracing::warn!("map uses tile id {id:?} with no definition (will draw as '?')");
@@ -256,7 +304,9 @@ fn main() -> Result<()> {
         _watcher: watcher,
         content,
         map,
-        player: (2, 2),
+        broker,
+        player,
+        player_pos: (2, 2),
         frames_drawn: 0,
         atlas_dirty: true,
     };

@@ -1,0 +1,21 @@
+# Base blueprints: data-driven entity definitions for M2.
+#
+# Top-level table name = blueprint id. `inherits` is a single parent (whole-part
+# inheritance, deterministic parent→child). `parts.<Name>` payloads are typed by
+# the engine's part registry (unknown part names are a load error; the reserved
+# `handlers` table is rejected until M3). See docs/specs/m2-entities.md §2.
+
+[Actor]
+# Abstract root of the creature chain. No parts of its own.
+
+[Humanoid]
+inherits = "Actor"
+parts.Render = { tile = "creature.humanoid" }
+
+[Player]
+inherits = "Humanoid"
+parts.Render = { tile = "creature.player" }
+
+[Goblin]
+inherits = "Humanoid"
+parts.Render = { tile = "creature.goblin" }
