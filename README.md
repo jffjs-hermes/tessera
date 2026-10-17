@@ -1,7 +1,11 @@
 # Tessera
 
+[![CI](https://github.com/jffjs-hermes/tessera/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/jffjs-hermes/tessera/actions/workflows/ci.yml)
+![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20windows%20%7C%20macos-blue)
+![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)
+
 A data-driven, scriptable, mod-friendly tile-based roguelike engine in Rust,
-inspired by Caves of Qud. Desktop only (Linux/macOS/Windows).
+inspired by Caves of Qud. Desktop only (Linux/macOS/Windows; CI builds and tests all three).
 
 **Status:** M0 (scaffold) and M1 (tile renderer) complete. Nothing playable yet.
 
