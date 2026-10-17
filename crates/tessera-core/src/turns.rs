@@ -1,6 +1,6 @@
 //! Energy-clock turn scheduler: accumulate-and-threshold timing, deterministic
-//! speed-then-id ordering, and per-action energy costs (M3 §2 of
-//! `docs/specs/m3-events-turns.md`).
+//! speed-then-id ordering, and per-action energy costs, all deterministic
+//! and replayable.
 //!
 //! # Model
 //!

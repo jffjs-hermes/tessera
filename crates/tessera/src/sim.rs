@@ -1,4 +1,4 @@
-//! Demo simulation harness (M3 §3.2 of `docs/specs/m3-events-turns.md`).
+//! Demo simulation harness (energy-clock, deterministic event bus).
 //!
 //! Wires the core event bus and energy scheduler into the demo: the player is
 //! the single scheduled actor, keyboard input is converted to a
@@ -18,7 +18,7 @@
 //! window and returns the final map + a stable, one-event-per-line event log
 //! (KEY <NAME> tick=.. [fields]) suitable as the seed of the future replay
 //! format. Deterministic for a fixed script and map (the sim consumes no
-//! randomness at M3 — no AI, no f32, integer-only energy).
+//! randomness — no AI, no f32, integer-only energy).
 
 use hecs::Entity;
 use tessera_core::ecs::EntityBroker;
@@ -32,7 +32,7 @@ use tessera_core::turns::{
 use tessera_core::world::RenderTile;
 
 /// Deterministic seed for the demo's forked RNG streams. The sim never reads
-/// randomness at M3 (no AI), so this keeps headless output identical run to
+/// randomness (no AI), so this keeps headless output identical run to
 /// run for a fixed script.
 const SIM_SEED: u64 = 20_260_317;
 

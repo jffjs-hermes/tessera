@@ -3,7 +3,7 @@
 //! Edit `data/base/blueprints/` while running and the blueprint library reloads
 //! (new spawns use the new library; existing entities keep their parts).
 //!
-//! M3 (see `docs/specs/m3-events-turns.md` §3.2): input is routed through the
+//! Turn-by-turn: input is routed through the
 //! event/scheduler harness in [`sim::Sim`]. Arrow keys / WASD move the `@`,
 //! `.` / Space wait; a wall-blocked move is cancelled by an EARLY map-collision
 //! handler (no energy cost). `--headless <n>` runs `n` scripted actions with no
@@ -90,7 +90,7 @@ struct Content {
     world: World,
 }
 
-/// Build the world: register the engine's known part types and the M3 dynamic
+/// Build the world: register the engine's known part types and the dynamic
 /// parts (Position / ActorEnergy / Health), then load the blueprint set. On any
 /// error returns an anyhow error carrying `file + id` diagnostics from the
 /// loader.
@@ -101,7 +101,7 @@ fn build_world(vfs: &DirVfs) -> Result<World> {
     world
         .register_component::<RenderTile>("Render")
         .map_err(|e| anyhow::anyhow!("registering engine part 'Render': {e}"))?;
-    // M3 dynamic parts (§3.2 / §5 base data): Position is the event-facing
+    // Dynamic parts: Position is the event-facing
     // grid cell, ActorEnergy drives the scheduler, Health backs minimal combat.
     world
         .register_part::<Position>(PART_POSITION)
