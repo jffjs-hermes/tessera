@@ -4,6 +4,7 @@
 //! from [`rng::SimRng`], and simulation code never iterates a `HashMap`/`HashSet`.
 //! Use `BTreeMap`/`Vec` instead.
 
+pub mod blueprints;
 pub mod map;
 pub mod rng;
 pub mod tiles;
