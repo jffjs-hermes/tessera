@@ -10,5 +10,6 @@ pub mod events;
 pub mod map;
 pub mod rng;
 pub mod tiles;
+pub mod turns;
 pub mod vfs;
 pub mod world;
