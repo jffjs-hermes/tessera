@@ -1,6 +1,6 @@
 # M3 spec: typed events and the energy/turn scheduler
 
-Status: research proposal for M3 (author: researcher bot, awaiting human approval).
+Status: approved research spec for M3 (author: researcher bot; decisions resolved in §4).
 Grounded in [architecture.md](../architecture.md) §2 (design principle 3), §5 ("A typed
 bus with priorities and cancel/modify semantics", "Turn scheduler. Energy/speed-based
 (as in Qud and Brogue)") and §8, and [determinism.md](../determinism.md). M3 scope per
@@ -225,7 +225,7 @@ while sim has a scheduled actor:
     clock.tick():  for actor in actors_sorted_by_id: energy[i] += speed_effective(i)
     ready = actors with energy >= 10000
     if none: repeat tick (fast path: jump clock by floor((10000 - max_energy)/min_speed) to skip empty ticks)
-    actor = ready.first()  # see tie-break §2.3
+    actor = ready.first()  # ready sorted (speed desc, id asc); tie-break §2.3
     dispatch ActorTurnStart(actor)            # observers, AI hook point (M6)
     outcome = dispatch the actor's action event (Move / Attack / Wait)
     if outcome was Cancelled: no energy charge (§2.6)
@@ -258,12 +258,18 @@ while sim has a scheduled actor:
 
 - Actor set is a `BTreeMap<EntityId, ActorEnergy>`. Iteration order = entity id
   order — deterministic by construction (determinism rule 3).
-- When ≥2 actors are ready in the same tick window, the one with the **lowest
-  entity id** acts first. Rationale: entity ids are assigned in deterministic
-  spawn order, so "oldest actor first" is stable, cheap, and never consults
-  randomness. (A speed-then-id ordering would equally work; speed-first would make
-  the fast actor act first in a burst, which is a *design* choice, not a
-  correctness one — see open questions §4.)
+- The ready list for a tick window is collected from that `BTreeMap` and sorted
+  by the comparison key `(speed_effective desc, entity_id asc)` — a plain
+  deterministic sort, no hashing involved.
+- When ≥2 actors are ready in the same tick window, ordering is
+  **speed-then-id**: the ready actor with the **highest effective speed** acts
+  first; ties (equal effective speed) are broken by the **lowest entity id**.
+  Rationale: fast actors convert their accumulated energy into actions first
+  within the window they earned it, and entity ids — assigned in deterministic
+  spawn order — give a stable, cheap, randomness-free final tie-break. Both keys
+  are fixed at spawn/buff time; nothing consults randomness or iteration order.
+  (Decided in §4; a lowest-id-only rule would also be deterministic but lets a
+  slow actor act before a fast one that became ready in the same window.)
 - The scheduler never reads wall-clock time, thread scheduling, or `SimRng` for
   ordering. Randomness enters only via game logic during handlers (AI at M6),
   always through forked `SimRng` streams.
@@ -281,8 +287,11 @@ Headless integer tests, no rendering:
    after t ticks is 75t; first act t=134 (75×134=10050 ≥ 10000); second at t=268
    (exact doubling). Assert no accumulation drift over 10_000 ticks vs. a
    precomputed table.
-5. **Tie-break:** two actors (ids 1 and 2) both at threshold same tick: id 1 acts
-   first; assert via event log.
+5. **Tie-break:** (a) two actors with the same speed (ids 1 and 2) both reach
+   the threshold in the same tick: the lowest id (1) acts first, asserted via
+   event log; (b) two actors crossing the threshold in the same tick window with
+   different speeds (200 vs 100): the speed-200 actor acts first despite a
+   higher id, asserted via event log.
 6. **Zero speed:** actor with speed 0 never appears in ready set; sim with only
    speed-0 actors returns `ClockStalled`, terminates.
 7. **Cost > energy:** speed 100 actor performs cost-2 action from exactly
@@ -329,27 +338,24 @@ Today `main.rs` mutates `Position` directly on keypress (M1 shape). Migration:
 - Rendering stays a pure reader: it never dispatches events, never mutates sim
   state; the redraw on hot reload is unchanged.
 
-## 4. Open decisions for Jeff (explicit, not guessed)
+## 4. Decisions (resolved)
 
-1. **Tie-break rule:** lowest-entity-id-first (proposed) vs. speed-then-id
-   (fast actors win ties). Both are deterministic; it affects feel only when two
-   actors cross the threshold in the same tick window, which is rare but visible
-   in combat. **Needs Jeff's call.**
-2. **Event-priority range:** proposed `i8` with named constants at ±64. Alternative:
-   full `u32` priorities (Qud-style flexibility, uglier API). **Needs Jeff's call**;
-   default is `i8`.
-3. **Nested-dispatch rejection vs. queueing:** proposed *reject* re-entrant
-   same-(event,entity) dispatches with a returned error. Alternative: queue the
-   nested event to run after the outer dispatch completes (more forgiving, hides
-   content bugs longer, more state to test). **Needs Jeff's call**; default is
-   reject, because M4 scripts will make runaway cascades common and fail-loud is
-   the cheaper habit to build.
-4. **`Attack` at M3 scope:** the event exists and dispatches, but there is no
-   damage/health content yet (stats parts are M2 data, not M3 behavior). Proposed:
-   `Attack` cancels unless the defender has a `Health` part (added in M3 base data
-   as `Health { hp: i32 }`); on hit, dispatches `TakeDamage { amount: 1 }` with no
-   modifiers. Rich combat is explicitly later. **Needs Jeff's confirmation** that
-   a minimal `Health` part + fixed 1 damage is acceptable M3 scope.
+All four architecture questions were answered by Jeff in his approval review on
+PR #8 (review by `jffjs`). These are final; builders implement them as written.
+
+1. **Tie-break rule: speed-then-id.** When multiple actors are ready in the
+   same tick window, the ready actor with the highest effective speed acts
+   first; equal speeds break by lowest entity id (§2.3, test vector §2.4.5).
+2. **Event-priority range: `i8`** with named constants at ±64
+   (`EARLY = -64`, `NORMAL = 0`, `LATE = 64`) — §1.2.
+3. **Re-entrant dispatch: reject** with a returned `EventError::ReentrantDispatch`
+   (§1.5, §1.6); no queueing.
+4. **`Attack` M3 scope: minimal combat as specified.** `Attack` cancels unless
+   the defender has a `Health { hp: i32 }` part (added in M3 base data); on hit,
+   it dispatches `TakeDamage { amount: 1 }` with no modifiers. Rich combat is
+   explicitly later.
+
+No unresolved human decisions remain.
 
 ## 5. Implementation boundaries (for builder cards)
 
