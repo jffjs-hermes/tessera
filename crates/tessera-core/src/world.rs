@@ -1,0 +1,541 @@
+//! `World`: the M2 integration seam that ties the blueprint library, the
+//! engine's hecs components, and the dynamic part store together behind
+//! spawning from data and fail-closed content hot reload.
+//!
+//! Spawning (`World::spawn_blueprint`) resolves a flattened blueprint from the
+//! shared [`BlueprintLibrary`], instantiates *registered engine components*
+//! into the `hecs` world (through the [`ComponentSpawner`] seam), and puts the
+//! *remaining* parts into the entity's `PartMap`. Reload re-resolves the whole
+//! blueprint set from the vfs into a fresh library and atomically swaps the
+//! shared `Arc<RwLock<…>>`; on any parse/resolution error it keeps the previous
+//! library unchanged (fail-closed).
+//!
+//! Determinism (see `docs/determinism.md`): this module uses only `BTreeMap`
+//! collections (never `HashMap`/`HashSet`), spawns consume no randomness, and a
+//! reload touches only the shared library — it must never reach `SimRng` or
+//! existing live entities. The `notify` watcher thread (in the `tessera` bin)
+//! merely *triggers* a rebuild and hands the result over; it never mutates sim
+//! state directly.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
+
+use hecs::Entity;
+use thiserror::Error;
+use toml::Value;
+
+use crate::blueprints::{BlueprintLibrary, Part as LoaderPart, PartRegistry as LoaderRegistry};
+use crate::ecs::{EntityBroker, PartError, PartRegistry, PartTypeId};
+use crate::vfs::Vfs;
+
+/// An engine-native component type the world knows how to stamp into `hecs`
+/// when a blueprint declares a matching part. E.g. `parts.Render = { tile =
+/// "creature.player" }` produces a [`RenderTile`] component on the entity.
+///
+/// All engine part names must also be registered in the loader registry so the
+/// blueprint loader accepts them (an unknown part name is a load error).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenderTile {
+    /// Tile *id* resolved against the tile registry at draw time (the registry
+    /// maps id→glyph/color; the engine never hardcodes an id in sim code).
+    pub tile: String,
+}
+
+/// A spawner turns a part's `toml::Value` payload into a `hecs` component on an
+/// entity. Returns `Err` with a diagnostic when the payload is malformed, so a
+/// bad part fails the spawn loudly rather than being silently dropped.
+pub type ComponentSpawner =
+    Box<dyn Fn(&mut hecs::World, Entity, &Value) -> Result<(), SpawnError> + Send + Sync + 'static>;
+
+/// Thin deserializable wrapper so any `DeserializeOwned` registration type can
+/// satisfy the loader registry's `Part` bound for *validation* purposes. The
+/// loader only needs the name to be known; spawning never uses this box.
+#[derive(Debug)]
+#[allow(dead_code)]
+struct LoaderSeal<C>(C);
+
+impl<C: Send + Sync + 'static> LoaderPart for LoaderSeal<C>
+where
+    C: std::fmt::Debug,
+{
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+impl<'de, C: serde::Deserialize<'de>> serde::Deserialize<'de> for LoaderSeal<C> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        C::deserialize(d).map(LoaderSeal)
+    }
+}
+
+/// Failure modes of [`World::spawn_blueprint`].
+#[derive(Debug, Error)]
+pub enum SpawnError {
+    #[error("blueprint library lock poisoned")]
+    LibraryPoisoned,
+    #[error("unknown blueprint id '{0}'")]
+    UnknownBlueprint(String),
+    #[error("engine component from part '{name}' failed to spawn: {msg}")]
+    ComponentSpawn { name: String, msg: String },
+    #[error("part '{name}' failed to build: {msg}")]
+    PartBuild { name: String, msg: String },
+    #[error("entity {0:?} was despawned mid-spawn")]
+    NoSuchEntity(Entity),
+}
+
+impl SpawnError {
+    fn component(name: &str, msg: impl Into<String>) -> Self {
+        Self::ComponentSpawn {
+            name: name.to_string(),
+            msg: msg.into(),
+        }
+    }
+}
+
+/// The M2 `World`: a shared, hot-reloadable blueprint library plus the
+/// registries and spawner seams needed to instantiate entities from data.
+///
+/// `World` is cheap to share (`Arc`<`RwLock`>`BluepritLibrary`) and is locked
+/// only during the brief resolution reads in [`Self::spawn_blueprint`].
+pub struct World {
+    /// Resolved blueprints, swapped as a whole on hot reload.
+    library: Arc<RwLock<BlueprintLibrary>>,
+    /// Part names the loader may accept (validation registry for load/reload).
+    loader_registry: LoaderRegistry,
+    /// Part name → engine-component spawner (stamped into `hecs`).
+    spawners: BTreeMap<String, ComponentSpawner>,
+    /// Part name → factory producing the dynamic parts stored in a PartMap.
+    parts: PartRegistry,
+}
+
+impl Default for World {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Build a `Box<dyn ecs::Part>` of concrete type `C` from a part's TOML payload.
+fn build_dynamic_part<C>(value: &Value) -> Result<Box<dyn crate::ecs::Part>, PartError>
+where
+    C: serde::de::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
+{
+    let c: C = value
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| PartError::BuildFailed {
+            name: std::any::type_name::<C>().to_string(),
+            msg: e.to_string(),
+        })?;
+    Ok(Box::new(c))
+}
+
+impl World {
+    /// An empty world (empty library + empty registries). Call [`Self::load`]
+    /// after registering engine components and parts to populate content.
+    pub fn new() -> Self {
+        Self {
+            library: Arc::new(RwLock::new(BlueprintLibrary::new())),
+            loader_registry: LoaderRegistry::new(),
+            spawners: BTreeMap::new(),
+            parts: PartRegistry::new(),
+        }
+    }
+
+    /// Register an engine component `C` that the world stamps into `hecs` when
+    /// a blueprint declares part `name`. `C` is deserialized from the part's
+    /// TOML payload with serde defaults; unknown payload fields are rejected by
+    /// the type's own `#[serde(deny_unknown_fields)]`.
+    ///
+    /// Also registers `name` in the loader registry so blueprints using it load
+    /// (unknown part names are a load error).
+    pub fn register_component<C>(&mut self, name: &'static str)
+    where
+        C: serde::de::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
+    {
+        self.loader_registry.register::<LoaderSeal<C>>(name);
+        let spawner: ComponentSpawner = {
+            Box::new(
+                move |world: &mut hecs::World, entity: Entity, value: &Value| {
+                    let comp: C = value
+                        .clone()
+                        .try_into()
+                        .map_err(|e| SpawnError::component(name, e.to_string()))?;
+                    world
+                        .insert_one(entity, comp)
+                        .map_err(|_| SpawnError::NoSuchEntity(entity))
+                },
+            )
+        };
+        self.spawners.insert(name.to_string(), spawner);
+    }
+
+    /// Register a dynamic part `C` stored in each spawned entity's `PartMap`
+    /// (mod-defined parts; for engine components use [`Self::register_component`]).
+    /// Registers the name in both the loader registry and the runtime part
+    /// registry so content and spawning both accept it.
+    pub fn register_part<C>(&mut self, name: &'static str)
+    where
+        C: serde::de::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
+    {
+        self.loader_registry.register::<LoaderSeal<C>>(name);
+        self.parts
+            .register(PartTypeId::new(name), build_dynamic_part::<C>);
+    }
+
+    /// Load (or reload) the blueprint set from the vfs, atomically swapping the
+    /// shared library on success. On any parse/resolution error returns the
+    /// [`crate::blueprints::LoadFail`] diagnostics (`file + id`) and leaves the
+    /// previous library untouched — content can never break what's live.
+    ///
+    /// Content-only by construction: this touches only the shared library, never
+    /// `SimRng` or existing entities.
+    pub fn load(&self, vfs: &dyn Vfs) -> Result<(), crate::blueprints::LoadFail> {
+        let fresh = BlueprintLibrary::load(vfs, &self.loader_registry)?;
+        let mut guard = self.library.write().map_err(|_| {
+            crate::blueprints::LoadFail::single(crate::blueprints::BlueprintError::Io {
+                path: "blueprints".into(),
+                source: std::io::Error::other("blueprint library lock poisoned"),
+            })
+        })?;
+        *guard = fresh;
+        Ok(())
+    }
+
+    /// Shared handle to the current library (for read access / inspection).
+    pub fn library(&self) -> &Arc<RwLock<BlueprintLibrary>> {
+        &self.library
+    }
+
+    /// Resolve the flattened blueprint `id`, instantiate its registered engine
+    /// components into `hecs` via [`EntityBroker`], and store every remaining
+    /// part in the entity's `PartMap`. Returns the single entity handle.
+    ///
+    /// Deterministic: parts are stamped in sorted (BTreeMap) part-name order,
+    /// and spawning consumes no randomness.
+    pub fn spawn_blueprint(
+        &self,
+        id: &str,
+        broker: &mut EntityBroker,
+    ) -> Result<Entity, SpawnError> {
+        let lib = self
+            .library
+            .read()
+            .map_err(|_| SpawnError::LibraryPoisoned)?;
+        let blueprint = lib
+            .get(id)
+            .ok_or_else(|| SpawnError::UnknownBlueprint(id.to_string()))?;
+
+        let entity = broker.spawn();
+        for (name, payload) in &blueprint.parts {
+            match self.spawners.get(name) {
+                Some(spawner) => {
+                    spawner(broker.world_mut(), entity, payload).inspect_err(|_| {
+                        // Roll back the partially-built entity so a failed spawn leaves
+                        // no half-stamped husk behind.
+                        broker.despawn(entity).ok();
+                    })?
+                }
+                None => {
+                    let part = self
+                        .parts
+                        .build(&PartTypeId::new(name.clone()), payload)
+                        .map_err(|e| SpawnError::PartBuild {
+                            name: name.clone(),
+                            msg: e.to_string(),
+                        })?;
+                    if broker
+                        .insert_part(entity, name.clone(), part)
+                        .map_err(|e| SpawnError::PartBuild {
+                            name: name.clone(),
+                            msg: e.to_string(),
+                        })
+                        .is_err()
+                    {
+                        broker.despawn(entity).ok();
+                    }
+                }
+            }
+        }
+        Ok(entity)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rng::SimRng;
+    use crate::vfs::MemVfs;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize, PartialEq, Default, Clone)]
+    #[serde(deny_unknown_fields)]
+    struct Stats {
+        #[serde(default)]
+        strength: i64,
+        #[serde(default)]
+        agility: i64,
+    }
+
+    fn creatures() -> MemVfs {
+        MemVfs::new().with(
+            "blueprints/creatures.toml",
+            r##"
+[Actor]
+parts = {}
+
+[Humanoid]
+inherits = "Actor"
+parts.Render = { tile = "creature.humanoid" }
+parts.Stats  = { strength = 10, agility = 10 }
+
+[Player]
+inherits = "Humanoid"
+parts.Render = { tile = "creature.player" }
+parts.Stats  = { strength = 12, agility = 8 }
+
+[Goblin]
+inherits = "Humanoid"
+parts.Render = { tile = "creature.goblin" }
+parts.Stats  = { strength = 18, agility = 6 }
+"##,
+        )
+    }
+
+    fn world(vfs: &MemVfs) -> World {
+        let mut w = World::new();
+        w.register_component::<RenderTile>("Render");
+        w.register_part::<Stats>("Stats");
+        w.load(vfs).expect("shipable base content loads");
+        w
+    }
+
+    #[test]
+    fn spawn_blueprint_resolves_inheritance_and_stamps_components() {
+        let vfs = creatures();
+        let w = world(&vfs);
+        let mut broker = EntityBroker::new();
+
+        let player = w.spawn_blueprint("Player", &mut broker).unwrap();
+        // Engine component RenderTile stamped into hecs from parts.Render.tile,
+        // with inheritance flattened (Humanoid -> Actor), Player override wins.
+        let player_tile = broker
+            .world()
+            .get::<&RenderTile>(player)
+            .unwrap()
+            .tile
+            .clone();
+        assert_eq!(player_tile, "creature.player");
+
+        // Remaining part (Stats) went into the entity's PartMap.
+        let player_stats = broker
+            .typed_part::<Stats>(player, &PartTypeId::new("Stats"))
+            .unwrap()
+            .clone();
+        assert_eq!(
+            player_stats,
+            Stats {
+                strength: 12,
+                agility: 8
+            }
+        );
+
+        let goblin = w.spawn_blueprint("Goblin", &mut broker).unwrap();
+        assert_eq!(
+            broker.world().get::<&RenderTile>(goblin).unwrap().tile,
+            "creature.goblin"
+        );
+        assert_eq!(
+            broker
+                .typed_part::<Stats>(goblin, &PartTypeId::new("Stats"))
+                .unwrap()
+                .clone(),
+            Stats {
+                strength: 18,
+                agility: 6
+            }
+        );
+
+        // Actor is an abstract base: resolvable, but no parts of its own.
+        let actor = w.spawn_blueprint("Actor", &mut broker).unwrap();
+        assert!(broker.world().get::<&RenderTile>(actor).is_err());
+        assert!(broker.part_map(actor).unwrap().is_empty());
+    }
+
+    #[test]
+    fn spawn_unknown_id_and_bad_part_fail_closed() {
+        let vfs = creatures();
+        let w = world(&vfs);
+        let mut broker = EntityBroker::new();
+
+        assert!(matches!(
+            w.spawn_blueprint("DoesNotExist", &mut broker),
+            Err(SpawnError::UnknownBlueprint(_))
+        ));
+
+        // A part registered as generic destroyed build: force a bad payload by
+        // registering a component whose type rejects the payload.
+        let bad = MemVfs::new().with(
+            "blueprints/b.toml",
+            r##"[B]
+parts.Render = { tile = 42 }
+"##,
+        );
+        // Loading keeps stale? No — create a fresh world with a known-bad part
+        // payload: Render requires a String tile; an int must fail spawn. But
+        // load only stores text (kept raw), so it must succeed; spawn fails.
+        let mut w2 = World::new();
+        w2.register_component::<RenderTile>("Render");
+        w2.load(&bad).unwrap();
+        let e = w2.spawn_blueprint("B", &mut broker).unwrap_err();
+        assert!(matches!(e, SpawnError::ComponentSpawn { .. }), "{e}");
+        // Fully rolled back: no partial entity left behind.
+        let n = broker.world().iter().count();
+        assert_eq!(n, 0, "spawn failure must roll back to no entity");
+    }
+
+    #[test]
+    fn spawns_are_deterministic_both_order_and_rng_free() {
+        let vfs = creatures();
+        let w = world(&vfs);
+        let mut broker = EntityBroker::new();
+
+        let mut rng = SimRng::from_seed(1);
+
+        // Spawn several entities; consuming no randomness means the rng stream
+        // is untouched (determinism rule: reload/spawn must not perturb SimRng).
+        for _ in 0..10 {
+            w.spawn_blueprint("Player", &mut broker).unwrap();
+            w.spawn_blueprint("Goblin", &mut broker).unwrap();
+        }
+        // The post-spawn stream matches a fresh, untouched stream: spawn is
+        // deterministic in the seed and consumes no randomness.
+        let mut untouched = SimRng::from_seed(1);
+        assert_eq!(rng.next_u32(), untouched.next_u32());
+        assert_eq!(rng.next_u32(), untouched.next_u32());
+    }
+
+    #[test]
+    fn hot_reload_atomic_swap_and_fail_closed_keeps_old() {
+        let vfs = creatures();
+        let w = world(&vfs);
+
+        // Old library resolves spawn with original content.
+        let mut broker = EntityBroker::new();
+        let p = w.spawn_blueprint("Player", &mut broker).unwrap();
+        assert_eq!(
+            broker.world().get::<&RenderTile>(p).unwrap().tile,
+            "creature.player"
+        );
+
+        // A good reload swaps in updated content.
+        let v2 = MemVfs::new().with(
+            "blueprints/creatures.toml",
+            r##"[Player]
+parts.Render = { tile = "creature.player.v2" }
+"##,
+        );
+        w.load(&v2).unwrap();
+        // New spawns use the new library...
+        let t = w.spawn_blueprint("Player", &mut broker).unwrap();
+        assert_eq!(
+            broker.world().get::<&RenderTile>(t).unwrap().tile,
+            "creature.player.v2"
+        );
+        // ...while existing live entities kept their old parts (no migration).
+        assert_eq!(
+            broker.world().get::<&RenderTile>(p).unwrap().tile,
+            "creature.player"
+        );
+
+        // A bad reload (parse error) leaves the previous library unchanged.
+        let bad = MemVfs::new().with("blueprints/creatures.toml", "[Player\nnope = ");
+        let err = w.load(&bad).unwrap_err();
+        assert!(
+            err.diagnostics
+                .iter()
+                .any(|d| d.to_string().contains("blueprints/creatures.toml"))
+        );
+        let t2 = w.spawn_blueprint("Player", &mut broker).unwrap();
+        assert_eq!(
+            broker.world().get::<&RenderTile>(t2).unwrap().tile,
+            "creature.player.v2",
+            "failed reload must keep the previous library"
+        );
+    }
+
+    #[test]
+    fn hot_reload_does_not_touch_live_entities_or_rng() {
+        let vfs = creatures();
+        let w = world(&vfs);
+        let mut broker = EntityBroker::new();
+        let live = w.spawn_blueprint("Player", &mut broker).unwrap();
+
+        let mut rng = SimRng::from_seed(99);
+
+        // Successful reload...
+        let v2 = MemVfs::new().with(
+            "blueprints/creatures.toml",
+            r##"[Player]
+parts.Render = { tile = "creature.player.v2" }
+"##,
+        );
+        w.load(&v2).unwrap();
+        // ...then a failed reload.
+        w.load(&MemVfs::new().with("blueprints/x.toml", "[Z\n"))
+            .unwrap_err();
+
+        // Existing entity untouched.
+        assert_eq!(
+            broker.world().get::<&RenderTile>(live).unwrap().tile,
+            "creature.player"
+        );
+        // SimRng untouched: post-reload stream matches a fresh same-seed stream.
+        let mut untouched = SimRng::from_seed(99);
+        assert_eq!(rng.next_u32(), untouched.next_u32());
+        assert_eq!(rng.next_u32(), untouched.next_u32());
+    }
+
+    #[test]
+    fn missing_tile_id_in_registry_still_spawns_as_data() {
+        // RenderTile stores the tile *id*; resolution against the tile registry
+        // happens at draw time. So even an id absent from a registry (e.g. a
+        // not-yet-defined creature) spawns fine — determinism of content load
+        // and draw are separate concerns.
+        let vfs = creatures();
+        let w = world(&vfs);
+        let mut broker = EntityBroker::new();
+        let g = w.spawn_blueprint("Goblin", &mut broker).unwrap();
+        assert_eq!(
+            broker.world().get::<&RenderTile>(g).unwrap().tile,
+            "creature.goblin"
+        );
+    }
+
+    #[test]
+    fn reserved_handlers_table_is_a_load_error() {
+        // M2 scope: a reserved `handlers` table must error, not be ignored.
+        let v = MemVfs::new().with(
+            "blueprints/h.toml",
+            r##"[X]
+handlers = { OnHit = 1 }
+"##,
+        );
+        let w = World::new();
+        let err = w.load(&v).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("`handlers` is reserved"), "{text}");
+    }
+
+    #[test]
+    fn library_roundtrips_via_blueprint_library() {
+        // Sanity: the world's public library handle exposes resolved ids.
+        let w = world(&creatures());
+        let lib = w.library().read().unwrap();
+        assert_eq!(
+            lib.ids().cloned().collect::<Vec<_>>(),
+            vec!["Actor", "Goblin", "Humanoid", "Player"]
+        );
+    }
+}

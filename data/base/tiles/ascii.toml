@@ -3,3 +3,5 @@
 "terrain.floor"   = { glyph = ".", fg = "#3a3a3a" }
 "terrain.wall"    = { glyph = "#", fg = "#8a8a8a" }
 "creature.player" = { glyph = "@", fg = "#ffffff" }
+"creature.humanoid" = { glyph = "h", fg = "#c8a060" }
+"creature.goblin"   = { glyph = "g", fg = "#60c060" }

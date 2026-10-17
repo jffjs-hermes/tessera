@@ -10,3 +10,4 @@ pub mod map;
 pub mod rng;
 pub mod tiles;
 pub mod vfs;
+pub mod world;
