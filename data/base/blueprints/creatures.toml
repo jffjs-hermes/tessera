@@ -6,11 +6,14 @@
 # `handlers` table is rejected until M3). See docs/specs/m2-entities.md §2.
 
 [Actor]
-# Abstract root of the creature chain. No parts of its own.
+# Abstract root of the creature chain. M3 base data adds the Health part for
+# the minimal-combat reserve; creatures inherit it.
+parts.Health = { hp = 20 }
 
 [Humanoid]
 inherits = "Actor"
 parts.Render = { tile = "creature.humanoid" }
+parts.ActorEnergy = { speed = 100 }
 
 [Player]
 inherits = "Humanoid"
