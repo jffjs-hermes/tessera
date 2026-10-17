@@ -1,6 +1,6 @@
 //! Tile registry: the indirection between entities and how they look.
 //!
-//! Entities reference a tile *id* (`"creature.snapjaw"`), never a glyph or sprite.
+//! Entities reference a tile *id* (`"creature.goblin"`), never a glyph or sprite.
 //! A tileset file maps ids to appearance. Later tilesets (sprites) can override ids
 //! one at a time; anything unresolved falls back to a visible "missing tile".
 
