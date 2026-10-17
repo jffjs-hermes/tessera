@@ -1,5 +1,5 @@
 //! Typed event bus with priorities, cancel/modify semantics, and strict
-//! re-entrancy control (M3 §1 of `docs/specs/m3-events-turns.md`).
+//! re-entrancy control over a deterministic, replayable event stream.
 //!
 //! # Model
 //!
@@ -83,7 +83,7 @@ impl Position {
     }
 }
 
-/// Base-data `Health` part (M3). Integer-only; used by minimal combat, which
+/// Base-data `Health` part. Integer-only; used by minimal combat, which
 /// requires a defender to carry this part before [`Attack`] resolves.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
 pub struct Health {
@@ -103,7 +103,7 @@ pub enum DamageSource {
 /// entities by id only — never a `&mut World` — which is what lets the bus
 /// enforce re-entrancy control.
 pub trait Event: 'static {
-    /// Stable name used by diagnostics and (M4) scripts, e.g. `"Move"`.
+    /// Stable name used by diagnostics and tooling scripts, e.g. `"Move"`.
     const NAME: &'static str;
 
     /// The primary entity this event is about. Used for the re-entrancy key
@@ -364,8 +364,8 @@ impl Event for Move {
     }
 }
 
-/// A request for `attacker` to hit `defender`. Minimal combat ([`Attack`]
-/// M3 scope): resolves to `TakeDamage { amount: 1, source: Attack }` when the
+/// A request for `attacker` to hit `defender`. Minimal combat ([`Attack`]):
+/// resolves to `TakeDamage { amount: 1, source: Attack }` when the
 /// defender carries a [`Health`] part; otherwise the attack cancels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Attack {
@@ -411,8 +411,8 @@ impl Event for TakeDamage {
     }
 }
 
-/// Internal event: the start of an actor's turn. **Reserved** for the M3 turn
-/// scheduler; dispatched by the scheduler, observed for AI/renderer hooks.
+/// Internal event: the start of an actor's turn. **Reserved** for the turn
+/// scheduler; dispatched by it, observed for AI/renderer hooks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ActorTurnStart {
     pub actor: Entity,
@@ -426,7 +426,7 @@ impl Event for ActorTurnStart {
     }
 }
 
-/// Internal event: `target` has died. **Reserved** for later milestones;
+/// Internal event: `target` has died. **Reserved** for future use;
 /// dispatched by death/corpse logic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Death {
@@ -554,10 +554,10 @@ impl EventBus {
     }
 }
 
-/// Minimal combat walkthrough (Attack M3 scope, spec §4.4): register an
+/// Minimal combat walkthrough: register an
 /// `Attack` handler that cancels unless the defender has a [`Health`] part;
 /// on a hit it dispatches `TakeDamage { amount: 1, source: Attack }` with no
-/// modifiers. Rich combat is a later milestone.
+/// modifiers. Extended combat is not yet implemented.
 pub fn install_minimal_combat(ctx: &mut SimContext) {
     ctx.register::<Attack>(NORMAL, |ctx, ev| {
         let has_health = ctx
