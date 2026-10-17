@@ -1,4 +1,4 @@
-//! Tessera M2 demo: a data-driven `@` spawned from `[Player]` (a blueprint with
+//! Tessera demo: a data-driven `@` spawned from `[Player]` (a blueprint with
 //! `parts.Render = { tile = "creature.player" }`), drawn from the tile registry.
 //! Edit `data/base/blueprints/` while running and the blueprint library reloads
 //! (new spawns use the new library; existing entities keep their parts).
@@ -62,7 +62,7 @@ struct Content {
     world: World,
 }
 
-/// Build the M2 world: register the engine's known part types, then load the
+/// Build the world: register the engine's known part types, then load the
 /// blueprint set. On any error returns an anyhow error carrying `file + id`
 /// diagnostics from the loader.
 fn build_world(vfs: &DirVfs) -> Result<World> {
@@ -100,7 +100,7 @@ struct App {
     content: Content,
     map: Map,
     /// The live `[Player]` entity, spawned from data on startup and untouched by
-    /// later blueprint reloads (existing entities keep their parts — M2).
+    /// later blueprint reloads (existing entities keep their parts).
     broker: EntityBroker,
     player: hecs::Entity,
     player_pos: (i32, i32),
@@ -262,7 +262,7 @@ fn main() -> Result<()> {
     let args = parse_args()?;
     let content = load_content(&args.data)
         .with_context(|| format!("loading content from {}", args.data.display()))?;
-    // Spawn the player from `[Player]` blueprint data (M2), stamping the engine
+    // Spawn the player from `[Player]` blueprint data, stamping the engine
     // RenderTile component. The single live entity is kept across later reloads.
     let mut broker = EntityBroker::new();
     let player = content

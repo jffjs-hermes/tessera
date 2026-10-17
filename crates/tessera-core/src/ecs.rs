@@ -290,7 +290,7 @@ impl EntityBroker {
     }
 
     /// Spawn an empty entity plus its `PartMap`, returning the single handle
-    /// game code uses for both. Spawning consumes no randomness at M2.
+    /// game code uses for both. Spawning consumes no randomness.
     pub fn spawn(&mut self) -> Entity {
         let entity = self.world.spawn(());
         self.part_maps.insert(entity, PartMap::new());

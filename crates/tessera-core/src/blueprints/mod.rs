@@ -1,6 +1,6 @@
 //! Blueprint loader and library.
 //!
-//! M2 scope (see `docs/specs/m2-entities.md` §2 and §3): load `blueprints/*.toml`
+//! Scope (see `docs/specs/m2-entities.md` §2 and §3): load `blueprints/*.toml`
 //! through the [`Vfs`] in sorted path order, validate the strict schema, then
 //! resolve single-parent inheritance deterministically into a
 //! [`BlueprintLibrary`]. Blueprint text is kept as `toml::Value` per part until
@@ -89,8 +89,8 @@ impl RawBlueprint {
                 },
                 "handlers" => {
                     return Err(invalid(
-                        "`handlers` is reserved (event handlers are M3/M4 scope); \
-                         remove it from this blueprint"
+                        "`handlers` is reserved for event handlers, which are not \
+                         yet supported; remove it from this blueprint"
                             .to_string(),
                     ));
                 }
@@ -279,7 +279,7 @@ impl BlueprintLibrary {
             }
         }
         // Whole-part replacement: a child part with the same name replaces the
-        // parent's (no deep merge at M2).
+        // parent's (no deep merge).
         parts.extend(raw.parts.clone());
 
         resolved.insert(
