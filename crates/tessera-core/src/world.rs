@@ -245,16 +245,15 @@ impl World {
                             name: name.clone(),
                             msg: e.to_string(),
                         })?;
-                    if broker
+                    broker
                         .insert_part(entity, name.clone(), part)
                         .map_err(|e| SpawnError::PartBuild {
                             name: name.clone(),
                             msg: e.to_string(),
                         })
-                        .is_err()
-                    {
-                        broker.despawn(entity).ok();
-                    }
+                        .inspect_err(|_| {
+                            broker.despawn(entity).ok();
+                        })?;
                 }
             }
         }
