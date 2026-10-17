@@ -18,7 +18,7 @@ from prior knowledge, so re-check versions and maintenance status before adoptin
 ## 2. Design principles (borrowed from Caves of Qud)
 
 1. **Blueprints.** Entities are described in data and inherit from each other
-   (`Creature -> Humanoid -> Snapjaw`).
+   (`Creature -> Humanoid -> Goblin`).
 2. **Parts.** An entity is a bag of small components. Mods can add new ones.
 3. **Events.** Parts talk through named events (`BeforeMove`, `TakeDamage`). Any part or script
    can intercept, modify or veto them. This is what produces emergent interactions and makes
@@ -98,15 +98,15 @@ Entities never reference a glyph or sprite directly:
 
 ```toml
 # blueprints
-[Snapjaw]
+[Goblin]
 inherits = "Humanoid"
-parts.Render = { tile = "creature.snapjaw" }
+parts.Render = { tile = "creature.goblin" }
 
 # tiles/ascii.toml
-"creature.snapjaw" = { glyph = "s", fg = "#c8a060" }
+"creature.goblin" = { glyph = "g", fg = "#c8a060" }
 
 # tiles/sprites.toml  (later, optional)
-"creature.snapjaw" = { sprite = "creatures/snapjaw.png", tint = ["#c8a060", "#503820"] }
+"creature.goblin" = { sprite = "creatures/goblin.png", tint = ["#c8a060", "#503820"] }
 ```
 
 - One render path: the renderer draws instanced quads from an atlas. Glyphs are bitmap-font
