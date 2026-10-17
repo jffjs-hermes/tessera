@@ -1,4 +1,5 @@
-//! Minimal grid map for the M1 demo. Replaced by the zone/chunk model in M6.
+//! Minimal grid map for the initial demo. A later zone/chunk model replaces
+//! it.
 
 use crate::tiles::TileRegistry;
 
