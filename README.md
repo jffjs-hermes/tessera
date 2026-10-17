@@ -7,14 +7,21 @@
 A data-driven, scriptable, mod-friendly tile-based roguelike engine in Rust,
 inspired by Caves of Qud. Desktop only (Linux/macOS/Windows; CI builds and tests all three).
 
-**Status:** M0 (scaffold) and M1 (tile renderer) complete. Nothing playable yet.
+**Status:** M0 (scaffold), M1 (tile renderer) and M2 (data-driven entities) complete;
+M3 (typed event bus + energy scheduler wired into the demo) in progress.
 
 ## Run
 
 ```sh
-cargo run -p tessera            # arrow keys / hjklyubn / wasd to move, Esc to quit
+cargo run -p tessera            # arrow keys / hjklyubn / wasd to move, `.`/Space to wait, Esc to quit
+cargo run -p tessera -- --headless 12   # run 12 scripted actions, print final map + event log, exit 0
 cargo run -p tessera -- --help
 ```
+
+Movement goes through the sim's typed event bus and energy scheduler: arrow
+keys and WASD submit a `Move`, `.` or Space submits a `Wait`, and a wall-blocked
+move is cancelled (costs no energy). `--headless <n>` is the display-free smoke
+path CI can run — it prints the final map then the one-event-per-line log.
 
 While it runs, edit `data/base/tiles/ascii.toml` (e.g. change the `creature.player`
 glyph or color) and the window updates immediately. A malformed edit logs a warning

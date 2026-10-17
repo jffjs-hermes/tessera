@@ -2,15 +2,28 @@
 //! `parts.Render = { tile = "creature.player" }`), drawn from the tile registry.
 //! Edit `data/base/blueprints/` while running and the blueprint library reloads
 //! (new spawns use the new library; existing entities keep their parts).
+//!
+//! M3 (see `docs/specs/m3-events-turns.md` §3.2): input is routed through the
+//! event/scheduler harness in [`sim::Sim`]. Arrow keys / WASD move the `@`,
+//! `.` / Space wait; a wall-blocked move is cancelled by an EARLY map-collision
+//! handler (no energy cost). `--headless <n>` runs `n` scripted actions with no
+//! window and prints the final map + event log — the deterministic CI smoke
+//! path. The renderer stays a pure reader: it never dispatches events or
+//! mutates sim state; the redraw on hot reload is unchanged.
+
+mod sim;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use notify::{RecursiveMode, Watcher};
-use tessera_core::ecs::EntityBroker;
+use sim::{PlayerAction, Sim};
+use tessera_core::ecs::{EntityBroker, Part};
+use tessera_core::events::{Health, PART_HEALTH, PART_POSITION, Position};
 use tessera_core::map::Map;
 use tessera_core::tiles::TileRegistry;
+use tessera_core::turns::ActorEnergy;
 use tessera_core::vfs::DirVfs;
 use tessera_core::world::{RenderTile, World};
 use tessera_render::atlas::Atlas;
@@ -33,26 +46,41 @@ enum UserEvent {
 
 struct Args {
     data: PathBuf,
-    /// Exit after this many frames (smoke tests / CI).
+    /// Exit after this many frames (windowed smoke tests).
     frames: Option<u32>,
+    /// Run this many scripted actions headlessly, print final map + log, exit 0.
+    headless: Option<u32>,
 }
 
 fn parse_args() -> Result<Args> {
     let mut data = PathBuf::from("data/base");
     let mut frames = None;
+    let mut headless = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--data" => data = it.next().context("--data needs a path")?.into(),
             "--frames" => frames = Some(it.next().context("--frames needs a number")?.parse()?),
+            "--headless" => {
+                headless = Some(it.next().context("--headless needs a number")?.parse()?)
+            }
             "-h" | "--help" => {
-                println!("tessera [--data <dir>] [--frames <n>]");
+                println!(
+                    "tessera [--data <dir>] [--frames <n>] [--headless <n>]\n\
+                     \n\
+                     Interactive: arrow keys / WASD / hjklyubn to move, `.` or Space = wait, Esc to quit.\n\
+                     `--headless <n>`: run n scripted actions with no window, print final map + event log, exit 0."
+                );
                 std::process::exit(0);
             }
             other => anyhow::bail!("unknown argument {other:?}"),
         }
     }
-    Ok(Args { data, frames })
+    Ok(Args {
+        data,
+        frames,
+        headless,
+    })
 }
 
 struct Content {
@@ -62,9 +90,10 @@ struct Content {
     world: World,
 }
 
-/// Build the world: register the engine's known part types, then load the
-/// blueprint set. On any error returns an anyhow error carrying `file + id`
-/// diagnostics from the loader.
+/// Build the world: register the engine's known part types and the M3 dynamic
+/// parts (Position / ActorEnergy / Health), then load the blueprint set. On any
+/// error returns an anyhow error carrying `file + id` diagnostics from the
+/// loader.
 fn build_world(vfs: &DirVfs) -> Result<World> {
     let mut world = World::new();
     // Engine component seam: `parts.Render` deserializes into a `RenderTile`
@@ -72,6 +101,17 @@ fn build_world(vfs: &DirVfs) -> Result<World> {
     world
         .register_component::<RenderTile>("Render")
         .map_err(|e| anyhow::anyhow!("registering engine part 'Render': {e}"))?;
+    // M3 dynamic parts (§3.2 / §5 base data): Position is the event-facing
+    // grid cell, ActorEnergy drives the scheduler, Health backs minimal combat.
+    world
+        .register_part::<Position>(PART_POSITION)
+        .map_err(|e| anyhow::anyhow!("registering part 'Position': {e}"))?;
+    world
+        .register_part::<ActorEnergy>(tessera_core::turns::PART_ENERGY)
+        .map_err(|e| anyhow::anyhow!("registering part 'ActorEnergy': {e}"))?;
+    world
+        .register_part::<Health>(PART_HEALTH)
+        .map_err(|e| anyhow::anyhow!("registering part 'Health': {e}"))?;
     world
         .load(vfs)
         .map_err(|e| anyhow::anyhow!("loading blueprints: {e}"))?;
@@ -92,25 +132,40 @@ fn load_content(data: &std::path::Path) -> Result<Content> {
     })
 }
 
+/// Spawn the `[Player]` in a fresh broker and build the sim harness around it.
+fn build_sim(world: &World, map: Map) -> Result<Sim> {
+    let mut broker = EntityBroker::new();
+    let player = world
+        .spawn_blueprint(PLAYER_BLUEPRINT, &mut broker)
+        .with_context(|| format!("spawning {PLAYER_BLUEPRINT:?}"))?;
+    // The broker owns Position as a dynamic part; the sim reads it from here.
+    // Seed the player's spawn Position explicitly so movement is well-defined
+    // even on first render before any key is pressed.
+    broker.insert_part(
+        player,
+        PART_POSITION,
+        Box::new(Position { x: 2, y: 2 }) as Box<dyn Part>,
+    )?;
+    Ok(Sim::new(broker, map, player))
+}
+
 struct App {
     args: Args,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     _watcher: Option<notify::RecommendedWatcher>,
     content: Content,
-    map: Map,
-    /// The live `[Player]` entity, spawned from data on startup and untouched by
-    /// later blueprint reloads (existing entities keep their parts).
-    broker: EntityBroker,
-    player: hecs::Entity,
-    player_pos: (i32, i32),
+    sim: Sim,
     frames_drawn: u32,
     atlas_dirty: bool,
 }
 
 impl App {
+    /// Build the draw cells by reading sim + map state only (pure reader). It
+    /// never dispatches events and never mutates sim state.
     fn build_cells(&self) -> Vec<Cell> {
-        let mut cells = Vec::with_capacity(self.map.width * self.map.height);
+        let map = self.sim.map();
+        let mut cells = Vec::with_capacity(map.width * map.height);
         let mut push = |x: usize, y: usize, id: &str, under: Option<&tessera_core::tiles::Tile>| {
             let t = self.content.tiles.get(id);
             let tessera_core::tiles::TileVisual::Glyph { ch } = t.visual;
@@ -128,16 +183,12 @@ impl App {
         };
         // Read the player's tile id from its live RenderTile each frame so the
         // draw path stays data-driven (spawned from `[Player]`, not hardcoded).
-        let player_tile = self
-            .broker
-            .world()
-            .get::<&RenderTile>(self.player)
-            .ok()
-            .map_or_else(|| "creature.player.missing".to_string(), |r| r.tile.clone());
-        for y in 0..self.map.height {
-            for x in 0..self.map.width {
-                let terrain = self.map.tile_id(x, y);
-                if (x as i32, y as i32) == self.player_pos {
+        let player_tile = self.sim.player_tile();
+        let (px, py) = self.sim.position();
+        for y in 0..map.height {
+            for x in 0..map.width {
+                let terrain = map.tile_id(x, y);
+                if (x as i32, y as i32) == (px, py) {
                     let under = self.content.tiles.get(terrain).clone();
                     push(x, y, &player_tile, Some(&under));
                 } else {
@@ -146,13 +197,6 @@ impl App {
             }
         }
         cells
-    }
-
-    fn try_move(&mut self, dx: i32, dy: i32) {
-        let (nx, ny) = (self.player_pos.0 + dx, self.player_pos.1 + dy);
-        if self.map.is_walkable(nx, ny) {
-            self.player_pos = (nx, ny);
-        }
     }
 
     fn reload(&mut self) {
@@ -205,28 +249,37 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                let (dx, dy) = match &event.logical_key {
+                // Arrow keys / WASD (and the existing hjklyubn) map to a Move,
+                // `.` / Space map to Wait, per spec §3.2. The action is
+                // submitted to the sim, which runs the scheduler until the
+                // player's turn and dispatches the event.
+                let action = match &event.logical_key {
                     Key::Named(NamedKey::Escape) => return el.exit(),
-                    Key::Named(NamedKey::ArrowLeft) => (-1, 0),
-                    Key::Named(NamedKey::ArrowRight) => (1, 0),
-                    Key::Named(NamedKey::ArrowUp) => (0, -1),
-                    Key::Named(NamedKey::ArrowDown) => (0, 1),
+                    Key::Named(NamedKey::ArrowLeft) => Some(PlayerAction::Move { dx: -1, dy: 0 }),
+                    Key::Named(NamedKey::ArrowRight) => Some(PlayerAction::Move { dx: 1, dy: 0 }),
+                    Key::Named(NamedKey::ArrowUp) => Some(PlayerAction::Move { dx: 0, dy: -1 }),
+                    Key::Named(NamedKey::ArrowDown) => Some(PlayerAction::Move { dx: 0, dy: 1 }),
                     Key::Character(c) => match c.as_str() {
-                        "h" | "a" => (-1, 0),
-                        "l" | "d" => (1, 0),
-                        "k" | "w" => (0, -1),
-                        "j" | "s" => (0, 1),
-                        "y" => (-1, -1),
-                        "u" => (1, -1),
-                        "b" => (-1, 1),
-                        "n" => (1, 1),
-                        _ => return,
+                        "h" | "a" => Some(PlayerAction::Move { dx: -1, dy: 0 }),
+                        "l" | "d" => Some(PlayerAction::Move { dx: 1, dy: 0 }),
+                        "k" | "w" => Some(PlayerAction::Move { dx: 0, dy: -1 }),
+                        "j" | "s" => Some(PlayerAction::Move { dx: 0, dy: 1 }),
+                        "y" => Some(PlayerAction::Move { dx: -1, dy: -1 }),
+                        "u" => Some(PlayerAction::Move { dx: 1, dy: -1 }),
+                        "b" => Some(PlayerAction::Move { dx: -1, dy: 1 }),
+                        "n" => Some(PlayerAction::Move { dx: 1, dy: 1 }),
+                        "." | " " => Some(PlayerAction::Wait),
+                        _ => None,
                     },
-                    _ => return,
+                    _ => None,
                 };
-                self.try_move(dx, dy);
-                if let Some(w) = &self.window {
-                    w.request_redraw();
+                if let Some(action) = action {
+                    if let Err(e) = self.sim.submit_action(action) {
+                        tracing::warn!("submit_action failed: {e:#}");
+                    }
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -262,17 +315,23 @@ fn main() -> Result<()> {
     let args = parse_args()?;
     let content = load_content(&args.data)
         .with_context(|| format!("loading content from {}", args.data.display()))?;
-    // Spawn the player from `[Player]` blueprint data, stamping the engine
-    // RenderTile component. The single live entity is kept across later reloads.
-    let mut broker = EntityBroker::new();
-    let player = content
-        .world
-        .spawn_blueprint(PLAYER_BLUEPRINT, &mut broker)
-        .with_context(|| format!("spawning {PLAYER_BLUEPRINT:?}"))?;
     let map = Map::demo(GRID_W as usize, GRID_H as usize);
     for id in map.missing_tile_ids(&content.tiles) {
         tracing::warn!("map uses tile id {id:?} with no definition (will draw as '?')");
     }
+
+    // Headless path: no window, no event loop, no winit. Deterministic output.
+    if let Some(n) = args.headless {
+        let mut sim = build_sim(&content.world, map)?;
+        let map_text = sim.run_headless(&content.tiles, n);
+        print!("{map_text}");
+        for line in sim.log() {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+
+    let sim = build_sim(&content.world, map)?;
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -303,10 +362,7 @@ fn main() -> Result<()> {
         renderer: None,
         _watcher: watcher,
         content,
-        map,
-        broker,
-        player,
-        player_pos: (2, 2),
+        sim,
         frames_drawn: 0,
         atlas_dirty: true,
     };
