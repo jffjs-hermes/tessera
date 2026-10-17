@@ -598,6 +598,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hecs"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7602e3af4f3f6387532d73a4a0f4d1ee2e8ee3c28078ca657126770aa3a9aa4"
+dependencies = [
+ "foldhash",
+ "hashbrown 0.17.1",
+ "spin",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1785,6 +1796,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "spin"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0134f9043ed38b087ac4f7d4af44c79e2c9e5094421fe3164f435ce585953b10"
+
+[[package]]
 name = "spirv"
 version = "0.4.0+sdk-1.4.341.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1866,6 +1883,7 @@ dependencies = [
 name = "tessera-core"
 version = "0.1.0"
 dependencies = [
+ "hecs",
  "rand_chacha",
  "rand_core",
  "serde",
