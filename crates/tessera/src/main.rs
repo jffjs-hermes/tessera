@@ -69,7 +69,9 @@ fn build_world(vfs: &DirVfs) -> Result<World> {
     let mut world = World::new();
     // Engine component seam: `parts.Render` deserializes into a `RenderTile`
     // hecs component (tile id resolved against the atlas/tile registry at draw).
-    world.register_component::<RenderTile>("Render");
+    world
+        .register_component::<RenderTile>("Render")
+        .map_err(|e| anyhow::anyhow!("registering engine part 'Render': {e}"))?;
     world
         .load(vfs)
         .map_err(|e| anyhow::anyhow!("loading blueprints: {e}"))?;

@@ -14,15 +14,13 @@ use std::collections::BTreeMap;
 
 use toml::Value;
 
+use crate::ecs::{Part, PartRegistry, PartTypeId};
 use crate::vfs::Vfs;
 
 mod error;
-mod part;
 
 pub use error::BlueprintError;
 pub use error::LoadFail;
-pub use part::Part;
-pub use part::PartRegistry;
 
 /// A blueprint definition as collected from a single file, before inheritance.
 #[derive(Debug, Clone)]
@@ -64,7 +62,7 @@ impl RawBlueprint {
                         for (pname, pval) in t {
                             match pval {
                                 Value::Table(_) => {
-                                    if !registry.contains(&pname) {
+                                    if !registry.contains(&PartTypeId::new(pname.clone())) {
                                         return Err(invalid(format!(
                                             "unknown part '{pname}': no PartRegistry entry \
                                              (mod-defined parts must be registered by the pack \
@@ -319,12 +317,12 @@ impl BlueprintLibrary {
                 part: part_name.to_string(),
             })?;
         registry
-            .parse(part_name, value)
-            .map_err(|msg| BlueprintError::BadPart {
+            .build(&PartTypeId::new(part_name), value)
+            .map_err(|e| BlueprintError::BadPart {
                 path: bp.file.clone(),
                 id: id.to_string(),
                 part: part_name.to_string(),
-                msg,
+                msg: e.to_string(),
             })
     }
 }
@@ -345,6 +343,7 @@ fn type_name(v: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ecs::{PartError, StorageClass};
     use crate::vfs::MemVfs;
     use serde::Deserialize;
 
@@ -352,12 +351,6 @@ mod tests {
     #[serde(deny_unknown_fields)]
     struct RenderPart {
         tile: String,
-    }
-
-    impl Part for RenderPart {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
     }
 
     #[derive(Debug, Deserialize, PartialEq, Clone, Default)]
@@ -369,16 +362,39 @@ mod tests {
         agility: u8,
     }
 
-    impl Part for StatsPart {
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
+    /// Register `T` under `name` as a `Dynamic` part using a serde factory.
+    fn register<T>(r: &mut PartRegistry, name: &str) -> Result<(), PartError>
+    where
+        T: serde::de::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
+    {
+        r.register(
+            PartTypeId::new(name),
+            StorageClass::Dynamic,
+            build_factory::<T>,
+        )
+    }
+
+    /// A `PartFactory` deserializing `toml::Value` into `T` (captures nothing,
+    /// so it is a usable `fn` pointer).
+    fn build_factory<T>(value: &Value) -> Result<Box<dyn Part>, PartError>
+    where
+        T: serde::de::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
+    {
+        let t: T =
+            value
+                .clone()
+                .try_into()
+                .map_err(|e: toml::de::Error| PartError::BuildFailed {
+                    name: std::any::type_name::<T>().to_string(),
+                    msg: e.to_string(),
+                })?;
+        Ok(Box::new(t))
     }
 
     fn registry() -> PartRegistry {
         let mut r = PartRegistry::new();
-        r.register::<RenderPart>("Render");
-        r.register::<StatsPart>("Stats");
+        register::<RenderPart>(&mut r, "Render").unwrap();
+        register::<StatsPart>(&mut r, "Stats").unwrap();
         r
     }
 
@@ -415,7 +431,7 @@ parts.Stats = { strength = 18, agility = 6 }
         // Humanoid gets its own parts.
         let h = lib.part_typed(&registry(), "Humanoid", "Stats").unwrap();
         assert_eq!(
-            h.as_any().downcast_ref::<StatsPart>(),
+            h.as_ref().as_any().downcast_ref::<StatsPart>(),
             Some(&StatsPart {
                 strength: 10,
                 agility: 10
@@ -425,14 +441,14 @@ parts.Stats = { strength = 18, agility = 6 }
         // Goblin inherits Humanoid's parts and overrides both.
         let g_render = lib.part_typed(&registry(), "Goblin", "Render").unwrap();
         assert_eq!(
-            g_render.as_any().downcast_ref::<RenderPart>(),
+            g_render.as_ref().as_any().downcast_ref::<RenderPart>(),
             Some(&RenderPart {
                 tile: "creature.goblin".into()
             })
         );
         let g_stats = lib.part_typed(&registry(), "Goblin", "Stats").unwrap();
         assert_eq!(
-            g_stats.as_any().downcast_ref::<StatsPart>(),
+            g_stats.as_ref().as_any().downcast_ref::<StatsPart>(),
             Some(&StatsPart {
                 strength: 18,
                 agility: 6
@@ -489,7 +505,7 @@ parts.Render = { tile = "child" }
         assert_eq!(render.get("tile").and_then(|v| v.as_str()), Some("hum"));
         let s = lib.part_typed(&r, "Goblin", "Stats").unwrap();
         assert_eq!(
-            s.as_any().downcast_ref::<StatsPart>(),
+            s.as_ref().as_any().downcast_ref::<StatsPart>(),
             Some(&StatsPart {
                 strength: 5,
                 agility: 0
@@ -541,7 +557,10 @@ parts.Render = { tile = "child" }
         );
         // Load succeeds (payload text is kept raw); the seam catches the bad part.
         let lib = BlueprintLibrary::load(&v, &r).unwrap();
-        let err = lib.part_typed(&r, "B", "Stats").unwrap_err().to_string();
+        let err = match lib.part_typed(&r, "B", "Stats") {
+            Ok(_) => panic!("bad payload must error"),
+            Err(e) => e.to_string(),
+        };
         assert!(err.contains("strength"), "{err}");
         assert!(err.contains("'B'"), "{err}");
         assert!(err.contains("blueprints/t.toml"), "{err}");

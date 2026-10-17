@@ -158,6 +158,8 @@ impl PartMap {
 pub enum PartError {
     #[error("unknown part type '{0}'")]
     UnknownPartType(PartTypeId),
+    #[error("part type '{0}' is already registered; registering the same name twice is an error")]
+    DuplicatePartType(PartTypeId),
     #[error("building part '{name}' failed: {msg}")]
     BuildFailed { name: String, msg: String },
     #[error("entity {0:?} does not exist")]
@@ -165,18 +167,41 @@ pub enum PartError {
 }
 
 /// A factory that builds one concrete part instance from its raw TOML payload
-/// (the table under `parts.<Name>` in a blueprint). The blueprint loader calls
-/// [`PartRegistry::build`] with that payload; engine-known parts register here
-/// at startup and mods add entries through the same registry.
+/// (the table under `parts.<Name>` in a blueprint). Engine parts register here
+/// at startup; mods add entries through the same registry.
 pub type PartFactory = fn(&toml::Value) -> Result<Box<dyn Part>, PartError>;
+
+/// Where a registered part is stored on a spawned entity.
+///
+/// Each part name declares exactly one storage class at registration
+/// (single source of truth); routing on spawn uses this declaration, never
+/// which spawners happen to be registered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StorageClass {
+    /// An engine-native component, stamped into the `hecs` world (fast
+    /// archetype queries for the hot render/sim paths).
+    Component,
+    /// A mod-defined / dynamic part, stored boxed in the entity's `PartMap`.
+    Dynamic,
+}
 
 /// Registry of the part types the engine knows about, keyed by part name.
 ///
-/// Built at startup from engine-known parts; mods add entries through the same
-/// registry. Iteration is in sorted name order.
+/// This is the *single source of truth* for part names: each name is declared
+/// once, together with its [`StorageClass`] and a factory that deserializes a
+/// TOML payload into the concrete part. The blueprint loader validates content
+/// against this same registry. Iteration is in sorted name order.
 #[derive(Default)]
 pub struct PartRegistry {
-    factories: BTreeMap<PartTypeId, PartFactory>,
+    /// Part name → its declared factory and storage class.
+    entries: BTreeMap<PartTypeId, PartEntry>,
+}
+
+/// One declared part type.
+#[derive(Clone, Copy)]
+struct PartEntry {
+    storage: StorageClass,
+    factory: PartFactory,
 }
 
 impl PartRegistry {
@@ -184,46 +209,65 @@ impl PartRegistry {
         Self::default()
     }
 
-    /// Register a factory for `id`, returning the previously registered
-    /// factory under that name, if any.
+    /// Register a factory for `id` with a declared `storage` class.
+    ///
+    /// Registering the same name twice is an error
+    /// ([`PartError::DuplicatePartType`]): there must be exactly one declared
+    /// definition per part name.
     pub fn register(
         &mut self,
         id: impl Into<PartTypeId>,
+        storage: StorageClass,
         factory: PartFactory,
-    ) -> Option<PartFactory> {
-        self.factories.insert(id.into(), factory)
+    ) -> Result<(), PartError> {
+        let id = id.into();
+        if self.entries.contains_key(&id) {
+            return Err(PartError::DuplicatePartType(id));
+        }
+        self.entries.insert(id, PartEntry { storage, factory });
+        Ok(())
+    }
+
+    /// The declared storage class for `id`, if registered.
+    pub fn storage(&self, id: &PartTypeId) -> Option<StorageClass> {
+        self.entries.get(id).map(|e| e.storage)
     }
 
     pub fn get(&self, id: &PartTypeId) -> Option<&PartFactory> {
-        self.factories.get(id)
+        self.entries.get(id).map(|e| &e.factory)
     }
 
     pub fn contains(&self, id: &PartTypeId) -> bool {
-        self.factories.contains_key(id)
+        self.entries.contains_key(id)
     }
 
     /// Build a part of the registered type `id` from `config`. An unregistered
     /// name is an error — unknown part names in content must fail loudly, never
     /// be silently ignored.
     pub fn build(&self, id: &PartTypeId, config: &toml::Value) -> Result<Box<dyn Part>, PartError> {
-        let factory = self
-            .factories
+        let entry = self
+            .entries
             .get(id)
             .ok_or_else(|| PartError::UnknownPartType(id.clone()))?;
-        factory(config)
+        (entry.factory)(config)
     }
 
     /// Iterate `(name, factory)` pairs in sorted name order.
     pub fn iter(&self) -> impl Iterator<Item = (&PartTypeId, &PartFactory)> {
-        self.factories.iter()
+        self.entries.iter().map(|(k, e)| (k, &e.factory))
+    }
+
+    /// Iterate `(name, storage)` pairs in sorted name order.
+    pub fn iter_storage(&self) -> impl Iterator<Item = (&PartTypeId, StorageClass)> {
+        self.entries.iter().map(|(k, e)| (k, e.storage))
     }
 
     pub fn len(&self) -> usize {
-        self.factories.len()
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.factories.is_empty()
+        self.entries.is_empty()
     }
 }
 
@@ -402,7 +446,8 @@ mod tests {
     fn registry_builds_typed_part_from_toml() {
         let mut reg = PartRegistry::new();
         let stats = PartTypeId::new("Stats");
-        reg.register(stats.clone(), build_stats);
+        reg.register(stats.clone(), StorageClass::Dynamic, build_stats)
+            .unwrap();
         let cfg: toml::Value = toml::from_str("strength = 18\nagility = 6").unwrap();
         let part = reg.build(&stats, &cfg).unwrap();
         // Downcast through `&dyn Part` (calling `as_any` directly on the Box
@@ -415,6 +460,41 @@ mod tests {
                 agility: 6
             }
         );
+    }
+
+    #[test]
+    fn registry_records_declared_storage_class() {
+        let mut reg = PartRegistry::new();
+        reg.register(
+            PartTypeId::new("Render"),
+            StorageClass::Component,
+            build_stats,
+        )
+        .unwrap();
+        reg.register(PartTypeId::new("Stats"), StorageClass::Dynamic, build_stats)
+            .unwrap();
+        assert_eq!(
+            reg.storage(&PartTypeId::new("Render")),
+            Some(StorageClass::Component)
+        );
+        assert_eq!(
+            reg.storage(&PartTypeId::new("Stats")),
+            Some(StorageClass::Dynamic)
+        );
+        assert_eq!(reg.storage(&PartTypeId::new("Nope")), None);
+    }
+
+    #[test]
+    fn registry_rejects_duplicate_registration() {
+        let mut reg = PartRegistry::new();
+        reg.register(PartTypeId::new("Stats"), StorageClass::Dynamic, build_stats)
+            .unwrap();
+        let err = reg
+            .register(PartTypeId::new("Stats"), StorageClass::Dynamic, build_stats)
+            .unwrap_err();
+        assert!(matches!(err, PartError::DuplicatePartType(id) if id.as_str() == "Stats"));
+        // The original entry is untouched.
+        assert_eq!(reg.len(), 1);
     }
 
     #[test]

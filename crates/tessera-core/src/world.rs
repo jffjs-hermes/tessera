@@ -24,8 +24,8 @@ use hecs::Entity;
 use thiserror::Error;
 use toml::Value;
 
-use crate::blueprints::{BlueprintLibrary, Part as LoaderPart, PartRegistry as LoaderRegistry};
-use crate::ecs::{EntityBroker, PartError, PartRegistry, PartTypeId};
+use crate::blueprints::BlueprintLibrary;
+use crate::ecs::{EntityBroker, PartError, PartRegistry, PartTypeId, StorageClass};
 use crate::vfs::Vfs;
 
 /// An engine-native component type the world knows how to stamp into `hecs`
@@ -48,28 +48,6 @@ pub struct RenderTile {
 pub type ComponentSpawner =
     Box<dyn Fn(&mut hecs::World, Entity, &Value) -> Result<(), SpawnError> + Send + Sync + 'static>;
 
-/// Thin deserializable wrapper so any `DeserializeOwned` registration type can
-/// satisfy the loader registry's `Part` bound for *validation* purposes. The
-/// loader only needs the name to be known; spawning never uses this box.
-#[derive(Debug)]
-#[allow(dead_code)]
-struct LoaderSeal<C>(C);
-
-impl<C: Send + Sync + 'static> LoaderPart for LoaderSeal<C>
-where
-    C: std::fmt::Debug,
-{
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-impl<'de, C: serde::Deserialize<'de>> serde::Deserialize<'de> for LoaderSeal<C> {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        C::deserialize(d).map(LoaderSeal)
-    }
-}
-
 /// Failure modes of [`World::spawn_blueprint`].
 #[derive(Debug, Error)]
 pub enum SpawnError {
@@ -77,6 +55,8 @@ pub enum SpawnError {
     LibraryPoisoned,
     #[error("unknown blueprint id '{0}'")]
     UnknownBlueprint(String),
+    #[error("part '{0}' is not registered with the world; loader rejected the blueprint")]
+    UnregisteredPart(String),
     #[error("engine component from part '{name}' failed to spawn: {msg}")]
     ComponentSpawn { name: String, msg: String },
     #[error("part '{name}' failed to build: {msg}")]
@@ -102,12 +82,14 @@ impl SpawnError {
 pub struct World {
     /// Resolved blueprints, swapped as a whole on hot reload.
     library: Arc<RwLock<BlueprintLibrary>>,
-    /// Part names the loader may accept (validation registry for load/reload).
-    loader_registry: LoaderRegistry,
-    /// Part name → engine-component spawner (stamped into `hecs`).
+    /// Single source of truth for part names: name → declared [`StorageClass`]
+    /// and factory. The blueprint loader validates content against exactly this
+    /// registry.
+    registry: PartRegistry,
+    /// Part name → engine-component spawner (stamped into `hecs`). Only for
+    /// names declared [`StorageClass::Component`] in [`Self::registry`]; kept
+    /// here because the spawner's `SpawnError` lives in this module.
     spawners: BTreeMap<String, ComponentSpawner>,
-    /// Part name → factory producing the dynamic parts stored in a PartMap.
-    parts: PartRegistry,
 }
 
 impl Default for World {
@@ -132,14 +114,13 @@ where
 }
 
 impl World {
-    /// An empty world (empty library + empty registries). Call [`Self::load`]
+    /// An empty world (empty library + empty registry). Call [`Self::load`]
     /// after registering engine components and parts to populate content.
     pub fn new() -> Self {
         Self {
             library: Arc::new(RwLock::new(BlueprintLibrary::new())),
-            loader_registry: LoaderRegistry::new(),
+            registry: PartRegistry::new(),
             spawners: BTreeMap::new(),
-            parts: PartRegistry::new(),
         }
     }
 
@@ -148,13 +129,19 @@ impl World {
     /// TOML payload with serde defaults; unknown payload fields are rejected by
     /// the type's own `#[serde(deny_unknown_fields)]`.
     ///
-    /// Also registers `name` in the loader registry so blueprints using it load
-    /// (unknown part names are a load error).
-    pub fn register_component<C>(&mut self, name: &'static str)
+    /// Declares `name` as a [`StorageClass::Component`] part in the single
+    /// registry (the same one the blueprint loader validates against), so the
+    /// name is declared exactly once. Registering an already-registered name is
+    /// an error.
+    pub fn register_component<C>(&mut self, name: &'static str) -> Result<(), PartError>
     where
         C: serde::de::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
     {
-        self.loader_registry.register::<LoaderSeal<C>>(name);
+        self.registry.register(
+            PartTypeId::new(name),
+            StorageClass::Component,
+            build_dynamic_part::<C>,
+        )?;
         let spawner: ComponentSpawner = {
             Box::new(
                 move |world: &mut hecs::World, entity: Entity, value: &Value| {
@@ -169,19 +156,24 @@ impl World {
             )
         };
         self.spawners.insert(name.to_string(), spawner);
+        Ok(())
     }
 
     /// Register a dynamic part `C` stored in each spawned entity's `PartMap`
-    /// (mod-defined parts; for engine components use [`Self::register_component`]).
-    /// Registers the name in both the loader registry and the runtime part
-    /// registry so content and spawning both accept it.
-    pub fn register_part<C>(&mut self, name: &'static str)
+    /// (mod-defined parts; for engine components use
+    /// [`Self::register_component`]). Declares `name` as a
+    /// [`StorageClass::Dynamic`] part in the single registry (the same one the
+    /// blueprint loader validates against) so the name is declared exactly
+    /// once; registering an already-registered name is an error.
+    pub fn register_part<C>(&mut self, name: &'static str) -> Result<(), PartError>
     where
         C: serde::de::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
     {
-        self.loader_registry.register::<LoaderSeal<C>>(name);
-        self.parts
-            .register(PartTypeId::new(name), build_dynamic_part::<C>);
+        self.registry.register(
+            PartTypeId::new(name),
+            StorageClass::Dynamic,
+            build_dynamic_part::<C>,
+        )
     }
 
     /// Load (or reload) the blueprint set from the vfs, atomically swapping the
@@ -192,7 +184,7 @@ impl World {
     /// Content-only by construction: this touches only the shared library, never
     /// `SimRng` or existing entities.
     pub fn load(&self, vfs: &dyn Vfs) -> Result<(), crate::blueprints::LoadFail> {
-        let fresh = BlueprintLibrary::load(vfs, &self.loader_registry)?;
+        let fresh = BlueprintLibrary::load(vfs, &self.registry)?;
         let mut guard = self.library.write().map_err(|_| {
             crate::blueprints::LoadFail::single(crate::blueprints::BlueprintError::Io {
                 path: "blueprints".into(),
@@ -229,22 +221,26 @@ impl World {
 
         let entity = broker.spawn();
         for (name, payload) in &blueprint.parts {
-            match self.spawners.get(name) {
-                Some(spawner) => {
+            let part_id = PartTypeId::new(name.clone());
+            match self.registry.storage(&part_id) {
+                Some(StorageClass::Component) => {
+                    let spawner = self
+                        .spawners
+                        .get(name)
+                        .ok_or_else(|| SpawnError::UnregisteredPart(name.clone()))?;
                     spawner(broker.world_mut(), entity, payload).inspect_err(|_| {
                         // Roll back the partially-built entity so a failed spawn leaves
                         // no half-stamped husk behind.
                         broker.despawn(entity).ok();
-                    })?
+                    })?;
                 }
-                None => {
-                    let part = self
-                        .parts
-                        .build(&PartTypeId::new(name.clone()), payload)
-                        .map_err(|e| SpawnError::PartBuild {
+                Some(StorageClass::Dynamic) => {
+                    let part = self.registry.build(&part_id, payload).map_err(|e| {
+                        SpawnError::PartBuild {
                             name: name.clone(),
                             msg: e.to_string(),
-                        })?;
+                        }
+                    })?;
                     broker
                         .insert_part(entity, name.clone(), part)
                         .map_err(|e| SpawnError::PartBuild {
@@ -254,6 +250,13 @@ impl World {
                         .inspect_err(|_| {
                             broker.despawn(entity).ok();
                         })?;
+                }
+                None => {
+                    // Reachable only if the blueprint library escaped loader
+                    // validation (it validates every part name against the
+                    // registry). Fail closed rather than silently dropping.
+                    broker.despawn(entity).ok();
+                    return Err(SpawnError::UnregisteredPart(name.clone()));
                 }
             }
         }
@@ -304,8 +307,8 @@ parts.Stats  = { strength = 18, agility = 6 }
 
     fn world(vfs: &MemVfs) -> World {
         let mut w = World::new();
-        w.register_component::<RenderTile>("Render");
-        w.register_part::<Stats>("Stats");
+        w.register_component::<RenderTile>("Render").unwrap();
+        w.register_part::<Stats>("Stats").unwrap();
         w.load(vfs).expect("shipable base content loads");
         w
     }
@@ -363,6 +366,107 @@ parts.Stats  = { strength = 18, agility = 6 }
     }
 
     #[test]
+    fn registered_part_names_have_storage_class_and_loader_accepts_them() {
+        let vfs = creatures();
+        let w = world(&vfs);
+        // The same single registry the loader validates against must declare a
+        // storage class for every part name it accepts.
+        assert_eq!(w.registry.len(), 2);
+        for (id, storage) in w.registry.iter_storage() {
+            assert!(
+                matches!(storage, StorageClass::Component | StorageClass::Dynamic),
+                "part '{id}' must have a declared storage class"
+            );
+        }
+        assert_eq!(
+            w.registry.storage(&PartTypeId::new("Render")),
+            Some(StorageClass::Component)
+        );
+        assert_eq!(
+            w.registry.storage(&PartTypeId::new("Stats")),
+            Some(StorageClass::Dynamic)
+        );
+        // The loader accepted every part name used in content (load succeeded
+        // above), confirming registry and loader agree.
+        let lib = w.library().read().unwrap();
+        for part_name in lib.get("Player").unwrap().part_names() {
+            assert!(
+                w.registry.contains(&PartTypeId::new(part_name.clone())),
+                "loader accepted '{part_name}' but it is not in the registry"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_registration_is_an_error() {
+        let mut w = World::new();
+        w.register_component::<RenderTile>("Render").unwrap();
+        // Same name re-registered as a component -> error.
+        let err = w.register_component::<Stats>("Render").unwrap_err();
+        assert!(matches!(err, PartError::DuplicatePartType(id) if id.as_str() == "Render"));
+        // Same name re-registered with a different storage class -> error.
+        let err = w.register_part::<Stats>("Render").unwrap_err();
+        assert!(matches!(err, PartError::DuplicatePartType(id) if id.as_str() == "Render"));
+        // The original entry is intact.
+        assert_eq!(w.registry.len(), 1);
+        assert_eq!(
+            w.registry.storage(&PartTypeId::new("Render")),
+            Some(StorageClass::Component)
+        );
+    }
+
+    #[test]
+    fn engine_name_spawns_to_hecs_not_partmap_and_dynamic_to_partmap() {
+        let vfs = creatures();
+        let w = world(&vfs);
+        let mut broker = EntityBroker::new();
+
+        let e = w.spawn_blueprint("Player", &mut broker).unwrap();
+
+        // Engine component name ("Render") went to hecs, not PartMap.
+        assert!(broker.world().get::<&RenderTile>(e).is_ok());
+        let render_id = PartTypeId::new("Render");
+        assert!(
+            !broker.part_map(e).unwrap().contains(&render_id),
+            "engine component must not land in the PartMap"
+        );
+
+        // Dynamic name ("Stats") went to PartMap, not hecs.
+        assert!(
+            broker
+                .typed_part::<Stats>(e, &PartTypeId::new("Stats"))
+                .is_some()
+        );
+        // Stats has no hecs-typed component — assert via part_map only (ecs
+        // world has no Stats component type at this layer).
+        assert!(
+            broker
+                .part_map(e)
+                .unwrap()
+                .contains(&PartTypeId::new("Stats"))
+        );
+    }
+
+    #[test]
+    fn blueprint_with_unregistered_name_is_a_load_error() {
+        // A part name that is not registered must fail load (fail-closed), not
+        // be silently dropped.
+        let v = MemVfs::new().with(
+            "blueprints/t.toml",
+            r##"[B]
+parts.Throwable = { x = 1 }
+"##,
+        );
+        let mut w = World::new();
+        w.register_component::<RenderTile>("Render").unwrap();
+        let err = w.load(&v).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown part 'Throwable'"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn spawn_unknown_id_and_bad_part_fail_closed() {
         let vfs = creatures();
         let w = world(&vfs);
@@ -385,7 +489,7 @@ parts.Render = { tile = 42 }
         // payload: Render requires a String tile; an int must fail spawn. But
         // load only stores text (kept raw), so it must succeed; spawn fails.
         let mut w2 = World::new();
-        w2.register_component::<RenderTile>("Render");
+        w2.register_component::<RenderTile>("Render").unwrap();
         w2.load(&bad).unwrap();
         let e = w2.spawn_blueprint("B", &mut broker).unwrap_err();
         assert!(matches!(e, SpawnError::ComponentSpawn { .. }), "{e}");
