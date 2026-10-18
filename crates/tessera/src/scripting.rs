@@ -4,8 +4,8 @@
 //!
 //! The broker is shared via `Arc<RwLock<EntityBroker>>` (the same handle the
 //! [`SimContext`] was built with), so script snapshots and native handlers
-//! observe the *same* live entity state — the "one dispatch path" seam
-//! (§9.1). Entity ids cross the boundary as `Entity::to_bits().get()` values
+//! observe the *same* live entity state — the "one dispatch path" seam.
+//! Entity ids cross the boundary as `Entity::to_bits().get()` values
 //! and are recovered with [`hecs::Entity::from_bits`], so no side table is
 //! needed.
 //!

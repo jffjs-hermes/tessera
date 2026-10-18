@@ -1,9 +1,9 @@
-//! Focused headless tests for the script runtime seam (spec §10 items that
-//! this card owns: 1, 2, 3, 4, 6, 7, 8, 10, 11, 13). Each asserts behavior,
-//! not source text.
+//! Focused headless tests for the script runtime seam: deterministic
+//! dispatch, budgets, quarantine, snapshots, pending-action application, and
+//! scripted `set_part` writes. Each asserts behavior, not source text.
 //!
-//! Items 5 (CI parse smoke), 12 (reload), 14/15 (full-sim determinism +
-//! Zapper) belong to the integration card and are exercised there.
+//! CI parse smoke, reload, and full-sim determinism are integration-level and
+//! are exercised in the app-facing test suites instead.
 
 use std::collections::BTreeMap;
 
@@ -402,8 +402,8 @@ fn quarantine_resets_on_success() {
     // is awkward without state. We verify the reset path by checking that a
     // success clears the counter: here we simulate by directly testing the
     // counter reset method through a second script copy that passes.
-    // (Full reset-on-success is exercised in the integration card's reload
-    // test; this test documents the counter stays below threshold across
+    // (Full reset-on-success is exercised in the app's reload test suite;
+    // this test documents the counter stays below threshold across
     // failures, i.e. it does not quarantine a merely-off-by-one script.)
     assert!(h.quarantine_count("s", "Move") < 3);
 }
@@ -509,7 +509,7 @@ fn pending_spawn_despawn_surface_and_take_effect() {
     );
 
     // Applied to the world: the spawned entity now exists, the despawned one
-    // is gone (observable effect, §3.3).
+    // is gone (observable effect).
     assert!(h.world().try_entity(spawned_id), "spawn must be applied");
     assert!(!h.world().try_entity(target), "despawn must be applied");
 }
@@ -568,7 +568,7 @@ fn whitelisted_health_hp_write_is_allowed_and_commits() {
         BTreeMap::from([("hp".to_string(), PartValue::Int(10))]),
     );
     let mut h = ScriptHost::new(Box::new(world));
-    // Health.hp is the v1 whitelisted native field (§4.4): the write succeeds.
+    // Health.hp is the v1 whitelisted native field: the write succeeds.
     h.load_script(
         "s",
         "Bp",

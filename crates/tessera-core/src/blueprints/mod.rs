@@ -1,6 +1,6 @@
 //! Blueprint loader and library.
 //!
-//! Scope (see `docs/specs/m2-entities.md` §2 and §3): load `blueprints/*.toml`
+//! Scope: load `blueprints/*.toml`
 //! through the [`Vfs`] in sorted path order, validate the strict schema, then
 //! resolve single-parent inheritance deterministically into a
 //! [`BlueprintLibrary`]. Blueprint text is kept as `toml::Value` per part until

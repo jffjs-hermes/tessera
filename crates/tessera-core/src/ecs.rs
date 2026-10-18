@@ -674,7 +674,7 @@ mod tests {
         ));
     }
 
-    // --- scripted part registry integration (spec test matrix items 16/17) ---
+    // --- scripted part registry integration tests ---
 
     /// A `Charge` script part schema with an `int charges` field (default 1,
     /// clamped to [0, 99]), matching the Zapper demo data shape.

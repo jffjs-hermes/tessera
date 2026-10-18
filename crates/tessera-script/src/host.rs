@@ -7,7 +7,7 @@
 //! host builds a **read snapshot** (plain `PartValue`s) the script may inspect
 //! and a **pending-action list** that `engine.set_part`/`spawn`/`despawn`
 //! append to; those are applied only after the handler returns, mirroring the
-//! engine's post-`Move` commit pattern (§3.3). Engine API closures capture a
+//! engine's post-`Move` commit pattern. Engine API closures capture a
 //! [`DispatchSlot`] and never hold a Rust borrow of the world across a Luau
 //! call — nested mutable reentrancy is therefore impossible to express.
 //!
@@ -15,7 +15,7 @@
 //!
 //! A single shared instruction counter is reset only at the top of a dispatch,
 //! so a handler that calls back into the VM through an engine API keeps
-//! consuming the *same* budget (§3.2). Exceeding it yields
+//! consuming the *same* budget. Exceeding it yields
 //! [`ScriptError::Budget`] — never a panic.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,7 +100,7 @@ fn coerce_int(v: &Value) -> Result<i64, ScriptError> {
 }
 
 /// A queued mutation produced by a running handler, applied to the world only
-/// after the handler returns (§3.3).
+/// after the handler returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingAction {
     SetPart {
@@ -110,7 +110,7 @@ pub enum PendingAction {
     },
     Spawn {
         /// The host-assigned entity id already returned to the script; the
-        /// world must create the entity under exactly this id (§5.2).
+        /// world must create the entity under exactly this id.
         id: u64,
         blueprint: String,
     },
@@ -157,7 +157,7 @@ struct SharedHandles {
     on_slot: OnSlot,
     next_entity: Arc<AtomicU64>,
     /// Deterministic capture buffer for `engine.log(...)`: each message is
-    /// appended in call order. The integration card drains it after a dispatch
+    /// appended in call order. Callers drain it after a dispatch
     /// so script log evidence lands in the sim's observable event log (see
     /// [`ScriptHost::drain_log`]).
     log_sink: Arc<Mutex<Vec<String>>>,
@@ -188,14 +188,14 @@ impl OnSlot {
     }
 }
 
-/// Read access the host needs from the world to build a handler snapshot. The
-/// integration card implements this over `SimContext`/`World`; the runtime
+/// Read access the host needs from the world to build a handler snapshot.
+/// Implementers provide this over their `SimContext`/`World`; the runtime
 /// crate supplies a headless in-memory store for tests.
 ///
-/// The trait is also the **apply seam** (§3.3): after a handler batch returns,
+/// The trait is also the **apply seam**: after a handler batch returns,
 /// the host validates each [`PendingAction`] (immutability whitelist +
 /// write-schema) and commits valid ones through the mutable methods below.
-/// The integration card implements these over its `World` (spawn via
+/// Implementers provide these over their `World` (spawn via
 /// `spawn_blueprint`, part writes via its part store, despawn via the world).
 pub trait WorldAccess {
     fn try_entity(&self, entity: u64) -> bool;
@@ -239,8 +239,8 @@ pub struct ScriptHost {
     blueprints: BTreeMap<String, String>,
     quarantine: BTreeMap<(String, String), u32>,
     world: Box<dyn WorldAccess>,
-    /// Native parts a script may write, as `part name -> writable field names`
-    /// (§4.4). v1 whitelist is `Health -> { hp }` for the Zapper demo; extend
+    /// Native parts a script may write, as `part name -> writable field names`.
+    /// The v1 whitelist is `Health -> { hp }` for the Zapper demo; extend
     /// via [`Self::allow_native_write`] for other fields/parts.
     writable_native: BTreeMap<String, BTreeSet<String>>,
 }
@@ -286,7 +286,7 @@ impl ScriptHost {
         self.blueprints.get(script).map(|s| s.as_str())
     }
     /// Drain (and clear) every `engine.log` message captured so far, in call
-    /// order. The integration card calls this after each scripted dispatch so
+    /// order. Callers run this after each scripted dispatch so
     /// the messages appear in the sim's observable event log; draining keeps
     /// the buffer bounded and deterministic across dispatches.
     pub fn drain_log(&self) -> Vec<String> {
@@ -297,8 +297,8 @@ impl ScriptHost {
             .drain(..)
             .collect()
     }
-    /// Read-only view of the world for inspection (used by tests and the
-    /// integration card to confirm applied mutations).
+    /// Read-only view of the world for inspection (used by tests and
+    /// callers to confirm applied mutations).
     pub fn world(&self) -> &dyn WorldAccess {
         self.world.as_ref()
     }
@@ -327,7 +327,7 @@ impl ScriptHost {
         let lua = self.lua.as_ref().expect("lua initialized above");
         let engine = Self::build_engine(lua, self.shared.clone(), script, blueprint)?;
 
-        // Run the top level in a per-script **sandboxed Thread** (§3.1): the
+        // Run the top level in a per-script **sandboxed Thread**: the
         // thread's proxied globals keep any global writes local to this script
         // and give it its own environment, so the `engine` table and any state
         // it creates cannot leak across scripts sharing the VM.
@@ -506,7 +506,7 @@ impl ScriptHost {
         )?;
 
         // log -> tracing::info! under "script" target, and captured into the
-        // deterministic log sink (drained by the integration card after a
+        // deterministic log sink (drained by callers after a
         // dispatch so `engine.log` evidence appears in the sim event log).
         let sink = shared.log_sink.clone();
         t.set(
@@ -698,14 +698,14 @@ impl ScriptHost {
         }
     }
 
-    /// Apply a batch of [`PendingAction`]s produced by a dispatch's handlers
-    /// (§3.3): validate each `set_part` (scripted write-schema or native
+    /// Apply a batch of [`PendingAction`]s produced by a dispatch's handlers:
+    /// validate each `set_part` (scripted write-schema or native
     /// whitelist) and commit valid actions to the world through the
     /// [`WorldAccess`] apply methods. A failing action is skipped and its
     /// error returned, the remaining valid actions still apply — one bad
     /// mutation never blocks the others, and nothing panics. `dispatch` calls
-    /// this automatically after the handler batch; it is public so the
-    /// integration card can also drive it directly if it needs to inspect
+    /// this automatically after the handler batch; it is public so
+    /// callers can also drive it directly if they need to inspect
     /// actions before applying.
     pub fn apply_pending(&mut self, actions: &[PendingAction]) -> Vec<ScriptError> {
         let mut errors = Vec::new();
@@ -726,7 +726,7 @@ impl ScriptHost {
         errors
     }
 
-    /// Validate and commit one `set_part` mutation (§4.4): unknown/missing
+    /// Validate and commit one `set_part` mutation: unknown/missing
     /// entities error; a *scripted* part is mutable but the write is checked
     /// against its declared schema; a *native* part is mutable only for the
     /// whitelisted fields in [`Self`]`::writable_native`, otherwise
@@ -835,9 +835,9 @@ impl HandlerOutcome {
 pub struct DispatchResult {
     pub outcomes: Vec<HandlerOutcome>,
     pub quarantined_this_pass: Vec<(String, String)>,
-    /// The mutations handlers queued during this dispatch, in dispatch order
-    /// (§3.3). The host has already validated and applied valid ones to the
-    /// world; this is the integration card's handoff view.
+    /// The mutations handlers queued during this dispatch, in dispatch order.
+    /// The host has already validated and applied valid ones to the
+    /// world; this is the caller's handoff view.
     pub pending_actions: Vec<PendingAction>,
     /// Validation/commit failures from applying `pending_actions` (e.g.
     /// `ImmutablePart`, `UnknownEntity`, write-schema violations). Never

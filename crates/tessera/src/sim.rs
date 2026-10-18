@@ -59,8 +59,8 @@ pub struct Sim {
     ctx: SimContext,
     scheduler: Scheduler,
     player: Entity,
-    /// Script host + world-access bridge sharing `ctx`'s broker (§9.1
-    /// one-dispatch-path). When present, `take_turn` forwards the actor's
+    /// Script host + world-access bridge sharing `ctx`'s broker
+    /// (one-dispatch-path). When present, `take_turn` forwards the actor's
     /// scripted events to the host so `engine.on` handlers share the dispatch.
     bridge: Option<ScriptBridge>,
     /// Optional AI-controlled enemy (the demo Zapper) scheduled alongside the
@@ -94,7 +94,7 @@ impl Sim {
     ) -> Self {
         let mut ctx = SimContext::shared(broker.clone(), map, SimRng::from_seed(SIM_SEED));
         // Content-level wall collision: cancel any Move whose target is not
-        // walkable. This is the shipped cancellation handler (spec §3.2).
+        // walkable. This is the shipped cancellation handler.
         ctx.register::<Move>(EARLY, |ctx, ev| {
             if ctx.map.is_walkable(ev.to.x, ev.to.y) {
                 HandlerAction::Continue
@@ -105,7 +105,7 @@ impl Sim {
         // Reference demo combat: an Attack on a Health-carrying defender
         // resolves to a base `TakeDamage`, and a TakeDamage always reduces
         // `Health.hp`. This is the native "base hit" the Zapper's scripted zap
-        // stacks on top of (§9.1).
+        // stacks on top of.
         install_base_combat(&mut ctx);
 
         let speed = ctx
@@ -221,7 +221,7 @@ impl Sim {
     /// cancelled by the EARLY handler (no energy charged, position unchanged).
     ///
     /// `Zap` operators the player's scripted strike: `Attack` toward the last
-    /// faced direction (matching the reference demo mapping in §9.1). When an
+    /// faced direction (matching the reference demo mapping). When an
     /// enemy is scheduled, any enemy turns that become ready ahead of the
     /// player's are resolved first (the enemy attacks the player), so the
     /// shared dispatch path is exercised for both sides.
@@ -464,7 +464,7 @@ fn tile_glyph(tiles: &TileRegistry, id: &str) -> char {
 /// Register the reference demo combat: an `Attack` on a Health-carrying
 /// defender resolves to `TakeDamage` (base hit, `NORMAL`), and a `TakeDamage`
 /// always reduces `Health.hp` by its amount. The base hit is the native half
-/// of the Zapper demo's damage; the scripted zap (LATE) stacks on top (§9.1).
+/// of the Zapper demo's damage; the scripted zap (LATE) stacks on top.
 fn install_base_combat(ctx: &mut SimContext) {
     use tessera_core::events::{Health, PART_HEALTH, install_minimal_combat};
     // Attack -> TakeDamage (base 1), cancels when the defender has no Health.
