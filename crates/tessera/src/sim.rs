@@ -20,9 +20,11 @@
 //! format. Deterministic for a fixed script and map (the sim consumes no
 //! randomness — no AI, no f32, integer-only energy).
 
+use std::sync::{Arc, RwLock};
+
 use hecs::Entity;
 use tessera_core::ecs::EntityBroker;
-use tessera_core::events::{EARLY, HandlerAction, Move, Point, SimContext};
+use tessera_core::events::{EARLY, HandlerAction, Move, NORMAL, Point, SimContext, TakeDamage};
 use tessera_core::map::Map;
 use tessera_core::rng::SimRng;
 use tessera_core::tiles::TileRegistry;
@@ -30,6 +32,8 @@ use tessera_core::turns::{
     ActorEnergy, BASE_SPEED, PART_ENERGY, Scheduler, TurnAction, TurnReport,
 };
 use tessera_core::world::RenderTile;
+
+use crate::scripting::{ScriptBridge, entity_to_id, int_params};
 
 /// Deterministic seed for the demo's forked RNG streams. The sim never reads
 /// randomness (no AI), so this keeps headless output identical run to
@@ -41,6 +45,10 @@ const SIM_SEED: u64 = 20_260_317;
 pub enum PlayerAction {
     /// Try to move one cell in a direction (dx, dy ∈ {-1, 0, 1}).
     Move { dx: i32, dy: i32 },
+    /// The scripted `Zap` (E): dispatch `Attack` toward the currently faced
+    /// direction. A wall/no-target cell is a no-op (the attack cancels or the
+    /// scripted handler vetoes when out of charges).
+    Zap,
     /// Do nothing this turn.
     Wait,
 }
@@ -51,16 +59,40 @@ pub struct Sim {
     ctx: SimContext,
     scheduler: Scheduler,
     player: Entity,
+    /// Script host + world-access bridge sharing `ctx`'s broker (§9.1
+    /// one-dispatch-path). When present, `take_turn` forwards the actor's
+    /// scripted events to the host so `engine.on` handlers share the dispatch.
+    bridge: Option<ScriptBridge>,
+    /// Optional AI-controlled enemy (the demo Zapper) scheduled alongside the
+    /// player, attacking the player on its turns.
+    enemy: Option<Entity>,
+    /// Last facing direction (dx, dy), for the E=Zap scripted action.
+    facing: (i32, i32),
     log: Vec<String>,
 }
 
 impl Sim {
     /// Build the harness around an already-spawned `player` whose broker
-    /// carries a `Position` part. The player's `ActorEnergy.speed` (from the
-    /// blueprint) becomes its scheduler speed; it starts exactly at threshold so
-    /// the first keypress acts immediately.
+    /// carries a `Position` part (no script host / no enemy).
+    #[cfg_attr(not(test), allow(dead_code))] // used by the sim test fixture
     pub fn new(broker: EntityBroker, map: Map, player: Entity) -> Self {
-        let mut ctx = SimContext::new(broker, map, SimRng::from_seed(SIM_SEED));
+        let broker = Arc::new(RwLock::new(broker));
+        Self::from_shared(broker, None, map, player, None)
+    }
+
+    /// Build the harness around a *shared* broker handle (the same one a
+    /// [`ScriptBridge`] was created over, so native handlers and script
+    /// handlers observe one live broker). Optionally installs the reference
+    /// demo combat (base `TakeDamage` → `Health.hp` reduction), the script
+    /// bridge forwarding, and an enemy actor that attacks the player.
+    pub fn from_shared(
+        broker: Arc<RwLock<EntityBroker>>,
+        bridge: Option<ScriptBridge>,
+        map: Map,
+        player: Entity,
+        enemy: Option<Entity>,
+    ) -> Self {
+        let mut ctx = SimContext::shared(broker.clone(), map, SimRng::from_seed(SIM_SEED));
         // Content-level wall collision: cancel any Move whose target is not
         // walkable. This is the shipped cancellation handler (spec §3.2).
         ctx.register::<Move>(EARLY, |ctx, ev| {
@@ -70,17 +102,38 @@ impl Sim {
                 HandlerAction::Cancel
             }
         });
+        // Reference demo combat: an Attack on a Health-carrying defender
+        // resolves to a base `TakeDamage`, and a TakeDamage always reduces
+        // `Health.hp`. This is the native "base hit" the Zapper's scripted zap
+        // stacks on top of (§9.1).
+        install_base_combat(&mut ctx);
+
         let speed = ctx
             .broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
             .typed_part::<ActorEnergy>(player, &PART_ENERGY.into())
             .map(|a| a.speed)
             .unwrap_or(BASE_SPEED);
         let mut scheduler = Scheduler::new();
         scheduler.add_actor(player, ActorEnergy::at_threshold(speed));
+        if let Some(e) = enemy {
+            let espeed = ctx
+                .broker
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .typed_part::<ActorEnergy>(e, &PART_ENERGY.into())
+                .map(|a| a.speed)
+                .unwrap_or(BASE_SPEED);
+            scheduler.add_actor(e, ActorEnergy::at_threshold(espeed));
+        }
         Sim {
             ctx,
             scheduler,
             player,
+            bridge,
+            enemy,
+            facing: (1, 0),
             log: Vec::new(),
         }
     }
@@ -102,6 +155,8 @@ impl Sim {
     pub fn player_tile(&self) -> String {
         self.ctx
             .broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
             .world()
             .get::<&RenderTile>(self.player)
             .ok()
@@ -114,12 +169,84 @@ impl Sim {
         &self.log
     }
 
+    /// The player's current `Health.hp` (0 if absent), for the smoke test.
+    #[allow(dead_code)] // used by the integration smoke test (crates/tessera/tests)
+    pub fn player_health(&self) -> i32 {
+        use tessera_core::events::PART_HEALTH;
+        self.ctx
+            .broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .typed_part::<tessera_core::events::Health>(self.player, &PART_HEALTH.into())
+            .map(|h| h.hp)
+            .unwrap_or(0)
+    }
+
+    /// The enemy (Zapper)'s current `Health.hp` (0 if absent), for the
+    /// smoke test of the player's `Zap` action.
+    #[allow(dead_code)] // used by the integration smoke test (crates/tessera/tests)
+    pub fn enemy_health(&self) -> i32 {
+        let Some(enemy) = self.enemy else {
+            return 0;
+        };
+        use tessera_core::events::PART_HEALTH;
+        self.ctx
+            .broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .typed_part::<tessera_core::events::Health>(enemy, &PART_HEALTH.into())
+            .map(|h| h.hp)
+            .unwrap_or(0)
+    }
+
+    /// The enemy (Zapper)'s scripted `Charge` count, if it carries one.
+    #[allow(dead_code)] // used by the integration smoke test (crates/tessera/tests)
+    pub fn enemy_charge(&self) -> Option<i64> {
+        let enemy = self.enemy?;
+        use tessera_core::ecs::PartTypeId;
+        use tessera_core::script_part::PartValue;
+        let b = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
+        let part = b.get_part(enemy, &PartTypeId::new("Charge"))?;
+        let sp = part
+            .as_any()
+            .downcast_ref::<tessera_core::script_part::ScriptPart>()?;
+        match sp.0.get("charges") {
+            Some(PartValue::Int(n)) => Some(*n),
+            _ => None,
+        }
+    }
+
     /// Submit one player action: run the scheduler until the player's turn
     /// comes up, then dispatch the corresponding event. A wall-blocked move is
     /// cancelled by the EARLY handler (no energy charged, position unchanged).
+    ///
+    /// `Zap` operators the player's scripted strike: `Attack` toward the last
+    /// faced direction (matching the reference demo mapping in §9.1). When an
+    /// enemy is scheduled, any enemy turns that become ready ahead of the
+    /// player's are resolved first (the enemy attacks the player), so the
+    /// shared dispatch path is exercised for both sides.
     pub fn submit_action(&mut self, action: PlayerAction) -> anyhow::Result<TurnReport> {
-        if let Err(stalled) = self.scheduler.advance_until_ready() {
-            anyhow::bail!("{stalled}");
+        // Advance until the player is ready. If an enemy becomes ready first,
+        // resolve its turn (it attacks the player) and keep going. This lets
+        // the demo Zapper act on the scheduler's clock while preserving the
+        // exactly-once player-action contract of the harness.
+        loop {
+            if let Err(stalled) = self.scheduler.advance_until_ready() {
+                anyhow::bail!("{stalled}");
+            }
+            let player_ready = self.scheduler.ready().contains(&self.player);
+            if player_ready {
+                break;
+            }
+            if let Some(enemy) = self.enemy {
+                if self.scheduler.ready().contains(&enemy) {
+                    self.take_turn(enemy, TurnAction::Attack(self.player))?;
+                    continue;
+                }
+            }
+            // No enemy and player not ready: can't happen (advance guarantees
+            // somebody is ready), but bail rather than spin.
+            anyhow::bail!("no actor became ready");
         }
         let from = self
             .ctx
@@ -128,13 +255,125 @@ impl Sim {
             .unwrap_or((0, 0));
         let turn = match action {
             PlayerAction::Move { dx, dy } => {
+                self.facing = (dx, dy);
                 TurnAction::MoveTo(Point::new(from.0 + dx, from.1 + dy))
             }
             PlayerAction::Wait => TurnAction::Wait,
+            PlayerAction::Zap => {
+                // The player's scripted strike: Attack a target in the last
+                // faced cell. With no live target there the Attack cancels (or
+                // the scripted handler vetoes when out of charges).
+                let (dx, dy) = self.facing;
+                let target = Point::new(from.0 + dx, from.1 + dy);
+                TurnAction::Attack(self.target_at(target))
+            }
         };
-        let report = self.scheduler.take_turn(&mut self.ctx, self.player, turn)?;
-        self.log.push(self.format_log_line(&report, from));
+        let report = self.take_turn(self.player, turn)?;
         Ok(report)
+    }
+
+    /// The live entity (enemy, then player) standing at a grid cell, if any.
+    /// Deterministic prioritization is not content-dependent: the demo enemy
+    /// is the only other scheduled actor, so this resolves the Zapper.
+    fn target_at(&self, cell: Point) -> hecs::Entity {
+        let mut at = Vec::new();
+        for (e, _p) in self.entities_at(cell) {
+            if self.enemy == Some(e) {
+                return e;
+            }
+            if e == self.player {
+                return e;
+            }
+            at.push(e);
+        }
+        at.first().copied().unwrap_or(self.player)
+    }
+
+    /// All live entities carrying a `Position` at the given cell.
+    fn entities_at(&self, cell: Point) -> Vec<(Entity, Point)> {
+        use tessera_core::events::PART_POSITION;
+        let b = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
+        let mut out = Vec::new();
+        for entity in self.scheduler.actors() {
+            if let Some(pos) =
+                b.typed_part::<tessera_core::events::Position>(entity, &PART_POSITION.into())
+            {
+                if pos.x == cell.x && pos.y == cell.y {
+                    out.push((entity, Point::new(pos.x, pos.y)));
+                }
+            }
+        }
+        out
+    }
+
+    /// Resolve one actor's scheduled turn, logging the event line, then forward
+    /// the scripted event to the host (if a bridge is attached) so `engine.on`
+    /// handlers share this dispatch. Used for both the player (in
+    /// `submit_action`) and the enemy (Zapper).
+    fn take_turn(&mut self, actor: Entity, action: TurnAction) -> anyhow::Result<TurnReport> {
+        let from = self
+            .ctx
+            .position(actor)
+            .map(|p| (p.x, p.y))
+            .unwrap_or((0, 0));
+        let report = self.scheduler.take_turn(&mut self.ctx, actor, action)?;
+        self.log.push(self.format_log_line(&report, from));
+        // Scripted dispatch: the host's `engine.on` handlers for the event the
+        // actor just took share the same broker, so e.g. a Zapper's scripted
+        // LATE Attack handler stacks its zap on the native base hit.
+        if self.bridge.is_some() {
+            self.forward_scripted_event(actor, action, report.tick);
+        }
+        Ok(report)
+    }
+
+    /// Forward an actor's Attack to the script host and append deterministic
+    /// evidence of each script-handler outcome to the event log.
+    fn forward_scripted_event(&mut self, actor: Entity, action: TurnAction, _tick: u64) {
+        let TurnAction::Attack(defender) = action else {
+            return;
+        };
+        let Some(bridge) = &self.bridge else {
+            return;
+        };
+        let host = bridge.host().clone();
+        let attacker_id = entity_to_id(actor);
+        let defender_id = entity_to_id(defender);
+        let params = int_params(&[
+            ("attacker", attacker_id as i64),
+            ("defender", defender_id as i64),
+        ]);
+        let mut h = match host.lock() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let res = h.dispatch("Attack", defender_id, &params);
+        for ev in &res.outcomes {
+            let line = match ev {
+                tessera_script::HandlerOutcome::Passed => {
+                    format!("SCRIPT Attack attacker={attacker_id} defender={defender_id} passed")
+                }
+                tessera_script::HandlerOutcome::Vetoed => {
+                    format!("SCRIPT Attack defender={defender_id} veto")
+                }
+                tessera_script::HandlerOutcome::Errored { error } => {
+                    format!("SCRIPT Attack ERROR {error}")
+                }
+                tessera_script::HandlerOutcome::Quarantined { script, event } => {
+                    format!("SCRIPT Attack QUARANTINE {script}/{event}")
+                }
+            };
+            self.log.push(line);
+        }
+        for err in &res.apply_errors {
+            self.log.push(format!("SCRIPT Attack APPLY_ERROR {err}"));
+        }
+        // Capture this dispatch's `engine.log` messages (e.g. the Zapper's
+        // "zapper zaps <id>") into the same event log, so `--headless` prints
+        // observable script evidence alongside the native event lines.
+        for line in h.drain_log() {
+            self.log.push(line);
+        }
     }
 
     /// Pretty-print one event-log line: stable one-event-per-line format
@@ -220,6 +459,39 @@ fn tile_glyph(tiles: &TileRegistry, id: &str) -> char {
     match tiles.get(id).visual {
         tessera_core::tiles::TileVisual::Glyph { ch } => ch,
     }
+}
+
+/// Register the reference demo combat: an `Attack` on a Health-carrying
+/// defender resolves to `TakeDamage` (base hit, `NORMAL`), and a `TakeDamage`
+/// always reduces `Health.hp` by its amount. The base hit is the native half
+/// of the Zapper demo's damage; the scripted zap (LATE) stacks on top (§9.1).
+fn install_base_combat(ctx: &mut SimContext) {
+    use tessera_core::events::{Health, PART_HEALTH, install_minimal_combat};
+    // Attack -> TakeDamage (base 1), cancels when the defender has no Health.
+    install_minimal_combat(ctx);
+    // TakeDamage applicator: the actual native damage the base hit inflicts.
+    ctx.register::<TakeDamage>(NORMAL, |ctx, ev| {
+        let mut reduce = false;
+        {
+            let b = ctx.broker.read().unwrap_or_else(|p| p.into_inner());
+            if let Some(h) = b.typed_part::<Health>(ev.target, &PART_HEALTH.into()) {
+                if h.hp > 0 {
+                    reduce = true;
+                }
+            }
+        }
+        if reduce {
+            if let Some(h) = ctx
+                .broker
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .typed_part_mut::<Health>(ev.target, &PART_HEALTH.into())
+            {
+                h.hp = (h.hp - ev.amount).max(0);
+            }
+        }
+        HandlerAction::Continue
+    });
 }
 
 #[cfg(test)]
