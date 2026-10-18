@@ -100,7 +100,7 @@ struct Content {
     tiles: TileRegistry,
     atlas: Atlas,
     /// Shared, hot-reloadable blueprint library + registries.
-    world: World,
+    world: Arc<World>,
     /// Shared broker the sim and the script host both operate on.
     broker: Arc<RwLock<EntityBroker>>,
     /// Script host bridge (loads + dispatches scripts against `broker`).
@@ -168,6 +168,11 @@ fn load_content(data: &std::path::Path) -> Result<Content> {
     let broker = Arc::new(RwLock::new(EntityBroker::new()));
     let bridge = ScriptBridge::new(broker.clone());
     let world = build_world(&vfs, &bridge)?;
+    // Expose the blueprint world to the script host so `engine.spawn_at` can
+    // resolve and stamp blueprints at runtime. The world is cheaply shared as
+    // an `Arc` (its library is itself `Arc<RwLock<..>>`).
+    let world = Arc::new(world);
+    bridge.set_world(world.clone());
     Ok(Content {
         tiles,
         atlas,

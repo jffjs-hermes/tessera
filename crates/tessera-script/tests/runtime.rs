@@ -66,6 +66,25 @@ impl WorldAccess for TestWorld {
         self.entities.entry(id).or_default();
         Ok(())
     }
+    fn apply_spawn_at(
+        &mut self,
+        id: u64,
+        _blueprint: &str,
+        x: Option<i32>,
+        y: Option<i32>,
+    ) -> Result<(), ScriptError> {
+        let e = self.entities.entry(id).or_default();
+        if let (Some(x), Some(y)) = (x, y) {
+            e.insert(
+                "Position".to_string(),
+                BTreeMap::from([
+                    ("x".to_string(), PartValue::Int(x as i64)),
+                    ("y".to_string(), PartValue::Int(y as i64)),
+                ]),
+            );
+        }
+        Ok(())
+    }
     fn apply_despawn(&mut self, entity: u64) -> Result<(), ScriptError> {
         if self.entities.remove(&entity).is_none() {
             return Err(ScriptError::UnknownEntity { entity });

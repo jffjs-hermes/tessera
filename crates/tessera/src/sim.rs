@@ -20,11 +20,13 @@
 //! format. Deterministic for a fixed script and map (the sim consumes no
 //! randomness — no AI, no f32, integer-only energy).
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use hecs::Entity;
 use tessera_core::ecs::EntityBroker;
-use tessera_core::events::{EARLY, HandlerAction, Move, NORMAL, Point, SimContext, TakeDamage};
+use tessera_core::events::{
+    EARLY, HandlerAction, LATE, Move, NORMAL, Point, SimContext, TakeDamage,
+};
 use tessera_core::rng::SimRng;
 use tessera_core::tiles::TileRegistry;
 use tessera_core::turns::{
@@ -57,7 +59,10 @@ pub enum PlayerAction {
 /// energy scheduler, plus the deterministic event log.
 pub struct Sim {
     ctx: SimContext,
-    scheduler: Scheduler,
+    /// The energy-clock scheduler, wrapped in the shared handle so scripted
+    /// `spawn_at` / `despawn` register/remove actors on the *same* clock the
+    /// sim drives.
+    scheduler: Arc<Mutex<Scheduler>>,
     player: Entity,
     /// Script host + world-access bridge sharing `ctx`'s broker
     /// (one-dispatch-path). When present, `take_turn` forwards the actor's
@@ -69,6 +74,9 @@ pub struct Sim {
     /// Last facing direction (dx, dy), for the E=Zap scripted action.
     facing: (i32, i32),
     log: Vec<String>,
+    /// Player-turn clock: increments once per submitted player action
+    /// (cancelled or not). Exposed to scripts via `engine.player_turns()`.
+    player_turns: u64,
 }
 
 impl Sim {
@@ -107,6 +115,15 @@ impl Sim {
         // `Health.hp`. This is the native "base hit" the Zapper's scripted zap
         // stacks on top of.
         install_base_combat(&mut ctx);
+        // Forward the reserved `Death` event (dispatched by the native
+        // TakeDamage applicator when hp clamps to zero) to the script host, so
+        // scripts can react with respawn/policy (the turn hook contract).
+        if let Some(b) = &bridge {
+            let fwd = b.clone();
+            ctx.register_observer::<tessera_core::events::Death>(LATE, move |_ctx, ev| {
+                fwd.forward_death(entity_to_id(ev.target));
+            });
+        }
 
         let speed = ctx
             .broker
@@ -127,6 +144,13 @@ impl Sim {
                 .unwrap_or(BASE_SPEED);
             scheduler.add_actor(e, ActorEnergy::at_threshold(espeed));
         }
+        let scheduler = Arc::new(Mutex::new(scheduler));
+        // Install the live world state into the shared bridge snapshot so the
+        // script host's map/nav reads and `spawn_at` resolve against the same
+        // zone, scheduler and player this sim drives.
+        if let Some(b) = &bridge {
+            b.set_sim_world_state(ctx.map.clone(), scheduler.clone(), player);
+        }
         Sim {
             ctx,
             scheduler,
@@ -135,6 +159,7 @@ impl Sim {
             enemy,
             facing: (1, 0),
             log: Vec::new(),
+            player_turns: 0,
         }
     }
 
@@ -180,6 +205,25 @@ impl Sim {
             .typed_part::<tessera_core::events::Health>(self.player, &PART_HEALTH.into())
             .map(|h| h.hp)
             .unwrap_or(0)
+    }
+
+    /// Whether `entity` is currently registered with the scheduler (i.e.
+    /// scheduled). Exposed for integration tests of scripted `spawn_at`.
+    #[allow(dead_code)] // used by the integration smoke test (crates/tessera/tests)
+    pub fn has_scheduled(&self, entity: Entity) -> bool {
+        self.scheduler
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .actors()
+            .any(|e| e == entity)
+    }
+
+    /// Translate the script-facing id returned by `engine.spawn_at` to the
+    /// live broker entity (via the shared bridge snapshot). `None` when the id
+    /// does not correspond to a scripted spawn.
+    #[allow(dead_code)] // used by the integration smoke test (crates/tessera/tests)
+    pub fn resolve_script_entity(&self, script_id: u64) -> Option<Entity> {
+        self.bridge.as_ref()?.resolve_script_entity(script_id)
     }
 
     /// The enemy (Zapper)'s current `Health.hp` (0 if absent), for the
@@ -231,15 +275,20 @@ impl Sim {
         // the demo Zapper act on the scheduler's clock while preserving the
         // exactly-once player-action contract of the harness.
         loop {
-            if let Err(stalled) = self.scheduler.advance_until_ready() {
+            let mut sched = self
+                .scheduler
+                .lock()
+                .map_err(|_| anyhow::anyhow!("scheduler lock poisoned"))?;
+            if let Err(stalled) = sched.advance_until_ready() {
                 anyhow::bail!("{stalled}");
             }
-            let player_ready = self.scheduler.ready().contains(&self.player);
+            let player_ready = sched.ready().contains(&self.player);
             if player_ready {
                 break;
             }
             if let Some(enemy) = self.enemy {
-                if self.scheduler.ready().contains(&enemy) {
+                if sched.ready().contains(&enemy) {
+                    drop(sched);
                     self.take_turn(enemy, TurnAction::Attack(self.player))?;
                     continue;
                 }
@@ -268,7 +317,18 @@ impl Sim {
                 TurnAction::Attack(self.target_at(target))
             }
         };
-        let report = self.take_turn(self.player, turn)?;
+        let report = {
+            // Player-turn clock: increment *before* the player's turn resolves
+            // so the turn's ActorTurnStart handler observes the incremented
+            // count; "after N player turns" is defined on submitted actions,
+            // cancelled or not. Mirrored into the shared bridge snapshot so
+            // scripts read the same clock via `engine.player_turns()`.
+            self.player_turns += 1;
+            if let Some(b) = &self.bridge {
+                b.set_player_turns(self.player_turns);
+            }
+            self.take_turn(self.player, turn)?
+        };
         Ok(report)
     }
 
@@ -294,7 +354,10 @@ impl Sim {
         use tessera_core::events::PART_POSITION;
         let b = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
         let mut out = Vec::new();
-        for entity in self.scheduler.actors() {
+        for entity in {
+            let sched = self.scheduler.lock().unwrap_or_else(|p| p.into_inner());
+            sched.actors().collect::<Vec<_>>()
+        } {
             if let Some(pos) =
                 b.typed_part::<tessera_core::events::Position>(entity, &PART_POSITION.into())
             {
@@ -316,20 +379,46 @@ impl Sim {
             .position(actor)
             .map(|p| (p.x, p.y))
             .unwrap_or((0, 0));
-        let report = self.scheduler.take_turn(&mut self.ctx, actor, action)?;
+        let report = {
+            let mut sched = self.scheduler.lock().unwrap_or_else(|p| p.into_inner());
+            sched.take_turn(&mut self.ctx, actor, action)?
+        };
         self.log.push(self.format_log_line(&report, from));
-        // Scripted dispatch: the host's `engine.on` handlers for the event the
-        // actor just took share the same broker, so e.g. a Zapper's scripted
-        // LATE Attack handler stacks its zap on the native base hit.
+        // Scripted dispatch: the host's `engine.on` handlers share the same
+        // broker, so e.g. a Zapper's scripted LATE Attack handler stacks its
+        // zap on the native base hit, and a goblin AI acting on the exposed
+        // `ActorTurnStart` hook can read the world. We forward the hook for
+        // every actor turn, then the actor's own action event.
         if self.bridge.is_some() {
-            self.forward_scripted_event(actor, action, report.tick);
+            self.forward_actor_turn_start(actor);
+            self.forward_scripted_action(actor, action);
         }
         Ok(report)
     }
 
-    /// Forward an actor's Attack to the script host and append deterministic
-    /// evidence of each script-handler outcome to the event log.
-    fn forward_scripted_event(&mut self, actor: Entity, action: TurnAction, _tick: u64) {
+    /// Forward the actor's `ActorTurnStart` to the script host: the exposed
+    /// turn hook (`engine.on("ActorTurnStart", ...)`) that lets a script
+    /// policy react to any actor's turn with the read/nav API.
+    fn forward_actor_turn_start(&mut self, actor: Entity) {
+        let Some(bridge) = &self.bridge else {
+            return;
+        };
+        let host = bridge.host().clone();
+        let actor_id = entity_to_id(actor);
+        let params = int_params(&[("actor", actor_id as i64)]);
+        let mut h = match host.lock() {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+        let _res = h.dispatch("ActorTurnStart", actor_id, &params);
+        for line in h.drain_log() {
+            self.log.push(line);
+        }
+    }
+
+    /// Forward an actor's action event to the script host and append
+    /// deterministic evidence of each script-handler outcome to the event log.
+    fn forward_scripted_action(&mut self, actor: Entity, action: TurnAction) {
         let TurnAction::Attack(defender) = action else {
             return;
         };
@@ -432,8 +521,12 @@ impl Sim {
             // part of the run rather than silently swallowing (a cancelled move
             // must never look like it cost energy).
             if let Err(e) = self.submit_action(action) {
-                self.log
-                    .push(format!("ERROR tick={} {e}", self.scheduler.ticks()));
+                let tick = self
+                    .scheduler
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .ticks();
+                self.log.push(format!("ERROR tick={tick} {e}"));
                 break;
             }
         }
@@ -465,8 +558,12 @@ fn tile_glyph(tiles: &TileRegistry, id: &str) -> char {
 /// defender resolves to `TakeDamage` (base hit, `NORMAL`), and a `TakeDamage`
 /// always reduces `Health.hp` by its amount. The base hit is the native half
 /// of the Zapper demo's damage; the scripted zap (LATE) stacks on top.
+///
+/// When a `TakeDamage` clamps `hp` to zero, the native applicator dispatches
+/// the reserved [`Death`] event exactly once: the "was_alive" guard means a
+/// second hit on an already-dead entity (`hp == 0` at entry) does not re-emit.
 fn install_base_combat(ctx: &mut SimContext) {
-    use tessera_core::events::{Health, PART_HEALTH, install_minimal_combat};
+    use tessera_core::events::{Death, Health, PART_HEALTH, install_minimal_combat};
     // Attack -> TakeDamage (base 1), cancels when the defender has no Health.
     install_minimal_combat(ctx);
     // TakeDamage applicator: the actual native damage the base hit inflicts.
@@ -488,6 +585,20 @@ fn install_base_combat(ctx: &mut SimContext) {
                 .typed_part_mut::<Health>(ev.target, &PART_HEALTH.into())
             {
                 h.hp = (h.hp - ev.amount).max(0);
+            }
+            // Emit Death exactly once at hp zero. This is a nested dispatch of
+            // a *different* event type, so the bus's re-entrancy control does
+            // not reject it; a second reducing hit on an already-dead entity
+            // never reaches here (reduce requires hp > 0 at entry).
+            let dead = ctx
+                .broker
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .typed_part::<Health>(ev.target, &PART_HEALTH.into())
+                .map(|h| h.hp == 0)
+                .unwrap_or(false);
+            if dead {
+                let _ = ctx.dispatch(Death { target: ev.target });
             }
         }
         HandlerAction::Continue

@@ -16,7 +16,10 @@ pub mod sandbox;
 pub mod value;
 
 pub use error::ScriptError;
-pub use host::{DispatchResult, HandlerOutcome, HostRng, PendingAction, ScriptHost, WorldAccess};
+pub use host::{
+    DefaultWorldRead, DispatchResult, HandlerOutcome, HostRng, PendingAction, ScriptHost,
+    WorldAccess, WorldRead,
+};
 
 /// Version of the script API implemented by this runtime (`-- tessera-api: 1`).
 pub const TESSERA_API_VERSION: u32 = 1;
@@ -31,3 +34,12 @@ pub const SCRIPT_MEMORY_LIMIT: usize = 4 * 1024 * 1024;
 /// A script handler must error this many consecutive times before it is
 /// quarantined (unregistered) for that `(script, event)` pair.
 pub const QUARANTINE_THRESHOLD: u32 = 3;
+
+/// The first entity id the host assigns to a scripted `engine.spawn` /
+/// `engine.spawn_at`. Encodes hecs `generation = 1` in the high 32 bits and a
+/// high low-32 `id`, so the binary's `WorldAccess` can reconstruct the entity
+/// with `Entity::from_bits` and the id never collides with the simulation's own
+/// small generation-0 entities (hecs `spawn_at` despawns any existing
+/// *same-id* entity, so both the generation and the id field must differ from
+/// live ones).
+pub const FIRST_SCRIPT_ENTITY: u64 = (1 << 32) | 0xE000_0000;
