@@ -17,6 +17,8 @@ use std::fmt;
 use hecs::Entity;
 use thiserror::Error;
 
+use crate::script_part::ScriptPartType;
+
 /// The string name that identifies a part type (e.g. `"Stats"`), used as the
 /// `BTreeMap` key in [`PartMap`] and [`PartRegistry`].
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -162,6 +164,8 @@ pub enum PartError {
     DuplicatePartType(PartTypeId),
     #[error("building part '{name}' failed: {msg}")]
     BuildFailed { name: String, msg: String },
+    #[error("part '{name}' schema validation failed: {msg}")]
+    Schema { name: String, msg: String },
     #[error("entity {0:?} does not exist")]
     NoSuchEntity(Entity),
 }
@@ -195,6 +199,10 @@ pub enum StorageClass {
 pub struct PartRegistry {
     /// Part name → its declared factory and storage class.
     entries: BTreeMap<PartTypeId, PartEntry>,
+    /// Part name → a schema-backed scripted part type. A name may exist in
+    /// *either* `entries` or `script_types`, never both (single source of
+    /// truth). Sorted by name, like `entries`.
+    script_types: BTreeMap<PartTypeId, ScriptPartType>,
 }
 
 /// One declared part type.
@@ -221,7 +229,7 @@ impl PartRegistry {
         factory: PartFactory,
     ) -> Result<(), PartError> {
         let id = id.into();
-        if self.entries.contains_key(&id) {
+        if self.contains(&id) {
             return Err(PartError::DuplicatePartType(id));
         }
         self.entries.insert(id, PartEntry { storage, factory });
@@ -230,7 +238,13 @@ impl PartRegistry {
 
     /// The declared storage class for `id`, if registered.
     pub fn storage(&self, id: &PartTypeId) -> Option<StorageClass> {
-        self.entries.get(id).map(|e| e.storage)
+        if let Some(e) = self.entries.get(id) {
+            return Some(e.storage);
+        }
+        // Scripted parts are always stored as Dynamic (PartMap), never hecs.
+        self.script_types
+            .contains_key(id)
+            .then_some(StorageClass::Dynamic)
     }
 
     pub fn get(&self, id: &PartTypeId) -> Option<&PartFactory> {
@@ -238,13 +252,39 @@ impl PartRegistry {
     }
 
     pub fn contains(&self, id: &PartTypeId) -> bool {
-        self.entries.contains_key(id)
+        self.entries.contains_key(id) || self.script_types.contains_key(id)
+    }
+
+    /// Register a schema-backed scripted part type. The schema is shape-checked
+    /// at registration (fail-closed: malformed defaults or ranges are rejected
+    /// before content can depend on them). A scripted part is always stored as
+    /// `Dynamic` and is never a compile-time ECS component.
+    pub fn register_script_part(&mut self, def: ScriptPartType) -> Result<(), PartError> {
+        def.validate_schema()?;
+        let id = def.name.clone();
+        if self.contains(&id) {
+            return Err(PartError::DuplicatePartType(id));
+        }
+        self.script_types.insert(id, def);
+        Ok(())
+    }
+
+    /// The schema registered for a scripted part name, if any (deterministic;
+    /// names are BTreeMap-sorted).
+    pub fn script_schema(&self, id: &PartTypeId) -> Option<&ScriptPartType> {
+        self.script_types.get(id)
     }
 
     /// Build a part of the registered type `id` from `config`. An unregistered
     /// name is an error — unknown part names in content must fail loudly, never
-    /// be silently ignored.
+    /// be silently ignored. Scripted parts validate the TOML payload against
+    /// their schema; native parts dispatch to their registered factory.
     pub fn build(&self, id: &PartTypeId, config: &toml::Value) -> Result<Box<dyn Part>, PartError> {
+        if let Some(def) = self.script_types.get(id) {
+            return def
+                .validate(config)
+                .map(|part| Box::new(part) as Box<dyn Part>);
+        }
         let entry = self
             .entries
             .get(id)
@@ -252,22 +292,30 @@ impl PartRegistry {
         (entry.factory)(config)
     }
 
-    /// Iterate `(name, factory)` pairs in sorted name order.
+    /// Iterate `(name, factory)` pairs in sorted name order (native parts only;
+    /// scripted parts have no factory and are surfaced via [`Self::script_schema`]).
     pub fn iter(&self) -> impl Iterator<Item = (&PartTypeId, &PartFactory)> {
         self.entries.iter().map(|(k, e)| (k, &e.factory))
     }
 
-    /// Iterate `(name, storage)` pairs in sorted name order.
+    /// Iterate `(name, storage)` pairs in sorted name order, scripted parts
+    /// included (they are always `StorageClass::Dynamic`).
     pub fn iter_storage(&self) -> impl Iterator<Item = (&PartTypeId, StorageClass)> {
-        self.entries.iter().map(|(k, e)| (k, e.storage))
+        let native = self.entries.iter().map(|(k, e)| (k, e.storage));
+        let scripted = self.script_types.keys().map(|k| (k, StorageClass::Dynamic));
+        // Both maps are BTreeMap-sorted and disjoint; merge and re-sort by key
+        // so the combined iteration is sorted across the two tables.
+        let mut items: Vec<(&PartTypeId, StorageClass)> = native.chain(scripted).collect();
+        items.sort_by(|a, b| a.0.cmp(b.0));
+        items.into_iter()
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.len() + self.script_types.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.script_types.is_empty()
     }
 }
 
@@ -624,5 +672,122 @@ mod tests {
             ),
             Err(PartError::NoSuchEntity(_))
         ));
+    }
+
+    // --- scripted part registry integration (spec test matrix items 16/17) ---
+
+    /// A `Charge` script part schema with an `int charges` field (default 1,
+    /// clamped to [0, 99]), matching the Zapper demo data shape.
+    fn charge_schema() -> crate::script_part::ScriptPartType {
+        use crate::script_part::{FieldDef, PartValue};
+        use std::collections::BTreeMap;
+        let mut schema = BTreeMap::new();
+        schema.insert(
+            "charges".to_string(),
+            FieldDef::int().default(PartValue::Int(1)).min(0).max(99),
+        );
+        crate::script_part::ScriptPartType::new("Charge", schema)
+    }
+
+    #[test]
+    fn register_script_part_builds_dynamic_script_part() {
+        use crate::script_part::{PartValue, ScriptPart};
+
+        let mut reg = PartRegistry::new();
+        reg.register_script_part(charge_schema()).unwrap();
+
+        let id = PartTypeId::new("Charge");
+        // Storage class is always Dynamic for scripted parts.
+        assert_eq!(reg.storage(&id), Some(StorageClass::Dynamic));
+        // Deterministic schema lookup returns the registered schema.
+        assert_eq!(reg.script_schema(&id), Some(&charge_schema()));
+
+        // build() validates a TOML payload into a ScriptPart via the registry.
+        let cfg: toml::Value = toml::from_str("charges = 3").unwrap();
+        let part = reg.build(&id, &cfg).unwrap();
+        let sp = part.as_ref().as_any().downcast_ref::<ScriptPart>().unwrap();
+        assert_eq!(sp.get("charges"), Some(&PartValue::Int(3)));
+
+        // The registry entry counts toward len/is_empty and reports Dynamic.
+        assert_eq!(reg.len(), 1);
+        assert!(!reg.is_empty());
+    }
+
+    #[test]
+    fn script_part_duplicate_names_are_rejected() {
+        use crate::script_part::ScriptPartType;
+
+        let mut reg = PartRegistry::new();
+        reg.register_script_part(charge_schema()).unwrap();
+
+        // Same scripted name -> duplicate.
+        let err = reg.register_script_part(charge_schema()).unwrap_err();
+        assert!(matches!(err, PartError::DuplicatePartType(id) if id.as_str() == "Charge"));
+
+        // A native part cannot steal a scripted name and vice versa (one
+        // declared definition per name).
+        fn build_factory(_: &toml::Value) -> Result<Box<dyn Part>, PartError> {
+            Ok(Box::new(1i32))
+        }
+        let err = reg
+            .register(
+                PartTypeId::new("Charge"),
+                StorageClass::Component,
+                build_factory,
+            )
+            .unwrap_err();
+        assert!(matches!(err, PartError::DuplicatePartType(id) if id.as_str() == "Charge"));
+
+        // Registering a script part over an existing native name is likewise an
+        // error.
+        let mut reg2 = PartRegistry::new();
+        reg2.register(
+            PartTypeId::new("Stats"),
+            StorageClass::Dynamic,
+            build_factory,
+        )
+        .unwrap();
+        let err = reg2
+            .register_script_part(ScriptPartType::new(
+                "Stats",
+                std::collections::BTreeMap::new(),
+            ))
+            .unwrap_err();
+        assert!(matches!(err, PartError::DuplicatePartType(id) if id.as_str() == "Stats"));
+    }
+
+    #[test]
+    fn script_schema_lookups_are_sorted_and_deterministic() {
+        use crate::script_part::ScriptPartType;
+
+        let mut reg = PartRegistry::new();
+        // Register in mixed, non-sorted order.
+        for name in ["zeta", "alpha", "mango", "Bravo"] {
+            reg.register_script_part(ScriptPartType::new(name, std::collections::BTreeMap::new()))
+                .unwrap();
+        }
+        // script_types-backed iteration is BTreeMap-sorted by name (bytes order:
+        // uppercase sorts before lowercase).
+        let schema_names: Vec<String> = ["Bravo", "alpha", "mango", "zeta"]
+            .iter()
+            .map(|n| {
+                reg.script_schema(&PartTypeId::new(*n))
+                    .unwrap()
+                    .name
+                    .as_str()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(schema_names, vec!["Bravo", "alpha", "mango", "zeta"]);
+        // Names cover native + scripted in sorted order via iter_storage.
+        let all: Vec<&str> = reg.iter_storage().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(all, vec!["Bravo", "alpha", "mango", "zeta"]);
+        // Every scripted name reports Dynamic storage.
+        for name in all {
+            assert_eq!(
+                reg.storage(&PartTypeId::new(name)),
+                Some(StorageClass::Dynamic)
+            );
+        }
     }
 }

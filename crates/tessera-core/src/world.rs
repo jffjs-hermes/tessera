@@ -176,6 +176,18 @@ impl World {
         )
     }
 
+    /// Register a schema-backed scripted part. Script parts are always stored as
+    /// [`StorageClass::Dynamic`] (in each entity's `PartMap`), never stamped into
+    /// `hecs` as a compile-time component. The schema is shape-checked at
+    /// registration; later `World::load`/`spawn_blueprint` calls validate each
+    /// entity's TOML payload against it.
+    pub fn register_script_part(
+        &mut self,
+        def: crate::script_part::ScriptPartType,
+    ) -> Result<(), PartError> {
+        self.registry.register_script_part(def)
+    }
+
     /// Load (or reload) the blueprint set from the vfs, atomically swapping the
     /// shared library on success. On any parse/resolution error returns the
     /// [`crate::blueprints::LoadFail`] diagnostics (`file + id`) and leaves the
@@ -445,6 +457,64 @@ parts.Stats  = { strength = 18, agility = 6 }
                 .unwrap()
                 .contains(&PartTypeId::new("Stats"))
         );
+    }
+
+    #[test]
+    fn script_part_registers_dynamic_and_spawns_into_partmap() {
+        use crate::script_part::{FieldDef, PartValue, ScriptPart, ScriptPartType};
+        use std::collections::BTreeMap;
+
+        let mut w = World::new();
+        let mut schema = BTreeMap::new();
+        schema.insert(
+            "charges".to_string(),
+            FieldDef::int().default(PartValue::Int(1)).min(0).max(99),
+        );
+        w.register_script_part(ScriptPartType::new("Charge", schema.clone()))
+            .unwrap();
+
+        let v = MemVfs::new().with(
+            "blueprints/z.toml",
+            r##"[Zapper]
+parts.Charge = { charges = 3 }
+"##,
+        );
+        w.load(&v).unwrap();
+
+        let mut broker = EntityBroker::new();
+        let e = w.spawn_blueprint("Zapper", &mut broker).unwrap();
+
+        // Script part is Dynamic: it lives in the entity's PartMap, never hecs.
+        let id = PartTypeId::new("Charge");
+        assert_eq!(w.registry.storage(&id), Some(StorageClass::Dynamic));
+        let part = broker
+            .typed_part::<ScriptPart>(e, &id)
+            .expect("Charge part must be in the PartMap")
+            .clone();
+        assert_eq!(part.get("charges"), Some(&PartValue::Int(3)));
+
+        // Deterministic schema lookup returns the registered schema.
+        assert_eq!(
+            w.registry.script_schema(&id).map(|t| &t.schema),
+            Some(&schema)
+        );
+
+        // Fail-closed: a payload violating the schema fails the spawn.
+        let bad = MemVfs::new().with(
+            "blueprints/b.toml",
+            r##"[Bad]
+parts.Charge = { charges = 500 }
+"##,
+        );
+        let mut w2 = World::new();
+        w2.register_script_part(ScriptPartType::new("Charge", schema))
+            .unwrap();
+        w2.load(&bad).unwrap();
+        let err = w2.spawn_blueprint("Bad", &mut broker).unwrap_err();
+        match err {
+            SpawnError::PartBuild { name, .. } => assert_eq!(name, "Charge"),
+            other => panic!("expected PartBuild error, got {other:?}"),
+        }
     }
 
     #[test]
