@@ -71,9 +71,62 @@ fn has_milestone_word(line: &str) -> bool {
     false
 }
 
-/// True if `line` contains any milestone reference.
+/// True if `line` contains `needle` as a whole word: the characters immediately
+/// before and after the match are not ASCII letters or digits (or are line
+/// boundaries). Matching is case-insensitive via a lowered copy.
+fn has_whole_word(line: &str, needle: &str) -> bool {
+    let lowered = line.to_ascii_lowercase();
+    let bytes = lowered.as_bytes();
+    let needle = needle.as_bytes();
+    let needle_len = needle.len();
+    let len = bytes.len();
+    if len < needle_len {
+        return false;
+    }
+    for i in 0..=len - needle_len {
+        if &bytes[i..i + needle_len] == needle {
+            let left_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+            let right_ok = i + needle_len >= len || !bytes[i + needle_len].is_ascii_alphanumeric();
+            if left_ok && right_ok {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// True if `line` contains the whole, case-insensitive word `card` or `cards`
+/// (a reference to a planning card).
+fn has_card_word(line: &str) -> bool {
+    has_whole_word(line, "card") || has_whole_word(line, "cards")
+}
+
+/// True if `line` contains the whole, case-insensitive word `spec` or `specs`
+/// (a reference to a planning spec). The distinct word `specification` does
+/// not match, since its trailing characters are letters.
+fn has_spec_word(line: &str) -> bool {
+    has_whole_word(line, "spec") || has_whole_word(line, "specs")
+}
+
+/// True if `line` contains a section-sign `§` (a spec section pointer).
+fn has_section_sign(line: &str) -> bool {
+    line.contains('§')
+}
+
+/// True if `line` points at the planning spec tree under `docs/specs`.
+fn has_docs_specs_path(line: &str) -> bool {
+    line.contains("docs/specs")
+}
+
+/// True if `line` contains any planning reference: a milestone name, the words
+/// `card`/`spec`, a `§` section pointer, or a `docs/specs` path.
 fn line_has_milestone_ref(line: &str) -> bool {
-    has_m_token(line) || has_milestone_word(line)
+    has_m_token(line)
+        || has_milestone_word(line)
+        || has_card_word(line)
+        || has_spec_word(line)
+        || has_section_sign(line)
+        || has_docs_specs_path(line)
 }
 
 /// Recurse through `dir`, collecting every milestone hit (`path:line: text`)
@@ -141,6 +194,15 @@ fn matcher_catches_real_milestone_references() {
     assert!(line_has_milestone_ref("per M3: deterministic"));
     assert!(line_has_milestone_ref("later milestones"));
     assert!(line_has_milestone_ref("Milestone tracking"));
+    // planning cards and specs
+    assert!(line_has_milestone_ref("the integration card drains it"));
+    assert!(line_has_milestone_ref("belong to the integration cards"));
+    assert!(line_has_milestone_ref("per the SPEC text"));
+    assert!(line_has_milestone_ref("seen in the integration specs"));
+    // section-sign spec pointers
+    assert!(line_has_milestone_ref("see §3.2"));
+    // spec tree paths
+    assert!(line_has_milestone_ref("see `docs/specs/m2-entities.md`"));
 }
 
 #[test]
@@ -150,4 +212,8 @@ fn matcher_ignores_lookalikes() {
     assert!(!line_has_milestone_ref("run 2 tunes"));
     assert!(!line_has_milestone_ref("file m3_lowercase.rs"));
     assert!(!line_has_milestone_ref("a3"));
+    // `specification` is a different word than `spec`; it must not match.
+    assert!(!line_has_milestone_ref("the specification declares it"));
+    assert!(!line_has_milestone_ref("discard the bad value"));
+    assert!(!line_has_milestone_ref("a cardamom reference"));
 }

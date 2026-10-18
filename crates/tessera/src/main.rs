@@ -127,7 +127,7 @@ fn build_world(vfs: &DirVfs, bridge: &ScriptBridge) -> Result<World> {
 
     // Load scripts (deterministic, lexicographic) BEFORE the blueprint library
     // so their `define_part` schemas are in the world registry when
-    // `parts.Charge` etc are validated. §4.3: scripts load before any spawn.
+    // `parts.Charge` etc are validated. Scripts load before any spawn.
     for path in vfs.list("scripts").unwrap_or_default() {
         if !path.ends_with(".luau") {
             continue;
@@ -284,7 +284,7 @@ impl App {
     ///   blanks or crashes the running app (fail-closed).
     /// - Live entities keep their parts: the running `sim` holds its own broker
     ///   and is not disturbed, so settled `ScriptPart` data and positions are
-    ///   untouched (§6.3). New spawns in a fresh session use the new content.
+    ///   untouched. New spawns in a fresh session use the new content.
     /// - The newly built script host is a fresh sandbox whose `engine.on`
     ///   handlers replace the previous set deterministically; `SimRng` in the
     ///   sim is never touched.
@@ -339,7 +339,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 // Arrow keys / WASD (and the existing hjklyubn) map to a Move,
-                // `.` / Space map to Wait, per spec §3.2. The action is
+                // `.` / Space map to Wait. The action is
                 // submitted to the sim, which runs the scheduler until the
                 // player's turn and dispatches the event.
                 let action = match &event.logical_key {

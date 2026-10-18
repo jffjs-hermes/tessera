@@ -145,7 +145,7 @@ fn default_speed() -> u32 {
 
 /// The clock could not advance an actor to ready because no actor has speed >
 /// 0. Returned by the scheduler/energy-clock fast path instead of looping
-/// forever (spec §2.2).
+/// forever.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClockStalled;
 
@@ -201,7 +201,7 @@ pub struct TurnReport {
     /// The action performed.
     pub action: TurnAction,
     /// Whether energy was charged (`false` only when the action event was
-    /// cancelled, spec §2.6).
+    /// cancelled).
     pub charged: bool,
     /// The actor's energy after charge (or unchanged if not charged).
     pub energy_after: i64,
@@ -277,7 +277,7 @@ impl Scheduler {
     }
 
     /// Change an actor's speed. Takes effect on the **next** tick accumulation
-    /// — energy persists, so there is no retroactive recompute (spec §2.2).
+    /// — energy persists, so there is no retroactive recompute.
     /// The new value is clamped to [`MAX_SANITY_SPEED`].
     pub fn set_speed(&mut self, entity: Entity, speed: u32) -> Option<()> {
         self.actors.get_mut(&entity)?.speed = clamp_speed(speed);
@@ -302,7 +302,7 @@ impl Scheduler {
     }
 
     /// The ready actors sorted by **speed-then-id**: highest effective speed
-    /// first; equal speeds broken by lowest entity id (spec §2.3, §4.1). Empty
+    /// first; equal speeds broken by lowest entity id. Empty
     /// when none are ready.
     pub fn ready(&self) -> Vec<Entity> {
         let mut ready: Vec<(Entity, u32)> = self
@@ -359,7 +359,7 @@ impl Scheduler {
     ///
     /// `from` for a [`TurnAction::MoveTo`] is read from the actor's `Position`
     /// part. A cancelled action leaves energy untouched and the actor becomes
-    /// ready again next window (spec §2.1, §2.6).
+    /// ready again next window.
     pub fn take_turn(
         &mut self,
         ctx: &mut SimContext,
@@ -455,7 +455,7 @@ mod tests {
         (s, ctx, ents)
     }
 
-    // ---- §2.4.1 standard actor: speed 100, Wait each turn -----------------
+    // ---- Standard actor: speed 100, Wait each turn -----------------
 
     #[test]
     fn standard_speed_100_acts_every_100_ticks() {
@@ -472,12 +472,11 @@ mod tests {
         assert_eq!(s.ticks(), 200);
     }
 
-    // ---- §2.4.2 fast actor: speed 200 interleaves 2:1 --------------------
+    // ---- Fast actor: speed 200 interleaves 2:1 --------------------
 
     #[test]
     fn fast_actor_interleaves_two_to_one() {
-        // A standalone speed-200 actor lands on t=50, 100, 150 exactly (fast
-        // actor test vector §2.4.2).
+        // A standalone speed-200 actor lands on t=50, 100, 150 exactly.
         let (mut solo, mut sctx, sents) = setup(&[200]);
         let sf = sents[0];
         for expected in [50, 100, 150] {
@@ -520,7 +519,7 @@ mod tests {
         assert_eq!(s2.ready().first(), Some(&ents2[1]), "fast wins the tie-up");
     }
 
-    // ---- §2.4.3 slow actor: speed 50 acts once per two standard turns -----
+    // ---- Slow actor: speed 50 acts once per two standard turns -----
 
     #[test]
     fn slow_actor_acts_once_per_two_standard_turns() {
@@ -531,7 +530,7 @@ mod tests {
         s.take_turn(&mut ctx, e, TurnAction::Wait).unwrap();
     }
 
-    // ---- §2.4.4 fractional speed 75: no drift ----------------------------
+    // ---- Fractional speed 75: no drift ----------------------------
 
     #[test]
     fn speed_75_acts_at_134_then_267_then_400_no_drift() {
@@ -591,7 +590,7 @@ mod tests {
         assert!(act_ticks.last().unwrap() > &10_000);
     }
 
-    // ---- §2.4.5 tie-break: speed-then-id --------------------------------
+    // ---- Tie-break: speed-then-id --------------------------------
 
     #[test]
     fn tie_break_same_speed_lowest_id_first() {
@@ -624,7 +623,7 @@ mod tests {
         assert_eq!(s.ready(), [ents[1], ents[3], ents[2], ents[0]]);
     }
 
-    // ---- §2.4.6 zero speed: never acts; all-zero stalls -----------------
+    // ---- Zero speed: never acts; all-zero stalls -----------------
 
     #[test]
     fn zero_speed_actor_never_ready() {
@@ -640,7 +639,7 @@ mod tests {
         assert_eq!(s.advance_until_ready(), Err(ClockStalled));
     }
 
-    // ---- §2.4.7 cost > energy: debt semantics ---------------------------
+    // ---- Cost > energy: debt semantics ---------------------------
 
     #[test]
     fn cost_greater_than_energy_creates_debt() {
@@ -659,7 +658,7 @@ mod tests {
         assert_eq!(s.ticks() - t_before, 200, "debt must accumulate back");
     }
 
-    // ---- §2.6 cancelled actions charge no energy ------------------------
+    // ---- Cancelled actions charge no energy ------------------------
 
     #[test]
     fn cancelled_move_charges_no_energy_and_position_unchanged() {
@@ -679,7 +678,7 @@ mod tests {
         assert_eq!(s.ready(), [e]);
     }
 
-    // ---- §2.2 mid-window speed change takes effect next tick -------------
+    // ---- Mid-window speed change takes effect next tick -------------
 
     #[test]
     fn mid_window_speed_change_takes_effect_next_tick() {
@@ -696,7 +695,7 @@ mod tests {
         assert_eq!(s.ticks(), 75, "gains 200/tick after the change");
     }
 
-    // ---- §2.4.8 replay determinism --------------------------------------
+    // ---- Replay determinism --------------------------------------
 
     #[test]
     fn replay_produces_identical_turn_log() {

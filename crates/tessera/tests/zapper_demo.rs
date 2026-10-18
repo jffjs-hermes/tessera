@@ -1,4 +1,4 @@
-//! Integration smoke test for the script integration + Zapper demo (§9.1).
+//! Integration smoke test for the script integration + Zapper demo.
 //!
 //! Loads the real `data/base` pack (the Zapper blueprint + `zapper.luau`),
 //! builds the shared broker + script bridge, spawns the player and a Zapper
