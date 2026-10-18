@@ -1,6 +1,6 @@
 # M6 spec: world slice — data-driven map, cave worldgen, pathfinding, script-owned AI
 
-Status: research spec for M6 (author: researcher bot; pending Jeff's approval). Grounded in
+Status: research spec for M6 (author: researcher bot; owner answers recorded — spec ready for approval). Grounded in
 [architecture.md](../architecture.md) §3 (Pathfinding/FOV, Noise rows), §4 (planned
 `tessera-world` crate), §5 ("Core (native) owns: grid and map storage, walkable and occupied
 queries, distance, deterministic A* pathfinding, FOV (later), the seeded RNG streams, event
@@ -561,23 +561,21 @@ so they can run as parallel branches off card 1; card 4 needs 3 (it exposes the 
 primitives) but not 2; card 5 is the only card touching both generated caves and scripts, so
 it gates on both lines. Nothing here requires the M5 mod loader.
 
-## 13. Unresolved items (explicitly parked for Jeff — not guessed)
+## 13. Owner decisions on parked items (resolved)
 
-1. **Goblin respawn cap.** The acceptance text implies infinite goblin respawn. Unstated: is
-   there a maximum concurrent goblin count? The spec implements unbounded respawn (one dead
-   → one queued) since that is the literal reading; if Jeff wants a cap (e.g. 1 concurrent
-   goblin — trivially true today since there is exactly one), say so and the script gains one
-   constant.
-2. **Zone hot reload.** Blueprint and tile hot reload exist; hot-reloading a *generated* zone
-   means re-running worldgen and re-seating actors, which is a design question (what happens
-   to the goblin mid-chase?). Deferred; editing a zone requires a restart in M6. Fine to
-   leave, but it is a visible gap next to M2's reload story.
-3. **Diagonal movement feel.** 8-directional movement (already implicit in the demo's move
-   set and kept by this spec) makes distance-10 detection and Chebyshev-adjacency natural,
-   but diagonals are free of corner-cutting only for *actors* (§4.2); the player can still
-   diagonally slip between two diagonal walls since `Move` is cancelled only on
-   non-walkable targets. If Jeff wants player corner-cutting forbidden too, it is one
-   predicate in the EARLY move handler (card 5, ~5 lines).
-4. **HP display.** §11 flags a one-line hp/status readout as demo evidence for combat; it is
-   new UI surface in an otherwise simulation-only milestone. Included in card 5's estimate;
-   drop it if Jeff prefers the log to be the only evidence.
+Recorded from Jeff's review of this spec (2026-10-18). Each item below was awaiting the
+owner's answer and is now decided; the decision is authoritative for the spec and the cards.
+
+1. **Goblin respawn cap: no cap.** Unbounded respawn (one dead → one queued) is the
+   decision for the demo; the spec implements exactly that. No concurrency check is added
+   (trivially true today since there is exactly one goblin).
+2. **Zone hot reload: keep as is (decided and deferred).** Editing a zone requires a
+   restart in M6; blueprint and tile hot reload are unaffected. The gap next to M2's
+   reload story is accepted for this milestone.
+3. **Diagonal movement feel: keep as is.** 8-directional movement (already implicit in
+   the demo's move set and kept by this spec) makes distance-10 detection and
+   Chebyshev-adjacency natural. No corner-cutting rule is added for the player: `Move` is
+   cancelled only on non-walkable targets. Actors keep the no-corner-cutting rule in §4.2;
+   the EARLY-handler predicate was not added.
+4. **HP display: keep.** §11 flags a one-line hp/status readout as demo evidence for
+   combat. It stays in the spec and in card 5's estimate; the log remains secondary.
