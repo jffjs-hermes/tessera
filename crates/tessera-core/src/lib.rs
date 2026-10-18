@@ -9,6 +9,7 @@ pub mod ecs;
 pub mod events;
 pub mod map;
 pub mod rng;
+pub mod script_part;
 pub mod tiles;
 pub mod turns;
 pub mod vfs;
