@@ -1,0 +1,16 @@
+[package]
+name = "tessera-script"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mlua = { version = "0.12.2", features = ["luau", "send"] }
+tessera-core = { path = "../tessera-core" }
+thiserror = "2.0.21"
+tracing = "0.1.44"
+
+[dev-dependencies]
+tempfile = "3.27.0"
