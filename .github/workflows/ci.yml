@@ -22,3 +22,6 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # Record the vendored Luau version linked by tessera-script (spec §2.2,
+      # §8.2) so luau0-src drift between cache misses is visible in build output.
+      - run: cargo run -p tessera-script --example print_luau_version
