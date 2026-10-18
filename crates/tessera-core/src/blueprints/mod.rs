@@ -11,6 +11,7 @@
 //! resolution walks each chain parent→child in sorted id order.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use toml::Value;
 
@@ -28,6 +29,9 @@ struct RawBlueprint {
     file: String,
     inherits: Option<String>,
     parts: BTreeMap<String, Value>,
+    /// Script files that register schemas/handlers for this blueprint, in
+    /// deterministic (lexicographic) order. Relative to the mod root.
+    scripts: BTreeSet<String>,
 }
 
 impl RawBlueprint {
@@ -46,6 +50,7 @@ impl RawBlueprint {
 
         let mut inherits = None;
         let mut parts = BTreeMap::new();
+        let mut scripts = BTreeSet::new();
         for (key, val) in body {
             match key.as_str() {
                 "inherits" => match val {
@@ -94,9 +99,32 @@ impl RawBlueprint {
                             .to_string(),
                     ));
                 }
+                "scripts" => match val {
+                    Value::Array(items) => {
+                        for item in items {
+                            match item {
+                                Value::String(s) => {
+                                    scripts.insert(s);
+                                }
+                                other => {
+                                    return Err(invalid(format!(
+                                        "`scripts` entries must be strings, got {}",
+                                        type_name(&other)
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(invalid(format!(
+                            "`scripts` must be an array of strings, got {}",
+                            type_name(&other)
+                        )));
+                    }
+                },
                 other => {
                     return Err(invalid(format!(
-                        "unknown top-level key '{other}' (allowed: `inherits`, `parts`)"
+                        "unknown top-level key '{other}' (allowed: `inherits`, `parts`, `scripts`)"
                     )));
                 }
             }
@@ -105,6 +133,7 @@ impl RawBlueprint {
             file: file.to_string(),
             inherits,
             parts,
+            scripts,
         })
     }
 }
@@ -119,6 +148,8 @@ pub struct Blueprint {
     pub inherits: Option<String>,
     /// Resolved parts keyed by part name (sorted, whole-part inheritance).
     pub parts: BTreeMap<String, Value>,
+    /// Resolved script files (sorted); a child replaces the parent's whole set.
+    pub scripts: BTreeSet<String>,
 }
 
 impl Blueprint {
@@ -129,6 +160,11 @@ impl Blueprint {
     /// Sorted part names.
     pub fn part_names(&self) -> impl Iterator<Item = &String> {
         self.parts.keys()
+    }
+
+    /// Sorted script paths.
+    pub fn script_paths(&self) -> impl Iterator<Item = &String> {
+        self.scripts.iter()
     }
 }
 
@@ -282,6 +318,20 @@ impl BlueprintLibrary {
         // parent's (no deep merge).
         parts.extend(raw.parts.clone());
 
+        // Scripts are resolved as a whole set per blueprint: a child that
+        // declares any scripts replaces the parent's entire set (no union).
+        let scripts = if raw.scripts.is_empty() {
+            match &raw.inherits {
+                Some(parent) => resolved
+                    .get(parent)
+                    .map(|p| p.scripts.clone())
+                    .unwrap_or_default(),
+                None => BTreeSet::new(),
+            }
+        } else {
+            raw.scripts.clone()
+        };
+
         resolved.insert(
             id.to_string(),
             Blueprint {
@@ -289,6 +339,7 @@ impl BlueprintLibrary {
                 file: raw.file.clone(),
                 inherits: raw.inherits.clone(),
                 parts,
+                scripts,
             },
         );
         on_stack.pop();
@@ -623,6 +674,84 @@ parts.Render = { tile = "child" }
             err.diagnostics.len(),
             2,
             "both unknown parents collected: {err}"
+        );
+    }
+
+    #[test]
+    fn scripts_key_carries_sorted_paths() {
+        let v = MemVfs::new().with(
+            "blueprints/t.toml",
+            "[B]\nscripts = [\"scripts/zap.luau\", \"scripts/aaa.luau\"]",
+        );
+        let lib = BlueprintLibrary::load(&v, &registry()).unwrap();
+        let bp = lib.get("B").unwrap();
+        // Deterministic: stored sorted, independent of declaration order.
+        assert_eq!(
+            bp.script_paths().cloned().collect::<Vec<_>>(),
+            vec![
+                "scripts/aaa.luau".to_string(),
+                "scripts/zap.luau".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn scripts_key_rejects_non_string_entries() {
+        let v = MemVfs::new().with("blueprints/t.toml", "[B]\nscripts = [\"a.luau\", 42]");
+        let text = BlueprintLibrary::load(&v, &registry())
+            .unwrap_err()
+            .to_string();
+        assert!(text.contains("`scripts` entries must be strings"), "{text}");
+        // whole value not an array
+        let v = MemVfs::new().with("blueprints/t.toml", "[B]\nscripts = \"a.luau\"");
+        let text = BlueprintLibrary::load(&v, &registry())
+            .unwrap_err()
+            .to_string();
+        assert!(text.contains("`scripts` must be an array"), "{text}");
+    }
+
+    #[test]
+    fn scripts_inherit_as_whole_set() {
+        // Child with no scripts inherits the parent's set; child with scripts
+        // replaces it (no union).
+        let v = MemVfs::new()
+            .with(
+                "blueprints/base.toml",
+                "[Actor]\nscripts = [\"scripts/shared.luau\"]\n\
+                     parts.Render = { tile = \"a\" }",
+            )
+            .with(
+                "blueprints/goblin.toml",
+                "[Goblin]\ninherits = \"Actor\"\n\
+                     scripts = [\"scripts/goblin.luau\"]",
+            );
+        let lib = BlueprintLibrary::load(&v, &registry()).unwrap();
+        assert_eq!(
+            lib.get("Goblin")
+                .unwrap()
+                .script_paths()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["scripts/goblin.luau".to_string()],
+            "child replaces parent's whole set"
+        );
+        // Inherit-only child keeps parent's set.
+        let v = MemVfs::new()
+            .with(
+                "blueprints/base.toml",
+                "[Actor]\nscripts = [\"scripts/shared.luau\"]\n\
+                     parts.Render = { tile = \"a\" }",
+            )
+            .with("blueprints/goblin.toml", "[Goblin]\ninherits = \"Actor\"");
+        let lib = BlueprintLibrary::load(&v, &registry()).unwrap();
+        assert_eq!(
+            lib.get("Goblin")
+                .unwrap()
+                .script_paths()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["scripts/shared.luau".to_string()],
+            "child inherits parent's set when it declares none"
         );
     }
 }

@@ -1950,9 +1950,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hecs",
+ "mlua",
  "notify",
  "tessera-core",
  "tessera-render",
+ "tessera-script",
  "tracing",
  "tracing-subscriber",
  "winit",

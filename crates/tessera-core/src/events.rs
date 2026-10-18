@@ -33,7 +33,7 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use hecs::Entity;
 use thiserror::Error;
@@ -187,8 +187,13 @@ pub enum EventError {
 /// dispatch bookkeeping (depth, in-flight pairs). Handlers call
 /// [`SimContext::dispatch`] on it to fire follow-up events.
 pub struct SimContext {
-    /// The entity store. Handlers read/write world state through this.
-    pub broker: EntityBroker,
+    /// The entity store. Handlers read/write world state through this. Shared
+    /// with the script host's [`WorldAccess`] (see `tessera-script`) so native
+    /// typed handlers and scripted handlers operate on the *same* live broker;
+    /// the integration card (blueprint `scripts` wiring) constructs the sim
+    /// with [`Self::shared`] so a single `Arc<RwLock<EntityBroker>>` is seen by
+    /// both dispatch paths.
+    pub broker: Arc<RwLock<EntityBroker>>,
     /// The current map (provided for handler-side spatial checks).
     pub map: Map,
     /// Forked, deterministic RNG available to handlers.
@@ -198,7 +203,16 @@ pub struct SimContext {
 }
 
 impl SimContext {
+    /// Build a context owning an exclusive broker (tests / callers that don't
+    /// share with a script host).
     pub fn new(broker: EntityBroker, map: Map, rng: SimRng) -> Self {
+        Self::shared(Arc::new(RwLock::new(broker)), map, rng)
+    }
+
+    /// Build a context over a *shared* broker handle. Native typed handlers
+    /// and the script host's world access lock the same handle (§4.4/§9: the
+    /// integration implements the script `WorldAccess` over this context).
+    pub fn shared(broker: Arc<RwLock<EntityBroker>>, map: Map, rng: SimRng) -> Self {
         Self {
             broker,
             map,
@@ -210,6 +224,8 @@ impl SimContext {
     /// Write (upsert) an entity's `Position` part.
     pub fn set_position(&mut self, entity: Entity, pos: Position) -> Option<()> {
         self.broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
             .part_map_mut(entity)
             .map(|m| m.insert(PartTypeId::new(PART_POSITION), Box::new(pos)))
             .map(|_| ())
@@ -218,6 +234,8 @@ impl SimContext {
     /// Read an entity's `Position` part, if present.
     pub fn position(&self, entity: Entity) -> Option<Position> {
         self.broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
             .typed_part::<Position>(entity, &PartTypeId::new(PART_POSITION))
             .copied()
     }
@@ -270,7 +288,12 @@ impl SimContext {
         let entity = ev.entity();
 
         ev.validate()?;
-        if !self.broker.is_alive(entity) {
+        if !self
+            .broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_alive(entity)
+        {
             return Err(EventError::UnknownEntity { name, entity });
         }
 
@@ -562,6 +585,8 @@ pub fn install_minimal_combat(ctx: &mut SimContext) {
     ctx.register::<Attack>(NORMAL, |ctx, ev| {
         let has_health = ctx
             .broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
             .typed_part::<Health>(ev.defender, &PartTypeId::new(PART_HEALTH))
             .is_some();
         if !has_health {
@@ -595,7 +620,11 @@ mod tests {
     }
 
     fn spawn_pos(ctx: &mut SimContext, x: i32, y: i32) -> Entity {
-        let e = ctx.broker.spawn();
+        let e = ctx
+            .broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .spawn();
         ctx.set_position(e, Position { x, y });
         e
     }
@@ -688,7 +717,11 @@ mod tests {
             ctx
         };
         let mut ctx = modify(context());
-        let e = ctx.broker.spawn();
+        let e = ctx
+            .broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .spawn();
         let out = ctx
             .dispatch(TakeDamage {
                 target: e,
@@ -715,7 +748,11 @@ mod tests {
             ctx
         };
         let mut ctx = swapped(context());
-        let e = ctx.broker.spawn();
+        let e = ctx
+            .broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .spawn();
         let out = ctx
             .dispatch(TakeDamage {
                 target: e,
@@ -757,7 +794,11 @@ mod tests {
     #[test]
     fn direct_reentrancy_is_rejected() {
         let mut ctx = context();
-        let e = ctx.broker.spawn();
+        let e = ctx
+            .broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .spawn();
         ctx.register::<EvA>(NORMAL, move |ctx, _ev| {
             // Same event type + same entity -> rejected at the nested call.
             let err = ctx.dispatch(EvA { who: e, go: false }).unwrap_err();
@@ -770,7 +811,11 @@ mod tests {
     #[test]
     fn indirect_reentrancy_is_rejected() {
         let mut ctx = context();
-        let e = ctx.broker.spawn();
+        let e = ctx
+            .broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .spawn();
         // A dispatches B (same entity); B dispatches A (same entity) -> A is
         // in flight, rejected.
         ctx.register::<EvA>(NORMAL, |ctx, ev| {
@@ -788,8 +833,16 @@ mod tests {
     #[test]
     fn cross_entity_same_event_is_allowed() {
         let mut ctx = context();
-        let x = ctx.broker.spawn();
-        let y = ctx.broker.spawn();
+        let x = ctx
+            .broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .spawn();
+        let y = ctx
+            .broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .spawn();
         let hits = Rc::new(RefCell::new(0));
         {
             let h = hits.clone();
@@ -817,14 +870,22 @@ mod tests {
         // handler propagates a nested error up (Fail) so the *root* dispatch
         // surfaces DepthExceeded rather than swallowing it.
         let propagate_a = |ctx: &mut SimContext, _: &mut EvA| -> HandlerAction {
-            let next = ctx.broker.spawn();
+            let next = ctx
+                .broker
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .spawn();
             match ctx.dispatch(EvB { who: next }) {
                 Ok(_) => HandlerAction::Continue,
                 Err(e) => HandlerAction::Fail(e),
             }
         };
         let propagate_b = |ctx: &mut SimContext, _: &mut EvB| -> HandlerAction {
-            let next = ctx.broker.spawn();
+            let next = ctx
+                .broker
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .spawn();
             match ctx.dispatch(EvA {
                 who: next,
                 go: true,
@@ -836,7 +897,11 @@ mod tests {
         ctx.register::<EvA>(NORMAL, move |ctx, ev| propagate_a(ctx, ev));
         ctx.register::<EvB>(NORMAL, move |ctx, ev| propagate_b(ctx, ev));
 
-        let root = ctx.broker.spawn();
+        let root = ctx
+            .broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .spawn();
         let err = ctx
             .dispatch(EvA {
                 who: root,
@@ -908,8 +973,14 @@ mod tests {
                 SimRng::from_seed(seed),
             );
             let e = spawn_pos(&mut ctx, 5, 5);
-            let f = ctx.broker.spawn();
+            let f = ctx
+                .broker
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .spawn();
             ctx.broker
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
                 .insert_part(f, PartTypeId::new(PART_HEALTH), Box::new(Health { hp: 10 }))
                 .unwrap();
 
@@ -990,7 +1061,11 @@ mod tests {
     #[test]
     fn negative_damage_is_invalid() {
         let mut ctx = context();
-        let e = ctx.broker.spawn();
+        let e = ctx
+            .broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .spawn();
         let err = ctx
             .dispatch(TakeDamage {
                 target: e,
@@ -1020,7 +1095,11 @@ mod tests {
     fn attack_cancels_without_health_part() {
         let mut ctx = context();
         install_minimal_combat(&mut ctx);
-        let a = ctx.broker.spawn();
+        let a = ctx
+            .broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .spawn();
         let d = spawn_pos(&mut ctx, 5, 5); // defender has Position, no Health
 
         let outcome = ctx
@@ -1036,9 +1115,19 @@ mod tests {
     fn attack_applies_takedamage_when_defender_has_health() {
         let mut ctx = context();
         install_minimal_combat(&mut ctx);
-        let a = ctx.broker.spawn();
-        let d = ctx.broker.spawn();
+        let a = ctx
+            .broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .spawn();
+        let d = ctx
+            .broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .spawn();
         ctx.broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
             .insert_part(d, PartTypeId::new(PART_HEALTH), Box::new(Health { hp: 10 }))
             .unwrap();
 

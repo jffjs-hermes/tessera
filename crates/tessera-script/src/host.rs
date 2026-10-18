@@ -156,6 +156,11 @@ struct SharedHandles {
     slot: Arc<DispatchSlot>,
     on_slot: OnSlot,
     next_entity: Arc<AtomicU64>,
+    /// Deterministic capture buffer for `engine.log(...)`: each message is
+    /// appended in call order. The integration card drains it after a dispatch
+    /// so script log evidence lands in the sim's observable event log (see
+    /// [`ScriptHost::drain_log`]).
+    log_sink: Arc<Mutex<Vec<String>>>,
 }
 
 /// A pending `engine.on` registration: script, event, priority, handler.
@@ -253,6 +258,7 @@ impl ScriptHost {
                 slot: Arc::new(DispatchSlot::default()),
                 on_slot: OnSlot::default(),
                 next_entity: Arc::new(AtomicU64::new(1)),
+                log_sink: Arc::new(Mutex::new(Vec::new())),
             },
             handlers: BTreeMap::new(),
             next_seq: 0,
@@ -278,6 +284,18 @@ impl ScriptHost {
     }
     pub fn blueprint_of(&self, script: &str) -> Option<&str> {
         self.blueprints.get(script).map(|s| s.as_str())
+    }
+    /// Drain (and clear) every `engine.log` message captured so far, in call
+    /// order. The integration card calls this after each scripted dispatch so
+    /// the messages appear in the sim's observable event log; draining keeps
+    /// the buffer bounded and deterministic across dispatches.
+    pub fn drain_log(&self) -> Vec<String> {
+        self.shared
+            .log_sink
+            .lock()
+            .expect("log sink lock")
+            .drain(..)
+            .collect()
     }
     /// Read-only view of the world for inspection (used by tests and the
     /// integration card to confirm applied mutations).
@@ -487,11 +505,15 @@ impl ScriptHost {
             })?,
         )?;
 
-        // log -> tracing::info! under "script" target.
+        // log -> tracing::info! under "script" target, and captured into the
+        // deterministic log sink (drained by the integration card after a
+        // dispatch so `engine.log` evidence appears in the sim event log).
+        let sink = shared.log_sink.clone();
         t.set(
             "log",
-            lua.create_function(|_, msg: String| {
+            lua.create_function(move |_, msg: String| {
                 tracing::info!(target: "script", "{msg}");
+                sink.lock().expect("log sink lock").push(msg);
                 Ok(())
             })?,
         )?;

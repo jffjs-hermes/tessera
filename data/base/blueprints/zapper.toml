@@ -1,0 +1,12 @@
+# Reference demo blueprint (§9.1): a goblin variant that spends one Charge
+# to zap the defender for an extra point of damage on hit, driven by the
+# scripted `engine.on("Attack")` handler in `scripts/zapper.luau`.
+#
+# `parts.Charge` is validated against the Charge schema that `zapper.luau`
+# registers via `engine.define_part` — the loader requires the name to exist in
+# the registry, and the integration card syncs script-declared schemas into the
+# world registry before this library is validated.
+[Zapper]
+inherits = "Goblin"
+parts.Charge = { charges = 3 }
+scripts = ["scripts/zapper.luau"]

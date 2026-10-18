@@ -11,10 +11,11 @@
 //! path. The renderer stays a pure reader: it never dispatches events or
 //! mutates sim state; the redraw on hot reload is unchanged.
 
+mod scripting;
 mod sim;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use notify::{RecursiveMode, Watcher};
@@ -24,7 +25,7 @@ use tessera_core::events::{Health, PART_HEALTH, PART_POSITION, Position};
 use tessera_core::map::Map;
 use tessera_core::tiles::TileRegistry;
 use tessera_core::turns::ActorEnergy;
-use tessera_core::vfs::DirVfs;
+use tessera_core::vfs::{DirVfs, Vfs};
 use tessera_core::world::{RenderTile, World};
 use tessera_render::atlas::Atlas;
 use tessera_render::{Cell, Renderer};
@@ -35,10 +36,14 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::scripting::ScriptBridge;
+
 const GRID_W: u32 = 80;
 const GRID_H: u32 = 50;
 /// The `[Player]` blueprint id in `data/base/blueprints/creatures.toml`.
 const PLAYER_BLUEPRINT: &str = "Player";
+/// The reference demo Zapper blueprint (`data/base/blueprints/zapper.toml`).
+const ZAPPER_BLUEPRINT: &str = "Zapper";
 
 enum UserEvent {
     ContentChanged,
@@ -68,7 +73,8 @@ fn parse_args() -> Result<Args> {
                 println!(
                     "tessera [--data <dir>] [--frames <n>] [--headless <n>]\n\
                      \n\
-                     Interactive: arrow keys / WASD / hjklyubn to move, `.` or Space = wait, Esc to quit.\n\
+                     Interactive: arrow keys / WASD / hjklyubn to move, `.` or Space = wait,\n\
+                     E = Zap (Attack toward the last faced direction), Esc to quit.\n\
                      `--headless <n>`: run n scripted actions with no window, print final map + event log, exit 0."
                 );
                 std::process::exit(0);
@@ -88,13 +94,19 @@ struct Content {
     atlas: Atlas,
     /// Shared, hot-reloadable blueprint library + registries.
     world: World,
+    /// Shared broker the sim and the script host both operate on.
+    broker: Arc<RwLock<EntityBroker>>,
+    /// Script host bridge (loads + dispatches scripts against `broker`).
+    bridge: ScriptBridge,
 }
 
 /// Build the world: register the engine's known part types and the dynamic
-/// parts (Position / ActorEnergy / Health), then load the blueprint set. On any
-/// error returns an anyhow error carrying `file + id` diagnostics from the
-/// loader.
-fn build_world(vfs: &DirVfs) -> Result<World> {
+/// parts (Position / ActorEnergy / Health), load every script in the pack
+/// (registering their `define_part` schemas via the host) and sync those
+/// schemas into the world registry so blueprint `parts.<ScriptPart>` keys
+/// validate — THEN load the blueprint set. On any error returns an anyhow
+/// error carrying `file + id` diagnostics.
+fn build_world(vfs: &DirVfs, bridge: &ScriptBridge) -> Result<World> {
     let mut world = World::new();
     // Engine component seam: `parts.Render` deserializes into a `RenderTile`
     // hecs component (tile id resolved against the atlas/tile registry at draw).
@@ -112,6 +124,28 @@ fn build_world(vfs: &DirVfs) -> Result<World> {
     world
         .register_part::<Health>(PART_HEALTH)
         .map_err(|e| anyhow::anyhow!("registering part 'Health': {e}"))?;
+
+    // Load scripts (deterministic, lexicographic) BEFORE the blueprint library
+    // so their `define_part` schemas are in the world registry when
+    // `parts.Charge` etc are validated. §4.3: scripts load before any spawn.
+    for path in vfs.list("scripts").unwrap_or_default() {
+        if !path.ends_with(".luau") {
+            continue;
+        }
+        let source = vfs
+            .read_to_string(&path)
+            .with_context(|| format!("reading script {path}"))?;
+        // Blueprint binding is informational (host dispatches per-event,
+        // globally); use the script's own path as its record.
+        bridge
+            .load(&path, &path, &source)
+            .with_context(|| format!("loading script {path}"))?;
+    }
+    // Mirror script-declared schemas into the world registry.
+    bridge
+        .sync_schemas(&mut world)
+        .with_context(|| "syncing script schemas into world registry")?;
+
     world
         .load(vfs)
         .map_err(|e| anyhow::anyhow!("loading blueprints: {e}"))?;
@@ -124,29 +158,70 @@ fn load_content(data: &std::path::Path) -> Result<Content> {
     let mut chars = tiles.glyph_chars();
     chars.push('?');
     let atlas = Atlas::build(&chars);
-    let world = build_world(&vfs)?;
+    let broker = Arc::new(RwLock::new(EntityBroker::new()));
+    let bridge = ScriptBridge::new(broker.clone());
+    let world = build_world(&vfs, &bridge)?;
     Ok(Content {
         tiles,
         atlas,
         world,
+        broker,
+        bridge,
     })
 }
 
-/// Spawn the `[Player]` in a fresh broker and build the sim harness around it.
-fn build_sim(world: &World, map: Map) -> Result<Sim> {
-    let mut broker = EntityBroker::new();
-    let player = world
+/// Spawn the `[Player]` and a `[Zapper]` (if the blueprint exists) into the
+/// shared broker, seed positions, and build the sim harness (with script
+/// bridge + enemy) around them.
+fn build_sim(content: &Content, map: Map) -> Result<Sim> {
+    let mut broker = content
+        .broker
+        .write()
+        .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
+    let player = content
+        .world
         .spawn_blueprint(PLAYER_BLUEPRINT, &mut broker)
         .with_context(|| format!("spawning {PLAYER_BLUEPRINT:?}"))?;
-    // The broker owns Position as a dynamic part; the sim reads it from here.
-    // Seed the player's spawn Position explicitly so movement is well-defined
-    // even on first render before any key is pressed.
     broker.insert_part(
         player,
         PART_POSITION,
         Box::new(Position { x: 2, y: 2 }) as Box<dyn Part>,
     )?;
-    Ok(Sim::new(broker, map, player))
+    drop(broker);
+
+    // The reference demo Zapper: spawn adjacent to the player opposite its
+    // initial facing, only if the base pack ships the blueprint (falling back
+    // to a scripts-only run otherwise).
+    let has_zapper = match content.world.library().read() {
+        Ok(l) => l.contains(ZAPPER_BLUEPRINT),
+        Err(_) => false,
+    };
+    let zapper = if has_zapper {
+        let mut broker = content
+            .broker
+            .write()
+            .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
+        let z = content
+            .world
+            .spawn_blueprint(ZAPPER_BLUEPRINT, &mut broker)
+            .with_context(|| format!("spawning {ZAPPER_BLUEPRINT:?}"))?;
+        broker.insert_part(
+            z,
+            PART_POSITION,
+            Box::new(Position { x: 3, y: 2 }) as Box<dyn Part>,
+        )?;
+        Some(z)
+    } else {
+        None
+    };
+
+    Ok(Sim::from_shared(
+        content.broker.clone(),
+        Some(content.bridge.clone()),
+        map,
+        player,
+        zapper,
+    ))
 }
 
 struct App {
@@ -199,6 +274,20 @@ impl App {
         cells
     }
 
+    /// Hot reload (script + blueprint + tileset): rebuild the whole content
+    /// set from disk and swap it in *atomically*. Watch the recursive file
+    /// watcher: `data/*/scripts/*.luau`, `data/*/blueprints/*.toml` and the
+    /// tile/tower definitions all flow through this one path.
+    ///
+    /// Semantics (whole-library swap, mirroring `World::load`'s atomic policy):
+    /// - On any error the previous content is kept — a mid-edit save never
+    ///   blanks or crashes the running app (fail-closed).
+    /// - Live entities keep their parts: the running `sim` holds its own broker
+    ///   and is not disturbed, so settled `ScriptPart` data and positions are
+    ///   untouched (§6.3). New spawns in a fresh session use the new content.
+    /// - The newly built script host is a fresh sandbox whose `engine.on`
+    ///   handlers replace the previous set deterministically; `SimRng` in the
+    ///   sim is never touched.
     fn reload(&mut self) {
         match load_content(&self.args.data) {
             Ok(c) => {
@@ -268,6 +357,7 @@ impl ApplicationHandler<UserEvent> for App {
                         "u" => Some(PlayerAction::Move { dx: 1, dy: -1 }),
                         "b" => Some(PlayerAction::Move { dx: -1, dy: 1 }),
                         "n" => Some(PlayerAction::Move { dx: 1, dy: 1 }),
+                        "e" => Some(PlayerAction::Zap),
                         "." | " " => Some(PlayerAction::Wait),
                         _ => None,
                     },
@@ -322,7 +412,7 @@ fn main() -> Result<()> {
 
     // Headless path: no window, no event loop, no winit. Deterministic output.
     if let Some(n) = args.headless {
-        let mut sim = build_sim(&content.world, map)?;
+        let mut sim = build_sim(&content, map)?;
         let map_text = sim.run_headless(&content.tiles, n);
         print!("{map_text}");
         for line in sim.log() {
@@ -331,7 +421,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let sim = build_sim(&content.world, map)?;
+    let sim = build_sim(&content, map)?;
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
