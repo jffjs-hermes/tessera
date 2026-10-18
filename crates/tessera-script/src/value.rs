@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use mlua::{Lua, Table, Value};
-use tessera_core::script_part::{FieldDef, PartValue, ScriptPartType};
+use tessera_core::script_part::{FieldDef, FieldKind, PartValue, ScriptPartType};
 
 use crate::error::ScriptError;
 
@@ -217,4 +217,117 @@ pub fn params_to_lua(lua: &Lua, params: &[(&str, Value)]) -> Result<Table, Scrip
         t.raw_set(*k, v.clone())?;
     }
     Ok(t)
+}
+
+/// Validate a `set_part` write against a scripted part's declared schema
+/// (§4.4): every field must be declared and its value must match the field's
+/// kind and be within the declared range — the same write-time check a spawn
+/// payload gets. Scripts may mutate their own scripted parts freely, but not
+/// arbitrarily; a violation is a runtime content bug, surfaced as a `set_part`
+/// error (never a panic).
+pub fn validate_scripted_write(
+    part: &ScriptPartType,
+    fields: &BTreeMap<String, PartValue>,
+) -> Result<(), ScriptError> {
+    for (field, value) in fields {
+        let def = part.schema.get(field).ok_or_else(|| {
+            ScriptError::Internal(format!(
+                "set_part('{}'): unknown field '{field}' (not declared in the schema)",
+                part.name.as_str()
+            ))
+        })?;
+        check_scripted_value(part, field, def, value)?;
+    }
+    Ok(())
+}
+
+fn check_scripted_value(
+    part: &ScriptPartType,
+    field: &str,
+    def: &FieldDef,
+    value: &PartValue,
+) -> Result<(), ScriptError> {
+    match def.kind {
+        FieldKind::Int => {
+            let PartValue::Int(n) = value else {
+                return Err(scripted_write_err(part, field, "expected an integer"));
+            };
+            check_scripted_range(part, field, def, *n)
+        }
+        FieldKind::Bool => {
+            if matches!(value, PartValue::Bool(_)) {
+                Ok(())
+            } else {
+                Err(scripted_write_err(part, field, "expected a boolean"))
+            }
+        }
+        FieldKind::Str => {
+            if matches!(value, PartValue::Str(_)) {
+                Ok(())
+            } else {
+                Err(scripted_write_err(part, field, "expected a string"))
+            }
+        }
+        FieldKind::ListInt => match value {
+            PartValue::List(items) if items.iter().all(|v| matches!(v, PartValue::Int(_))) => {
+                for (idx, item) in items.iter().enumerate() {
+                    if let PartValue::Int(n) = item {
+                        check_scripted_range(part, field, def, *n).map_err(|e| {
+                            ScriptError::Internal(format!("{e} (list index {idx})"))
+                        })?;
+                    }
+                }
+                Ok(())
+            }
+            _ => Err(scripted_write_err(
+                part,
+                field,
+                "expected an array of integers",
+            )),
+        },
+        FieldKind::ListStr => match value {
+            PartValue::List(items) if items.iter().all(|v| matches!(v, PartValue::Str(_))) => {
+                Ok(())
+            }
+            _ => Err(scripted_write_err(
+                part,
+                field,
+                "expected an array of strings",
+            )),
+        },
+    }
+}
+
+fn check_scripted_range(
+    part: &ScriptPartType,
+    field: &str,
+    def: &FieldDef,
+    value: i64,
+) -> Result<(), ScriptError> {
+    if let Some(min) = def.min {
+        if value < min {
+            return Err(scripted_write_err(
+                part,
+                field,
+                &format!("value {value} is below the minimum {min}"),
+            ));
+        }
+    }
+    if let Some(max) = def.max {
+        if value > max {
+            return Err(scripted_write_err(
+                part,
+                field,
+                &format!("value {value} exceeds the maximum {max}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn scripted_write_err(part: &ScriptPartType, field: &str, detail: &str) -> ScriptError {
+    ScriptError::Internal(format!(
+        "set_part('{}').{field}: {detail}",
+        part.name.as_str()
+    ))
 }

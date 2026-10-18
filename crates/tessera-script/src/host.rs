@@ -18,7 +18,7 @@
 //! consuming the *same* budget (§3.2). Exceeding it yields
 //! [`ScriptError::Budget`] — never a panic.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -100,8 +100,8 @@ fn coerce_int(v: &Value) -> Result<i64, ScriptError> {
 }
 
 /// A queued mutation produced by a running handler, applied to the world only
-/// after the handler returns.
-#[derive(Debug, Clone)]
+/// after the handler returns (§3.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingAction {
     SetPart {
         entity: u64,
@@ -109,6 +109,9 @@ pub enum PendingAction {
         fields: BTreeMap<String, PartValue>,
     },
     Spawn {
+        /// The host-assigned entity id already returned to the script; the
+        /// world must create the entity under exactly this id (§5.2).
+        id: u64,
         blueprint: String,
     },
     Despawn {
@@ -183,12 +186,31 @@ impl OnSlot {
 /// Read access the host needs from the world to build a handler snapshot. The
 /// integration card implements this over `SimContext`/`World`; the runtime
 /// crate supplies a headless in-memory store for tests.
+///
+/// The trait is also the **apply seam** (§3.3): after a handler batch returns,
+/// the host validates each [`PendingAction`] (immutability whitelist +
+/// write-schema) and commits valid ones through the mutable methods below.
+/// The integration card implements these over its `World` (spawn via
+/// `spawn_blueprint`, part writes via its part store, despawn via the world).
 pub trait WorldAccess {
     fn try_entity(&self, entity: u64) -> bool;
     /// Read one part of an entity as plain fields, or `None`.
     fn snapshot_part(&self, entity: u64, part: &str) -> Option<BTreeMap<String, PartValue>>;
     /// All part names of an entity to snapshot for a handler.
     fn entity_parts(&self, entity: u64) -> Vec<String>;
+
+    /// Commit a validated `set_part` write (already checked against the schema
+    /// or the native whitelist by the host) to the world.
+    fn apply_set_part(
+        &mut self,
+        entity: u64,
+        name: &str,
+        fields: BTreeMap<String, PartValue>,
+    ) -> Result<(), ScriptError>;
+    /// Spawn an entity for the given (host-assigned) id and blueprint.
+    fn apply_spawn(&mut self, id: u64, blueprint: &str) -> Result<(), ScriptError>;
+    /// Despawn (remove) an entity.
+    fn apply_despawn(&mut self, entity: u64) -> Result<(), ScriptError>;
 }
 
 /// A registered script handler bound to one script + event.
@@ -212,10 +234,16 @@ pub struct ScriptHost {
     blueprints: BTreeMap<String, String>,
     quarantine: BTreeMap<(String, String), u32>,
     world: Box<dyn WorldAccess>,
+    /// Native parts a script may write, as `part name -> writable field names`
+    /// (§4.4). v1 whitelist is `Health -> { hp }` for the Zapper demo; extend
+    /// via [`Self::allow_native_write`] for other fields/parts.
+    writable_native: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl ScriptHost {
     pub fn new(world: Box<dyn WorldAccess>) -> Self {
+        let mut writable_native = BTreeMap::new();
+        writable_native.insert("Health".to_string(), BTreeSet::from(["hp".to_string()]));
         Self {
             lua: None,
             counter: Arc::new(AtomicU64::new(crate::SCRIPT_INSTRUCTION_BUDGET)),
@@ -231,7 +259,18 @@ impl ScriptHost {
             blueprints: BTreeMap::new(),
             quarantine: BTreeMap::new(),
             world,
+            writable_native,
         }
+    }
+
+    /// Whitelist an additional native field a script may write (e.g. to let
+    /// a mod give scripts access to another native part's field). Deterministic
+    /// (BTreeMap/BTreeSet).
+    pub fn allow_native_write(&mut self, part: &str, field: &str) {
+        self.writable_native
+            .entry(part.to_string())
+            .or_default()
+            .insert(field.to_string());
     }
 
     pub fn registry(&self) -> &Arc<Mutex<tessera_core::ecs::PartRegistry>> {
@@ -239,6 +278,11 @@ impl ScriptHost {
     }
     pub fn blueprint_of(&self, script: &str) -> Option<&str> {
         self.blueprints.get(script).map(|s| s.as_str())
+    }
+    /// Read-only view of the world for inspection (used by tests and the
+    /// integration card to confirm applied mutations).
+    pub fn world(&self) -> &dyn WorldAccess {
+        self.world.as_ref()
     }
 
     /// Load a script from source: validate version header, sandbox a shared VM
@@ -293,7 +337,9 @@ impl ScriptHost {
             script: script.to_string(),
             msg: format!("thread sandbox: {e}"),
         })?;
-        thread.resume::<()>(()).map_err(|e| map_load(script, e))?;
+        thread
+            .resume::<()>(())
+            .map_err(|e| map_load(script, e, &self.counter))?;
 
         // Apply `on` registrations the top level queued.
         for (decl_script, event, priority, func) in self.shared.on_slot.drain() {
@@ -473,6 +519,7 @@ impl ScriptHost {
             lua.create_function(move |_lua2, blueprint: String| {
                 let id = next_id.fetch_add(1, Ordering::Relaxed);
                 slot.pending_mut().push(PendingAction::Spawn {
+                    id,
                     blueprint: blueprint.clone(),
                 });
                 Ok(id as i64)
@@ -619,11 +666,92 @@ impl ScriptHost {
             }
         }
 
-        self.shared.slot.finish();
+        let pending_actions = self.shared.slot.finish();
+        let apply_errors = self.apply_pending(&pending_actions);
         DispatchResult {
             outcomes,
             quarantined_this_pass: quarantined,
+            pending_actions,
+            apply_errors,
         }
+    }
+
+    /// Apply a batch of [`PendingAction`]s produced by a dispatch's handlers
+    /// (§3.3): validate each `set_part` (scripted write-schema or native
+    /// whitelist) and commit valid actions to the world through the
+    /// [`WorldAccess`] apply methods. A failing action is skipped and its
+    /// error returned, the remaining valid actions still apply — one bad
+    /// mutation never blocks the others, and nothing panics. `dispatch` calls
+    /// this automatically after the handler batch; it is public so the
+    /// integration card can also drive it directly if it needs to inspect
+    /// actions before applying.
+    pub fn apply_pending(&mut self, actions: &[PendingAction]) -> Vec<ScriptError> {
+        let mut errors = Vec::new();
+        for action in actions {
+            let result = match action {
+                PendingAction::SetPart {
+                    entity,
+                    name,
+                    fields,
+                } => self.apply_set_part(*entity, name, fields),
+                PendingAction::Spawn { id, blueprint } => self.world.apply_spawn(*id, blueprint),
+                PendingAction::Despawn { entity } => self.world.apply_despawn(*entity),
+            };
+            if let Err(e) = result {
+                errors.push(e);
+            }
+        }
+        errors
+    }
+
+    /// Validate and commit one `set_part` mutation (§4.4): unknown/missing
+    /// entities error; a *scripted* part is mutable but the write is checked
+    /// against its declared schema; a *native* part is mutable only for the
+    /// whitelisted fields in [`Self`]`::writable_native`, otherwise
+    /// [`ScriptError::ImmutablePart`].
+    fn apply_set_part(
+        &mut self,
+        entity: u64,
+        name: &str,
+        fields: &BTreeMap<String, PartValue>,
+    ) -> Result<(), ScriptError> {
+        if !self.world.try_entity(entity) {
+            return Err(ScriptError::UnknownEntity { entity });
+        }
+
+        let scripted = {
+            let reg = self
+                .shared
+                .registry
+                .lock()
+                .map_err(|_| ScriptError::Internal("registry lock".into()))?;
+            reg.script_schema(&tessera_core::ecs::PartTypeId::new(name))
+                .is_some()
+        };
+
+        if scripted {
+            let schema = {
+                let reg = self
+                    .shared
+                    .registry
+                    .lock()
+                    .map_err(|_| ScriptError::Internal("registry lock".into()))?;
+                reg.script_schema(&tessera_core::ecs::PartTypeId::new(name))
+                    .expect("scripted checked above")
+                    .clone()
+            };
+            value::validate_scripted_write(&schema, fields)?;
+        } else {
+            let writable = self.writable_native.get(name).cloned().unwrap_or_default();
+            if fields.keys().any(|f| !writable.contains(f.as_str())) {
+                return Err(ScriptError::ImmutablePart {
+                    entity,
+                    name: name.to_string(),
+                });
+            }
+        }
+
+        self.world.apply_set_part(entity, name, fields.clone())
     }
 
     fn run_handler(
@@ -658,7 +786,7 @@ impl ScriptHost {
                 }
             }
             Err(e) => {
-                let error = map_handler_error(&entry.script, event, entity, e);
+                let error = map_handler_error(&entry.script, event, entity, e, &self.counter);
                 HandlerOutcome::Errored { error }
             }
         }
@@ -685,6 +813,14 @@ impl HandlerOutcome {
 pub struct DispatchResult {
     pub outcomes: Vec<HandlerOutcome>,
     pub quarantined_this_pass: Vec<(String, String)>,
+    /// The mutations handlers queued during this dispatch, in dispatch order
+    /// (§3.3). The host has already validated and applied valid ones to the
+    /// world; this is the integration card's handoff view.
+    pub pending_actions: Vec<PendingAction>,
+    /// Validation/commit failures from applying `pending_actions` (e.g.
+    /// `ImmutablePart`, `UnknownEntity`, write-schema violations). Never
+    /// panics the host.
+    pub apply_errors: Vec<ScriptError>,
 }
 
 impl DispatchResult {
@@ -702,12 +838,19 @@ fn lua_err(msg: &str) -> mlua::Error {
     mlua::Error::RuntimeError(msg.to_string())
 }
 
-fn map_load(script: &str, e: mlua::Error) -> ScriptError {
+/// Instructions consumed by the current dispatch/load, for `Budget.used`.
+/// The shared counter counts *down* from `SCRIPT_INSTRUCTION_BUDGET`; used is
+/// what remains of the budget.
+fn used_instructions(counter: &AtomicU64) -> u64 {
+    crate::SCRIPT_INSTRUCTION_BUDGET.saturating_sub(counter.load(Ordering::Relaxed))
+}
+
+fn map_load(script: &str, e: mlua::Error, counter: &AtomicU64) -> ScriptError {
     if sandbox::is_budget_error(&e) {
         ScriptError::Budget {
             script: script.to_string(),
             phase: "load".into(),
-            used: 0,
+            used: used_instructions(counter),
         }
     } else if matches!(e, mlua::Error::MemoryError(_)) {
         ScriptError::Memory {
@@ -721,12 +864,18 @@ fn map_load(script: &str, e: mlua::Error) -> ScriptError {
     }
 }
 
-fn map_handler_error(script: &str, event: &str, entity: u64, e: mlua::Error) -> ScriptError {
+fn map_handler_error(
+    script: &str,
+    event: &str,
+    entity: u64,
+    e: mlua::Error,
+    counter: &AtomicU64,
+) -> ScriptError {
     if sandbox::is_budget_error(&e) {
         ScriptError::Budget {
             script: script.to_string(),
             phase: format!("handler:{event}"),
-            used: 0,
+            used: used_instructions(counter),
         }
     } else if matches!(e, mlua::Error::MemoryError(_)) {
         ScriptError::Memory {

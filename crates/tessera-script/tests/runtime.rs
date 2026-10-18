@@ -23,6 +23,12 @@ impl TestWorld {
         self.entities.insert(id, BTreeMap::new());
         id
     }
+    /// Insert an empty entity at a caller-chosen id (used to keep test
+    /// entities distinct from the host's ascending spawn ids).
+    fn seed_at(&mut self, id: u64) -> u64 {
+        self.entities.insert(id, BTreeMap::new());
+        id
+    }
     fn put(&mut self, id: u64, part: &str, fields: BTreeMap<String, PartValue>) {
         self.entities
             .entry(id)
@@ -43,6 +49,28 @@ impl WorldAccess for TestWorld {
             .get(&entity)
             .map(|m| m.keys().cloned().collect())
             .unwrap_or_default()
+    }
+    fn apply_set_part(
+        &mut self,
+        entity: u64,
+        name: &str,
+        fields: BTreeMap<String, PartValue>,
+    ) -> Result<(), ScriptError> {
+        self.entities
+            .entry(entity)
+            .or_default()
+            .insert(name.to_string(), fields);
+        Ok(())
+    }
+    fn apply_spawn(&mut self, id: u64, _blueprint: &str) -> Result<(), ScriptError> {
+        self.entities.entry(id).or_default();
+        Ok(())
+    }
+    fn apply_despawn(&mut self, entity: u64) -> Result<(), ScriptError> {
+        if self.entities.remove(&entity).is_none() {
+            return Err(ScriptError::UnknownEntity { entity });
+        }
+        Ok(())
     }
 }
 
@@ -140,8 +168,13 @@ fn while_true_handler_hits_budget_and_host_continues() {
     let outcome = res.outcomes.first().expect("one handler");
     match outcome {
         HandlerOutcome::Errored {
-            error: ScriptError::Budget { .. },
-        } => {}
+            error: ScriptError::Budget { used, .. },
+        } => {
+            assert!(
+                *used > 0,
+                "Budget.used should report real instructions consumed, got {used}"
+            );
+        }
         other => panic!("expected Budget error from while-true, got {other:?}"),
     }
     // The host is still usable (determinism intact): dispatch again works.
@@ -376,7 +409,7 @@ fn quarantine_resets_on_success() {
 }
 
 #[test]
-fn pending_actions_collect_set_part_without_crossing_borrows() {
+fn pending_set_part_surfaces_and_applies_across_dispatches() {
     use tessera_script::PendingAction;
     let mut world = TestWorld::default();
     let e = world.spawn();
@@ -386,24 +419,223 @@ fn pending_actions_collect_set_part_without_crossing_borrows() {
         BTreeMap::from([("charges".to_string(), PartValue::Int(5))]),
     );
     let mut h = ScriptHost::new(Box::new(world));
+    // Scripted part; handler decrements the committed value each dispatch.
     h.load_script(
         "s",
         "Bp",
         &format!(
-            "{HDR}engine.on('Move', engine.NORMAL, function(ev)\n\
-             \x20 engine.set_part(ev.target, 'Charge', {{ charges = 9 }})\n\
+            "{HDR}engine.define_part('Charge', {{\n\
+             \x20 fields = {{ charges = {{ kind = 'int', default = 1, min = 0, max = 99 }} }}\n\
+             }})\n\
+             engine.on('Move', engine.NORMAL, function(ev)\n\
+             \x20 local c = engine.get_part(ev.target, 'Charge')\n\
+             \x20 assert(c ~= nil, 'Charge absent')\n\
+             \x20 engine.set_part(ev.target, 'Charge', {{ charges = c.charges - 1 }})\n\
              \x20 return true\n\
              end)"
         ),
     )
     .expect("loads");
-    // The dispatch doesn't expose raw pending actions through the public API
-    // (the integration card applies them); verify the handler passed and the
-    // underlying snapshot machinery is exercised without a borrow crossing.
+
+    // Every dispatch applies its queued set_part to the world, so the next
+    // dispatch reads the committed value: charges steps 5 -> 4 -> 3 -> 2.
+    // If the host only collected and discarded, it would stay at 4 forever.
+    for (round, want) in [4i64, 3, 2].iter().enumerate() {
+        let res = h.dispatch("Move", e, &[]);
+        assert_eq!(res.error_count(), 0, "round {}: {res:?}", round + 1);
+        assert!(
+            res.apply_errors.is_empty(),
+            "unexpected apply errors round {}: {:?}",
+            round + 1,
+            res.apply_errors
+        );
+        assert_eq!(
+            res.pending_actions,
+            vec![PendingAction::SetPart {
+                entity: e,
+                name: "Charge".to_string(),
+                fields: BTreeMap::from([("charges".to_string(), PartValue::Int(*want))]),
+            }],
+            "round {} did not surface AND apply the expected mutation",
+            round + 1
+        );
+    }
+}
+
+#[test]
+fn pending_spawn_despawn_surface_and_take_effect() {
+    use tessera_script::PendingAction;
+    let mut world = TestWorld::default();
+    let target = world.seed_at(9001); // far from host spawn ids (start at 1)
+    let mut h = ScriptHost::new(Box::new(world));
+    h.load_script(
+        "s",
+        "Bp",
+        &format!(
+            "{HDR}engine.on('Move', engine.NORMAL, function(ev)\n\
+             \x20 local id = engine.spawn('Goblin')\n\
+             \x20 assert(id > 0, 'spawn must return a positive id')\n\
+             \x20 engine.despawn(ev.target)\n\
+             \x20 return true\n\
+             end)"
+        ),
+    )
+    .expect("loads");
+    assert!(
+        h.world().try_entity(target),
+        "target exists before dispatch"
+    );
+
+    let res = h.dispatch("Move", target, &[]);
+    assert_eq!(res.error_count(), 0, "handler passed: {res:?}");
+    assert!(
+        res.apply_errors.is_empty(),
+        "apply errors: {:?}",
+        res.apply_errors
+    );
+
+    // Both actions surface in dispatch order, with the host-assigned spawn id.
+    assert_eq!(res.pending_actions.len(), 2, "{:?}", res.pending_actions);
+    let spawned_id = match &res.pending_actions[0] {
+        PendingAction::Spawn { id, blueprint } => {
+            assert_eq!(blueprint, "Goblin");
+            *id
+        }
+        other => panic!("expected Spawn as first action, got {other:?}"),
+    };
+    assert_eq!(
+        res.pending_actions[1],
+        PendingAction::Despawn { entity: target }
+    );
+
+    // Applied to the world: the spawned entity now exists, the despawned one
+    // is gone (observable effect, §3.3).
+    assert!(h.world().try_entity(spawned_id), "spawn must be applied");
+    assert!(!h.world().try_entity(target), "despawn must be applied");
+}
+
+#[test]
+fn native_part_write_is_immutable_unless_whitelisted() {
+    use tessera_script::ScriptError;
+    let mut world = TestWorld::default();
+    let e = world.seed_at(9001);
+    world.put(
+        e,
+        "NativePower",
+        BTreeMap::from([("level".to_string(), PartValue::Int(3))]),
+    );
+    let mut h = ScriptHost::new(Box::new(world));
+    // NativePower is not a scripted part and not whitelisted -> ImmutablePart.
+    h.load_script(
+        "s",
+        "Bp",
+        &format!(
+            "{HDR}engine.on('Move', engine.NORMAL, function(ev)\n\
+             \x20 engine.set_part(ev.target, 'NativePower', {{ level = 9 }})\n\
+             \x20 return true\n\
+             end)"
+        ),
+    )
+    .expect("loads");
     let res = h.dispatch("Move", e, &[]);
-    assert_eq!(res.error_count(), 0);
-    assert!(!res.any_veto());
-    let _ = PendingAction::Despawn { entity: 0 };
+    assert_eq!(res.error_count(), 0, "handler itself passes: {res:?}");
+    assert_eq!(
+        res.apply_errors.len(),
+        1,
+        "one apply error expected: {:?}",
+        res.apply_errors
+    );
+    assert!(
+        matches!(&res.apply_errors[0], ScriptError::ImmutablePart { name, .. } if name == "NativePower"),
+        "expected ImmutablePart, got {:?}",
+        res.apply_errors[0]
+    );
+    // The rejected write must not have committed.
+    assert_eq!(
+        h.world().snapshot_part(e, "NativePower").unwrap()["level"],
+        PartValue::Int(3),
+        "immutable write must not touch the world"
+    );
+}
+
+#[test]
+fn whitelisted_health_hp_write_is_allowed_and_commits() {
+    let mut world = TestWorld::default();
+    let e = world.seed_at(9001);
+    world.put(
+        e,
+        "Health",
+        BTreeMap::from([("hp".to_string(), PartValue::Int(10))]),
+    );
+    let mut h = ScriptHost::new(Box::new(world));
+    // Health.hp is the v1 whitelisted native field (§4.4): the write succeeds.
+    h.load_script(
+        "s",
+        "Bp",
+        &format!(
+            "{HDR}engine.on('Attack', engine.NORMAL, function(ev)\n\
+             \x20 local dmg = engine.get_part(ev.target, 'Health')\n\
+             \x20 if dmg then dmg.hp = dmg.hp - 1 end\n\
+             \x20 if dmg then engine.set_part(ev.target, 'Health', dmg) end\n\
+             \x20 return true\n\
+             end)"
+        ),
+    )
+    .expect("loads");
+    let res = h.dispatch("Attack", e, &[]);
+    assert_eq!(res.error_count(), 0, "{res:?}");
+    assert!(
+        res.apply_errors.is_empty(),
+        "apply errors: {:?}",
+        res.apply_errors
+    );
+    assert_eq!(
+        h.world().snapshot_part(e, "Health").unwrap()["hp"],
+        PartValue::Int(9),
+        "whitelisted Health.hp write should commit"
+    );
+}
+
+#[test]
+fn scripted_part_write_is_checked_against_schema() {
+    use tessera_script::ScriptError;
+    let mut world = TestWorld::default();
+    let e = world.seed_at(9001);
+    world.put(
+        e,
+        "Charge",
+        BTreeMap::from([("charges".to_string(), PartValue::Int(3))]),
+    );
+    let mut h = ScriptHost::new(Box::new(world));
+    // Write-schema validation: charges is [0, 99] and 1000 is out of range.
+    h.load_script(
+        "s",
+        "Bp",
+        &format!(
+            "{HDR}engine.define_part('Charge', {{\n\
+             \x20 fields = {{ charges = {{ kind = 'int', default = 1, min = 0, max = 99 }} }}\n\
+             }})\n\
+             engine.on('Move', engine.NORMAL, function(ev)\n\
+             \x20 engine.set_part(ev.target, 'Charge', {{ charges = 1000 }})\n\
+             \x20 return true\n\
+             end)"
+        ),
+    )
+    .expect("loads");
+    let res = h.dispatch("Move", e, &[]);
+    assert_eq!(res.error_count(), 0, "handler itself passes: {res:?}");
+    assert_eq!(res.apply_errors.len(), 1, "{:?}", res.apply_errors);
+    assert!(
+        matches!(&res.apply_errors[0], ScriptError::Internal(m) if m.contains("exceeds the maximum")),
+        "expected a write-schema range error, got {:?}",
+        res.apply_errors[0]
+    );
+    // Rejected write does not commit.
+    assert_eq!(
+        h.world().snapshot_part(e, "Charge").unwrap()["charges"],
+        PartValue::Int(3),
+        "out-of-range scripted write must not commit"
+    );
 }
 
 #[test]
@@ -457,6 +689,8 @@ fn dispatch_result_defaults_are_sane() {
     assert_eq!(d.outcomes.len(), 0);
     assert!(!d.any_veto());
     assert_eq!(d.error_count(), 0);
+    assert!(d.pending_actions.is_empty());
+    assert!(d.apply_errors.is_empty());
 }
 
 #[test]

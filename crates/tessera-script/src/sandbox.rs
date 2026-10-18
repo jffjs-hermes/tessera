@@ -56,8 +56,18 @@ pub fn new_sandbox(
     lua.set_memory_limit(SCRIPT_MEMORY_LIMIT)?;
     let counter = Arc::clone(&counter);
     lua.set_interrupt(move |_| {
-        let remaining = counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        if remaining == 0 {
+        // Count down toward zero and stop there: the counter never underflows,
+        // so `remaining()` stays a meaningful "instructions left" and the
+        // reported `Budget.used` (budget - remaining) is real, not a wraparound.
+        // (single-threaded VM, so the CAS loop below never contends).
+        let hit_zero = counter
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |v| if v == 0 { None } else { Some(v - 1) },
+            )
+            .is_err();
+        if hit_zero {
             return Err(Error::RuntimeError(
                 "tessera: instruction budget exceeded".into(),
             ));
