@@ -7,6 +7,7 @@
 pub mod blueprints;
 pub mod ecs;
 pub mod events;
+pub mod path;
 pub mod rng;
 pub mod script_part;
 pub mod tiles;
