@@ -61,6 +61,8 @@ fn build_demo() -> Sim {
     let broker: Arc<RwLock<EntityBroker>> = Arc::new(RwLock::new(EntityBroker::new()));
     let bridge = ScriptBridge::new(broker.clone());
     let world = build_world(&vfs, &bridge);
+    let world = Arc::new(world);
+    bridge.set_world(world.clone());
 
     let mut b = broker.write().unwrap();
     let player = world

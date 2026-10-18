@@ -48,7 +48,7 @@ impl HostRng {
         self.state = x;
         x as u32
     }
-    fn below(&mut self, n: u64) -> u64 {
+    pub fn below(&mut self, n: u64) -> u64 {
         if n == 0 {
             return 0;
         }
@@ -66,8 +66,6 @@ impl HostRng {
         Self::from_seed(self.state ^ acc)
     }
 }
-
-/// `math.random(a?, b?)` shim — deterministic integer results only.
 pub(crate) fn rng_call(rng: &mut HostRng, args: MultiValue) -> Result<i64, ScriptError> {
     let vals: Vec<Value> = args.into_iter().collect();
     match vals.as_slice() {
@@ -117,6 +115,37 @@ pub enum PendingAction {
     Despawn {
         entity: u64,
     },
+    /// A scripted step request: move `entity` to the cell `(x, y)` as that
+    /// actor's turn action. Applied by the simulation's turn loop (this is a
+    /// *turn action*, not a write to a part), so [`WorldAccess`] does not
+    /// implement it — the host surfaces it in [`DispatchResult::pending_actions`]
+    /// and the caller (the sim) resolves it as a `Move`.
+    Step {
+        entity: u64,
+        x: i32,
+        y: i32,
+    },
+    /// A scripted attack request: `attacker` hits `defender`. Also a turn
+    /// action applied by the sim's turn loop (dispatched as an `Attack`).
+    Attack {
+        attacker: u64,
+        defender: u64,
+    },
+    /// A scripted wander request: `entity` takes one seeded random step toward
+    /// a walkable-empty neighbour. Applied by the sim's turn loop.
+    Wander {
+        entity: u64,
+    },
+    /// Spawn `blueprint` at `(x, y)` (or a seeded random walkable empty cell
+    /// when `x`/`y` are `None`) under a host-assigned id, registering with the
+    /// scheduler if the blueprint carries `ActorEnergy`. Applied through
+    /// [`WorldAccess::apply_spawn_at`].
+    SpawnAt {
+        id: u64,
+        blueprint: String,
+        x: Option<i32>,
+        y: Option<i32>,
+    },
 }
 
 /// A read snapshot: entity id -> part name -> field name -> value.
@@ -161,6 +190,9 @@ struct SharedHandles {
     /// so script log evidence lands in the sim's observable event log (see
     /// [`ScriptHost::drain_log`]).
     log_sink: Arc<Mutex<Vec<String>>>,
+    /// Shared read-only spatial query handle for the world-slice nav API
+    /// closures.
+    world_read: Arc<dyn WorldRead>,
 }
 
 /// A pending `engine.on` registration: script, event, priority, handler.
@@ -216,6 +248,98 @@ pub trait WorldAccess {
     fn apply_spawn(&mut self, id: u64, blueprint: &str) -> Result<(), ScriptError>;
     /// Despawn (remove) an entity.
     fn apply_despawn(&mut self, entity: u64) -> Result<(), ScriptError>;
+    /// Spawn a blueprint at a cell (or a seeded random walkable empty cell when
+    /// `x`/`y` are `None`) under a host-assigned id, registering the new
+    /// entity with the scheduler if it carries `ActorEnergy`. This is the real
+    /// implementation behind the earlier stubbed spawn path and `engine.spawn_at`.
+    fn apply_spawn_at(
+        &mut self,
+        id: u64,
+        blueprint: &str,
+        x: Option<i32>,
+        y: Option<i32>,
+    ) -> Result<(), ScriptError>;
+}
+
+/// Read-only spatial/entity queries the script host exposes to `engine.*`
+/// closures. Implemented by the simulation over its live shared state and
+/// shared with the closures via [`SharedHandles`], so a handler can answer the
+/// map/nav reads without spending script instructions iterating cells
+/// (the "no map loops in scripts" rule — one native call per decision).
+///
+/// Everything here is a pure read returning owned, plain values; no borrow of
+/// the world crosses into Luau (the value boundary in the module doc).
+pub trait WorldRead: Send + Sync + 'static {
+    /// Zone dimensions `(width, height)`.
+    fn map_size(&self) -> (u32, u32);
+    /// Terrain walkability of a cell (out of bounds = not walkable).
+    fn is_walkable(&self, x: i32, y: i32) -> bool;
+    /// Whether an actor currently stands on the cell (occupancy query).
+    fn is_occupied(&self, x: i32, y: i32) -> bool;
+    /// The grid position of an entity, if it has one.
+    fn position(&self, entity: u64) -> Option<(i32, i32)>;
+    /// The simulated "player" entity (the demo's `[Player]` spawn), if any.
+    fn player(&self) -> Option<u64>;
+    /// Whether an entity is live (not despawned).
+    fn is_alive(&self, entity: u64) -> bool;
+    /// Integer squared straight-line distance `dist2(a, b)`.
+    fn distance(&self, a: u64, b: u64) -> Option<u32>;
+    /// One deterministic native A* path from `a` to `b` (excluding `from`,
+    /// including `to`), or `None` when unreachable/budget-exceeded. The path is
+    /// returned as a list of `(x, y)` cells; scripts step one cell per turn.
+    fn path(&self, from: u64, to: u64) -> Option<Vec<(i32, i32)>>;
+    /// Nearest walkable-empty cell to `(x, y)` via a deterministic BFS ring.
+    fn nearest_walkable(&self, x: i32, y: i32) -> Option<(i32, i32)>;
+    /// A walkable-empty cell chosen from the row-major list via
+    /// `rng.below(len)` — one native, deterministic draw, or `None` when no
+    /// cell qualifies. The caller passes the host RNG fork so the draw is
+    /// deterministic and does not cross a value boundary.
+    fn random_walkable_tile(&self, rng: &mut HostRng) -> Option<(i32, i32)>;
+    /// The simulation's player-turn clock (increments once per submitted player
+    /// action, cancelled or not).
+    fn player_turns(&self) -> u64;
+}
+
+/// A default [`WorldRead`] used when a host is built without a reader (tests /
+/// minimal worlds): every map query is a negative/empty answer, so scripts
+/// that touch the nav API fail closed rather than panicking.
+#[derive(Clone, Default)]
+pub struct DefaultWorldRead;
+
+impl WorldRead for DefaultWorldRead {
+    fn map_size(&self) -> (u32, u32) {
+        (0, 0)
+    }
+    fn is_walkable(&self, _x: i32, _y: i32) -> bool {
+        false
+    }
+    fn is_occupied(&self, _x: i32, _y: i32) -> bool {
+        true
+    }
+    fn position(&self, _entity: u64) -> Option<(i32, i32)> {
+        None
+    }
+    fn player(&self) -> Option<u64> {
+        None
+    }
+    fn is_alive(&self, _entity: u64) -> bool {
+        false
+    }
+    fn distance(&self, _a: u64, _b: u64) -> Option<u32> {
+        None
+    }
+    fn path(&self, _from: u64, _to: u64) -> Option<Vec<(i32, i32)>> {
+        None
+    }
+    fn nearest_walkable(&self, _x: i32, _y: i32) -> Option<(i32, i32)> {
+        None
+    }
+    fn random_walkable_tile(&self, _rng: &mut HostRng) -> Option<(i32, i32)> {
+        None
+    }
+    fn player_turns(&self) -> u64 {
+        0
+    }
 }
 
 /// A registered script handler bound to one script + event.
@@ -247,6 +371,32 @@ pub struct ScriptHost {
 
 impl ScriptHost {
     pub fn new(world: Box<dyn WorldAccess>) -> Self {
+        Self::with_reader_base(
+            world,
+            Arc::new(DefaultWorldRead),
+            crate::FIRST_SCRIPT_ENTITY,
+        )
+    }
+
+    /// Build a host with the given [`WorldAccess`] (writer) and [`WorldRead`]
+    /// (shared spatial query) handle. The reader is what the world-slice nav
+    /// API closures answer from; the writer is the apply seam the host uses for
+    /// `set_part`/`spawn_at`/etc. A host built with [`Self::new`] gets a
+    /// fail-closed [`DefaultWorldRead`].
+    pub fn with_reader(world: Box<dyn WorldAccess>, world_read: Arc<dyn WorldRead>) -> Self {
+        Self::with_reader_base(world, world_read, crate::FIRST_SCRIPT_ENTITY)
+    }
+
+    /// Like [`Self::with_reader`] but with an explicit first script-assigned
+    /// entity id. The base must encode a nonzero hecs generation (high 32 bits)
+    /// so [`WorldAccess::apply_spawn_at`] can reconstruct the entity via
+    /// `Entity::from_bits`; the simulation's own entities use generation 0, so
+    /// a high base keeps script ids distinct from live ones.
+    pub fn with_reader_base(
+        world: Box<dyn WorldAccess>,
+        world_read: Arc<dyn WorldRead>,
+        first_script_entity: u64,
+    ) -> Self {
         let mut writable_native = BTreeMap::new();
         writable_native.insert("Health".to_string(), BTreeSet::from(["hp".to_string()]));
         Self {
@@ -257,8 +407,9 @@ impl ScriptHost {
                 rng: Arc::new(Mutex::new(HostRng::from_seed(0))),
                 slot: Arc::new(DispatchSlot::default()),
                 on_slot: OnSlot::default(),
-                next_entity: Arc::new(AtomicU64::new(1)),
+                next_entity: Arc::new(AtomicU64::new(first_script_entity)),
                 log_sink: Arc::new(Mutex::new(Vec::new())),
+                world_read,
             },
             handlers: BTreeMap::new(),
             next_seq: 0,
@@ -558,6 +709,173 @@ impl ScriptHost {
             })?,
         )?;
 
+        // ---- world-slice nav / world API (reads over the shared reader; actions as
+        // pending turn actions or spawn_at applied through the writer) ----
+
+        let world_read = shared.world_read.clone();
+        t.set(
+            "map_size",
+            lua.create_function(move |lua2, ()| {
+                let (w, h) = world_read.map_size();
+                let tbl = lua2
+                    .create_table()
+                    .map_err(|e: mlua::Error| mlua::Error::RuntimeError(e.to_string()))?;
+                tbl.set("width", w).map_err(mlua_lua_err)?;
+                tbl.set("height", h).map_err(mlua_lua_err)?;
+                Ok(tbl)
+            })?,
+        )?;
+
+        let world_read = shared.world_read.clone();
+        t.set(
+            "is_walkable",
+            lua.create_function(move |_, (x, y): (i64, i64)| {
+                Ok(world_read.is_walkable(x as i32, y as i32))
+            })?,
+        )?;
+
+        let world_read = shared.world_read.clone();
+        t.set(
+            "is_occupied",
+            lua.create_function(move |_, (x, y): (i64, i64)| {
+                Ok(world_read.is_occupied(x as i32, y as i32))
+            })?,
+        )?;
+
+        let world_read = shared.world_read.clone();
+        t.set(
+            "position",
+            lua.create_function(move |lua2, entity: i64| {
+                point_to_lua(lua2, world_read.position(entity as u64))
+            })?,
+        )?;
+
+        let world_read = shared.world_read.clone();
+        t.set(
+            "player",
+            lua.create_function(move |_, ()| Ok(world_read.player().map(|e| e as i64)))?,
+        )?;
+
+        let world_read = shared.world_read.clone();
+        t.set(
+            "is_alive",
+            lua.create_function(move |_, entity: i64| Ok(world_read.is_alive(entity as u64)))?,
+        )?;
+
+        let world_read = shared.world_read.clone();
+        t.set(
+            "distance",
+            lua.create_function(move |_, (a, b): (i64, i64)| {
+                Ok(world_read.distance(a as u64, b as u64).map(|d| d as i64))
+            })?,
+        )?;
+
+        let world_read = shared.world_read.clone();
+        t.set(
+            "path",
+            lua.create_function(move |lua2, (from, to): (i64, i64)| {
+                let Some(path) = world_read.path(from as u64, to as u64) else {
+                    return Ok(Value::Nil);
+                };
+                let tbl = lua2
+                    .create_table()
+                    .map_err(|e: mlua::Error| mlua::Error::RuntimeError(e.to_string()))?;
+                for (idx, (x, y)) in path.iter().enumerate() {
+                    let pt = lua2
+                        .create_table()
+                        .map_err(|e: mlua::Error| mlua::Error::RuntimeError(e.to_string()))?;
+                    pt.set("x", *x)
+                        .map_err(|e: mlua::Error| mlua::Error::RuntimeError(e.to_string()))?;
+                    pt.set("y", *y)
+                        .map_err(|e: mlua::Error| mlua::Error::RuntimeError(e.to_string()))?;
+                    tbl.set(idx + 1, pt).map_err(mlua_lua_err)?;
+                }
+                Ok(Value::Table(tbl))
+            })?,
+        )?;
+
+        let world_read = shared.world_read.clone();
+        t.set(
+            "nearest_walkable",
+            lua.create_function(move |lua2, (x, y): (i64, i64)| {
+                point_to_lua(lua2, world_read.nearest_walkable(x as i32, y as i32))
+            })?,
+        )?;
+
+        let world_read = shared.world_read.clone();
+        let rng = shared.rng.clone();
+        t.set(
+            "random_walkable_tile",
+            lua.create_function(move |lua2, ()| {
+                let mut g = rng.lock().map_err(|_| lua_err("rng lock"))?;
+                let mut stream = g.fork("random_walkable_tile");
+                point_to_lua(lua2, world_read.random_walkable_tile(&mut stream))
+            })?,
+        )?;
+
+        let world_read = shared.world_read.clone();
+        t.set(
+            "player_turns",
+            lua.create_function(move |_, ()| Ok(world_read.player_turns()))?,
+        )?;
+
+        // Actions queue a pending turn action / spawn-at; the sim resolves
+        // Step/Attack/Wander in its own turn loop (they are turn actions, not
+        // part writes) and the host applies SpawnAt through the writer.
+        let slot = shared.slot.clone();
+        t.set(
+            "step",
+            lua.create_function(move |_, (entity, x, y): (i64, i64, i64)| {
+                slot.pending_mut().push(PendingAction::Step {
+                    entity: entity as u64,
+                    x: x as i32,
+                    y: y as i32,
+                });
+                Ok(())
+            })?,
+        )?;
+
+        let slot = shared.slot.clone();
+        t.set(
+            "attack",
+            lua.create_function(move |_, (attacker, defender): (i64, i64)| {
+                slot.pending_mut().push(PendingAction::Attack {
+                    attacker: attacker as u64,
+                    defender: defender as u64,
+                });
+                Ok(())
+            })?,
+        )?;
+
+        let slot = shared.slot.clone();
+        t.set(
+            "wander",
+            lua.create_function(move |_, entity: i64| {
+                slot.pending_mut().push(PendingAction::Wander {
+                    entity: entity as u64,
+                });
+                Ok(())
+            })?,
+        )?;
+
+        let slot = shared.slot.clone();
+        let next_id = shared.next_entity.clone();
+        t.set(
+            "spawn_at",
+            lua.create_function(
+                move |_lua2, (blueprint, x, y): (String, Option<i64>, Option<i64>)| {
+                    let id = next_id.fetch_add(1, Ordering::Relaxed);
+                    slot.pending_mut().push(PendingAction::SpawnAt {
+                        id,
+                        blueprint: blueprint.clone(),
+                        x: x.map(|v| v as i32),
+                        y: y.map(|v| v as i32),
+                    });
+                    Ok(id as i64)
+                },
+            )?,
+        )?;
+
         t.raw_set("EARLY", -64)?;
         t.raw_set("NORMAL", 0)?;
         t.raw_set("LATE", 64)?;
@@ -567,7 +885,7 @@ impl ScriptHost {
     /// Known handler event names for `engine.on` validation (the canonical
     /// core events shipped by the event bus).
     pub fn known_events(&self) -> &'static [&'static str] {
-        &["Move", "Attack", "TakeDamage", "ActorTurnStart"]
+        &["Move", "Attack", "TakeDamage", "ActorTurnStart", "Death"]
     }
 
     pub fn register_handler(
@@ -718,6 +1036,21 @@ impl ScriptHost {
                 } => self.apply_set_part(*entity, name, fields),
                 PendingAction::Spawn { id, blueprint } => self.world.apply_spawn(*id, blueprint),
                 PendingAction::Despawn { entity } => self.world.apply_despawn(*entity),
+                PendingAction::SpawnAt {
+                    id,
+                    blueprint,
+                    x,
+                    y,
+                } => self.world.apply_spawn_at(*id, blueprint, *x, *y),
+                // Step/Attack/Wander are *turn actions* the sim resolves in its
+                // own turn loop, not part writes the host applies. They stay in
+                // the returned `pending_actions` for the caller to consume, so
+                // the host deliberately does not attempt to apply them.
+                PendingAction::Step { .. }
+                | PendingAction::Attack { .. }
+                | PendingAction::Wander { .. } => {
+                    continue;
+                }
             };
             if let Err(e) = result {
                 errors.push(e);
@@ -858,6 +1191,24 @@ impl DispatchResult {
 
 fn lua_err(msg: &str) -> mlua::Error {
     mlua::Error::RuntimeError(msg.to_string())
+}
+
+/// Map an [`mlua::Error`] through a `RuntimeError` (used by helper closures
+/// whose inner calls already return `mlua::Error`, keeping the closure body
+/// terse).
+fn mlua_lua_err(e: mlua::Error) -> mlua::Error {
+    mlua::Error::RuntimeError(e.to_string())
+}
+
+/// Convert an optional `(x, y)` cell into a Lua `{x=.., y=..}` table, or `nil`.
+fn point_to_lua(lua: &Lua, point: Option<(i32, i32)>) -> Result<Value, mlua::Error> {
+    let Some((x, y)) = point else {
+        return Ok(Value::Nil);
+    };
+    let tbl = lua.create_table()?;
+    tbl.set("x", x)?;
+    tbl.set("y", y)?;
+    Ok(Value::Table(tbl))
 }
 
 /// Instructions consumed by the current dispatch/load, for `Budget.used`.
