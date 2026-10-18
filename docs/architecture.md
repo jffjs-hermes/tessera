@@ -149,9 +149,9 @@ Run as small batches with human review between each.
 
 - [x] **M0 Scaffold:** workspace, CI (fmt, clippy, test), dual MIT/Apache-2.0 license, VFS trait, seeded RNG, determinism rules.
 - [x] **M1 Tile renderer:** atlas renderer, tile-id registry, movable `@` on a hardcoded map, tileset hot reload.
-- [ ] **M2 Data-driven entities:** blueprint loader with inheritance, spawning from data, hot reload, ECS plus dynamic part storage.
-- [ ] **M3 Events and turns:** `Move`, `Attack`, `TakeDamage` events, speed-based scheduler, headless simulation tests.
-- [ ] **M4 Scripting:** embed Luau, minimal API (`spawn`, get/set part, `on(event)`), one behavior (e.g. poison) written entirely in script.
+- [x] **M2 Data-driven entities:** blueprint loader with inheritance, spawning from data, hot reload, ECS plus dynamic part storage.
+- [x] **M3 Events and turns:** `Move`, `Attack`, `TakeDamage` events, speed-based scheduler, headless simulation tests.
+- [x] **M4 Scripting:** embed Luau, minimal API (`spawn`, get/set part, `on(event)`), one behavior (e.g. poison) written entirely in script.
 - [ ] **M5 Mod loader:** manifests, load order, patch operations, zip-able folders via the VFS, sample mod that changes a blueprint and adds a script.
 - [ ] **M6 World slice:** zones/chunks, cave worldgen, FOV, pathfinding, basic AI (wander/chase).
   Demo acceptance (all required, shown in the running demo):

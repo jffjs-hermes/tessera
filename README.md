@@ -7,8 +7,9 @@
 A data-driven, scriptable, mod-friendly tile-based roguelike engine in Rust,
 inspired by Caves of Qud. Desktop only (Linux/macOS/Windows; CI builds and tests all three).
 
-**Status:** M0 (scaffold), M1 (tile renderer) and M2 (data-driven entities) complete;
-M3 (typed event bus + energy scheduler wired into the demo) in progress.
+**Status:** M0 (scaffold), M1 (tile renderer), M2 (data-driven entities), M3 (typed event
+bus + energy scheduler wired into the demo) and M4 (Luau scripting) complete. M6 (world slice
+and demo) is next.
 
 ## Run
 
