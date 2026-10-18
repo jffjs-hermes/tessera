@@ -295,39 +295,13 @@ impl App {
     /// Build the draw cells by reading sim + map state only (pure reader). It
     /// never dispatches events and never mutates sim state.
     fn build_cells(&self) -> Vec<Cell> {
-        let map = self.sim.map();
-        let mut cells = Vec::with_capacity(map.width * map.height);
-        let mut push = |x: usize, y: usize, id: &str, under: Option<&tessera_core::tiles::Tile>| {
-            let t = self.content.tiles.get(id);
-            let tessera_core::tiles::TileVisual::Glyph { ch } = t.visual;
-            let bg =
-                t.bg.or(under.and_then(|u| u.bg))
-                    .unwrap_or(tessera_core::tiles::Rgb::BLACK);
-            let (f, b) = (t.fg.to_f32(), bg.to_f32());
-            cells.push(Cell {
-                x: x as u32,
-                y: y as u32,
-                glyph: self.content.atlas.slot(ch),
-                fg: [f[0], f[1], f[2], 1.0],
-                bg: [b[0], b[1], b[2], 1.0],
-            });
-        };
-        // Read the player's tile id from its live RenderTile each frame so the
-        // draw path stays data-driven (spawned from `[Player]`, not hardcoded).
-        let player_tile = self.sim.player_tile();
-        let (px, py) = self.sim.position();
-        for y in 0..map.height {
-            for x in 0..map.width {
-                let terrain = map.tile_id(x, y);
-                if (x as i32, y as i32) == (px, py) {
-                    let under = self.content.tiles.get(terrain).clone();
-                    push(x, y, &player_tile, Some(&under));
-                } else {
-                    push(x, y, terrain, None);
-                }
-            }
-        }
-        cells
+        let targets = self.sim.renderables();
+        sim::build_cells(
+            self.sim.map(),
+            &self.content.tiles,
+            &self.content.atlas,
+            &targets,
+        )
     }
 
     /// Hot reload (script + blueprint + tileset): rebuild the whole content
