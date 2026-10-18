@@ -14,4 +14,5 @@ pub mod tiles;
 pub mod turns;
 pub mod vfs;
 pub mod world;
+pub mod worldgen;
 pub mod zone;
