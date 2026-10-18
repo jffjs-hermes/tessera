@@ -90,6 +90,24 @@ pub struct Health {
     pub hp: i32,
 }
 
+/// The outcome of one actor attempting to enter a tile, from its perspective.
+/// Caves-of-Qud-style occupancy: at most one actor per tile, and moving into a
+/// live enemy becomes a bump attack rather than an overlap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TileEntry {
+    /// The tile holds no live actor the mover would collide with; a `Move`
+    /// onto it may proceed.
+    Clear,
+    /// The tile holds a live, attackable actor (a `Health` part with `hp >
+    /// 0`). Moving into it is a bump: dispatch an `Attack` against the carried
+    /// entity instead of a `Move`.
+    Bump(Entity),
+    /// The tile holds a live blocking actor that cannot be attacked (no
+    /// `Health` part, or a `Health` with `hp == 0`). A `Move` onto it is
+    /// cancelled, the same way a wall-blocked move is cancelled.
+    Blocked,
+}
+
 /// What damaged a [`TakeDamage`] target. Integer-only enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DamageSource {
@@ -236,6 +254,46 @@ impl SimContext {
             .unwrap_or_else(|p| p.into_inner())
             .typed_part::<Position>(entity, &PartTypeId::new(PART_POSITION))
             .copied()
+    }
+
+    /// Classify the tile `tile` from the perspective of `mover` entering it:
+    /// whether it is free to move into, holds a live enemy to bump-attack, or
+    /// is occupied by a blocking non-combat actor. Scans every live entity
+    /// carrying a [`Position`] in deterministic (entity-id) order; the mover
+    /// itself is excluded. This is the single occupancy query behind the
+    /// Caves-of-Qud bump rule (moving into a live `Health` actor becomes an
+    /// `Attack`, never an overlap).
+    // all Health actors are attackable for now
+    pub fn tile_entry(&self, tile: Point, mover: Entity) -> TileEntry {
+        let b = self.broker.read().unwrap_or_else(|p| p.into_inner());
+        let mut bump: Option<Entity> = None;
+        let mut blocked = false;
+        for e in b.entities_with_part(PART_POSITION) {
+            if e == mover {
+                continue;
+            }
+            let in_tile = b
+                .typed_part::<Position>(e, &PartTypeId::new(PART_POSITION))
+                .map(|p| p.x == tile.x && p.y == tile.y)
+                .unwrap_or(false);
+            if !in_tile {
+                continue;
+            }
+            let live = b
+                .typed_part::<Health>(e, &PartTypeId::new(PART_HEALTH))
+                .map(|h| h.hp > 0)
+                .unwrap_or(false);
+            if live {
+                bump = Some(e);
+                break;
+            }
+            blocked = true;
+        }
+        match bump {
+            Some(e) => TileEntry::Bump(e),
+            None if blocked => TileEntry::Blocked,
+            None => TileEntry::Clear,
+        }
     }
 
     /// Register a **mutator** handler for event type `E`. Mutators run by
@@ -1076,6 +1134,62 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, EventError::InvalidPayload { .. }));
+    }
+
+    // ---- occupancy classification (Caves-of-Qud bump) ---------------------
+
+    /// Spawn a positioned entity optionally carrying a Health part (hp 0 means
+    /// "dead/non-combat": present but not live).
+    fn spawn_actor_at(ctx: &mut SimContext, x: i32, y: i32, hp: Option<i32>) -> Entity {
+        let e = spawn_pos(ctx, x, y);
+        if let Some(hp) = hp {
+            ctx.broker
+                .write()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert_part(e, PartTypeId::new(PART_HEALTH), Box::new(Health { hp }))
+                .unwrap();
+        }
+        e
+    }
+
+    #[test]
+    fn empty_tile_is_clear() {
+        let mut ctx = context();
+        let mover = spawn_pos(&mut ctx, 5, 5);
+        assert_eq!(ctx.tile_entry(Point::new(6, 5), mover), TileEntry::Clear);
+    }
+
+    #[test]
+    fn live_health_actor_is_a_bump_target() {
+        let mut ctx = context();
+        let mover = spawn_pos(&mut ctx, 5, 5);
+        let foe = spawn_actor_at(&mut ctx, 6, 5, Some(10));
+        assert_eq!(
+            ctx.tile_entry(Point::new(6, 5), mover),
+            TileEntry::Bump(foe)
+        );
+        // The mover itself occupies its own tile: excluded, so not flagged.
+        assert_eq!(ctx.tile_entry(Point::new(5, 5), mover), TileEntry::Clear);
+    }
+
+    #[test]
+    fn actor_without_health_blocks() {
+        let mut ctx = context();
+        let mover = spawn_pos(&mut ctx, 5, 5);
+        spawn_actor_at(&mut ctx, 6, 5, None); // Position only, no Health
+        assert_eq!(ctx.tile_entry(Point::new(6, 5), mover), TileEntry::Blocked);
+    }
+
+    #[test]
+    fn dead_actor_blocks_rather_than_bumps() {
+        let mut ctx = context();
+        let mover = spawn_pos(&mut ctx, 5, 5);
+        spawn_actor_at(&mut ctx, 6, 5, Some(0)); // Health present but hp 0
+        assert_eq!(
+            ctx.tile_entry(Point::new(6, 5), mover),
+            TileEntry::Blocked,
+            "a non-live Health actor is a blocking non-combatant, not a bump target"
+        );
     }
 
     #[test]
