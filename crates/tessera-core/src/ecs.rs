@@ -387,6 +387,18 @@ impl EntityBroker {
         self.part_map(entity).and_then(|m| m.get(id))
     }
 
+    /// All live entities carrying a part with the given name, in deterministic
+    /// (entity-id) order. Used by the occupancy query (`is_occupied`) and by
+    /// spawn-target scanning; never iterates a `HashMap`.
+    pub fn entities_with_part(&self, name: &str) -> Vec<Entity> {
+        let id = PartTypeId::new(name);
+        self.part_maps
+            .iter()
+            .filter(|(_, pm)| pm.contains(&id))
+            .map(|(e, _)| *e)
+            .collect()
+    }
+
     pub fn get_part_mut(&mut self, entity: Entity, id: &PartTypeId) -> Option<&mut dyn Part> {
         self.part_map_mut(entity).and_then(|m| m.get_mut(id))
     }

@@ -53,6 +53,18 @@ pub struct Zone {
     cells: Vec<String>,
 }
 
+impl Default for Zone {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            width: 0,
+            height: 0,
+            start: Point::new(0, 0),
+            cells: Vec::new(),
+        }
+    }
+}
+
 impl Zone {
     /// Build a zone from owned row-major cells (loader and tests both funnel
     /// through this; callers must guarantee `cells.len() == width * height`).

@@ -223,6 +223,44 @@ impl World {
         id: &str,
         broker: &mut EntityBroker,
     ) -> Result<Entity, SpawnError> {
+        let entity = broker.spawn();
+        match self.stamp_blueprint(id, broker, entity) {
+            Ok(()) => Ok(entity),
+            Err(e) => {
+                broker.despawn(entity).ok();
+                Err(e)
+            }
+        }
+    }
+
+    /// Spawn a blueprint **onto an already-created entity** (one reserved by a
+    /// caller-chosen id via [`EntityBroker::spawn_with_bits`]). Resolves the
+    /// same flattened blueprint and stamps every part, without allocating a new
+    /// entity id — this is how scripted `engine.spawn_at` creates an entity at
+    /// the id the script was already told. On any failure the entity is
+    /// despawned (rolled back), matching [`Self::spawn_blueprint`].
+    pub fn spawn_blueprint_at(
+        &self,
+        id: &str,
+        broker: &mut EntityBroker,
+        entity: hecs::Entity,
+    ) -> Result<(), SpawnError> {
+        if let Err(e) = self.stamp_blueprint(id, broker, entity) {
+            broker.despawn(entity).ok();
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Resolve the flattened blueprint `id` and stamp every part onto `entity`
+    /// (which must already be live in `broker`). Shared by [`Self::spawn_blueprint`]
+    /// and [`Self::spawn_blueprint_at`]; the caller rolls back on error.
+    fn stamp_blueprint(
+        &self,
+        id: &str,
+        broker: &mut EntityBroker,
+        entity: hecs::Entity,
+    ) -> Result<(), SpawnError> {
         let lib = self
             .library
             .read()
@@ -230,8 +268,6 @@ impl World {
         let blueprint = lib
             .get(id)
             .ok_or_else(|| SpawnError::UnknownBlueprint(id.to_string()))?;
-
-        let entity = broker.spawn();
         for (name, payload) in &blueprint.parts {
             let part_id = PartTypeId::new(name.clone());
             match self.registry.storage(&part_id) {
@@ -241,8 +277,8 @@ impl World {
                         .get(name)
                         .ok_or_else(|| SpawnError::UnregisteredPart(name.clone()))?;
                     spawner(broker.world_mut(), entity, payload).inspect_err(|_| {
-                        // Roll back the partially-built entity so a failed spawn leaves
-                        // no half-stamped husk behind.
+                        // Roll back the partially-built entity so a failed spawn
+                        // leaves no half-stamped husk behind.
                         broker.despawn(entity).ok();
                     })?;
                 }
@@ -253,15 +289,15 @@ impl World {
                             msg: e.to_string(),
                         }
                     })?;
-                    broker
-                        .insert_part(entity, name.clone(), part)
-                        .map_err(|e| SpawnError::PartBuild {
+                    if let Err(e) = broker.insert_part(entity, name.clone(), part).map_err(|e| {
+                        SpawnError::PartBuild {
                             name: name.clone(),
                             msg: e.to_string(),
-                        })
-                        .inspect_err(|_| {
-                            broker.despawn(entity).ok();
-                        })?;
+                        }
+                    }) {
+                        broker.despawn(entity).ok();
+                        return Err(e);
+                    }
                 }
                 None => {
                     // Reachable only if the blueprint library escaped loader
@@ -272,7 +308,7 @@ impl World {
                 }
             }
         }
-        Ok(entity)
+        Ok(())
     }
 }
 
