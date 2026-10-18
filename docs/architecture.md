@@ -126,7 +126,16 @@ parts.Render = { tile = "creature.goblin" }
   access only to the exposed API. No network access.
 - The API is versioned and documented, and the base game uses it too, so it is always exercised.
 - Native plugins (dynamic libraries) are possible on desktop but deferred; do not start there.
-- Keep hot loops (FOV, pathfinding, AI queries) native; scripts orchestrate.
+- Keep the sandbox and budget rules above, and put as much game logic in scripts as possible.
+  Core owns the primitives and invariants; scripts own the rules, policy and tuning.
+- Core (native) owns: grid and map storage, walkable and occupied queries, distance, deterministic
+  A* pathfinding, FOV (later), the seeded RNG streams, event dispatch, the scheduler, spawn and
+  despawn, and emitting a `Died` event when health reaches 0.
+- Scripts (Luau) own: the AI policy (wander, chase when within range, attack when adjacent), the
+  death and respawn policy (where to respawn, the respawn timer, what to spawn), and all tuning
+  constants (detection range, respawn delay, turn counts). Hot loops stay native: a script decides
+  per actor per turn and does not loop over the map; each path search and nearest-tile search is
+  one native call.
 
 ## 7. Determinism rules
 
@@ -140,11 +149,19 @@ Run as small batches with human review between each.
 
 - [x] **M0 Scaffold:** workspace, CI (fmt, clippy, test), dual MIT/Apache-2.0 license, VFS trait, seeded RNG, determinism rules.
 - [x] **M1 Tile renderer:** atlas renderer, tile-id registry, movable `@` on a hardcoded map, tileset hot reload.
-- [ ] **M2 Data-driven entities:** blueprint loader with inheritance, spawning from data, hot reload, ECS plus dynamic part storage.
-- [ ] **M3 Events and turns:** `Move`, `Attack`, `TakeDamage` events, speed-based scheduler, headless simulation tests.
-- [ ] **M4 Scripting:** embed Luau, minimal API (`spawn`, get/set part, `on(event)`), one behavior (e.g. poison) written entirely in script.
+- [x] **M2 Data-driven entities:** blueprint loader with inheritance, spawning from data, hot reload, ECS plus dynamic part storage.
+- [x] **M3 Events and turns:** `Move`, `Attack`, `TakeDamage` events, speed-based scheduler, headless simulation tests.
+- [x] **M4 Scripting:** embed Luau, minimal API (`spawn`, get/set part, `on(event)`), one behavior (a zapping goblin, the Zapper demo) written entirely in script.
 - [ ] **M5 Mod loader:** manifests, load order, patch operations, zip-able folders via the VFS, sample mod that changes a blueprint and adds a script.
 - [ ] **M6 World slice:** zones/chunks, cave worldgen, FOV, pathfinding, basic AI (wander/chase).
+  Demo acceptance (all required, shown in the running demo):
+  1. The map is loaded from data, then the player and one goblin are spawned from blueprints.
+  2. The goblin wanders randomly, using the seeded `SimRng` stream.
+  3. When the player is within 10 tiles by straight-line distance, the goblin moves toward the player along a path and attacks when adjacent.
+  4. When the player dies, the player respawns at the start tile. If that tile is occupied, use the nearest free walkable tile.
+  5. When the goblin dies, a new goblin spawns after 5 PLAYER turns, at a random walkable empty tile.
+  FOV: later; detection uses straight-line distance for now.
+  Execution order: M4, M6 (world slice and demo), M5 (mod loader), M7.
 - [ ] **M7 Saves and tooling:** versioned saves, debug console, egui entity inspector.
 
 After M7: inventory, stats, mutations, factions, quests, and layered worldgen.
