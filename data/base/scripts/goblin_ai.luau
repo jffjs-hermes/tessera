@@ -1,13 +1,13 @@
 -- tessera-api: 1
--- Goblin AI + death/respawn policy.
+-- Goblin AI + death/respawn policy (goblin only).
 --
 -- Stateless per turn (the ActorTurnStart hook): straight-line distance-10
 -- chase, adjacent attack, and seeded wander via engine.wander. The script owns
--- both Death responses: a dead player respawns at the zone start tile (or the
--- nearest free tile), and a dead goblin respawns after 5 player turns at a
+-- the goblin's Death response: a dead goblin respawns after 5 player turns at a
 -- random walkable-empty tile. The respawn clock lives in a `RespawnSystem`
 -- script part on the world-state singleton (`engine.world_state()`), which the
--- binary creates at load.
+-- binary creates at load. The player's death/respawn is NOT handled here — it
+-- lives in the Player-owned `scripts/player_respawn.luau`.
 --
 -- `parts.GoblinBrain = { detect = 10 }` (on the Goblin blueprint) carries the
 -- tuning: detection is straight-line squared distance <= detect^2 (100).
@@ -28,7 +28,6 @@ engine.define_part("RespawnSystem", {
 local DETECT2 = 100 -- straight-line distance <= 10 (squared)
 local ADJACENT2 = 2 -- Chebyshev distance 1 (8-neighborhood, squared)
 local RESPAWN_DELAY = 5 -- player turns
-local PLAYER_BP = "Player"
 local GOBLIN_BP = "Goblin"
 
 local function schedule_goblin_respawn()
@@ -58,19 +57,6 @@ local function check_goblin_respawn()
   engine.spawn_at(clock.blueprint, tile.x, tile.y)
   engine.set_part(ws, "RespawnSystem", { due = -1, blueprint = "" })
   engine.log(("goblin respawned at %d,%d"):format(tile.x, tile.y))
-end
-
-local function respawn_player()
-  local start = engine.zone_start()
-  if not start then return end
-  local x, y = start.x, start.y
-  if engine.is_occupied(x, y) then
-    local near = engine.nearest_walkable(x, y)
-    if not near then return end
-    x, y = near.x, near.y
-  end
-  engine.spawn_at(PLAYER_BP, x, y)
-  engine.log(("player respawned at %d,%d"):format(x, y))
 end
 
 engine.on("ActorTurnStart", engine.NORMAL, function(ev)
@@ -107,15 +93,12 @@ end)
 
 engine.on("Death", engine.NORMAL, function(ev)
   local target = ev.target
-  if target == engine.player() then
-    engine.despawn(target)
-    respawn_player()
-    return true
-  end
   if engine.get_part(target, "GoblinBrain") then
     engine.despawn(target)
     schedule_goblin_respawn()
     return true
   end
+  -- The player's death is NOT handled here; it belongs to the Player-owned
+  -- `scripts/player_respawn.luau`.
   return true
 end)

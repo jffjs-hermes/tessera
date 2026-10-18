@@ -1,6 +1,6 @@
 //! Headless deterministic tests for the goblin AI + death/respawn policy,
 //! driven through the real sim, script bridge, and the shipped `goblin_ai.luau`
-//! against the base data pack.
+//! and `player_respawn.luau` against the base data pack.
 //!
 //! Every behavior is asserted on the deterministic event log + entity/hp state,
 //! mirroring how the demo is exercised in `--headless`:
@@ -9,9 +9,11 @@
 //!     and a far-away goblin (dist2 = 121) wanders deterministically;
 //!   - an adjacent goblin Attacks and reduces the player's hp;
 //!   - player death despawns the old entity and respawns `Player` at the start
-//!     tile, with the player-turn clock counting through the death;
+//!     tile (the player's own `player_respawn.luau` script, not the goblin's),
+//!     with the player-turn clock counting through the death;
 //!   - a killed goblin is absent, then reappears only after exactly 5 player
 //!     turns at a seeded walkable-empty tile;
+//!   - the goblin script alone does NOT respawn the player; and
 //!   - a full map (no free tile) leaves the respawn pending without crashing.
 
 use std::path::PathBuf;
@@ -31,10 +33,10 @@ const PLAYER_BP: &str = "Player";
 const GOBLIN_BP: &str = "Goblin";
 
 /// Build the world exactly as the binary does: register engine parts, load
-/// every shipped script (registering their `define_part` schemas incl.
-/// `GoblinBrain`/`RespawnSystem`), sync schemas into the world registry, then
-/// load the blueprints.
-fn build_world(vfs: &DirVfs, bridge: &ScriptBridge) -> World {
+/// every shipped script under `scripts/` *except* the leaf filenames in `skip`
+/// (registering their `define_part` schemas incl. `GoblinBrain`/`RespawnSystem`),
+/// sync schemas into the world registry, then load the blueprints.
+fn build_world(vfs: &DirVfs, bridge: &ScriptBridge, skip: &[&str]) -> World {
     let mut world = World::new();
     world
         .register_component::<RenderTile>("Render")
@@ -53,7 +55,7 @@ fn build_world(vfs: &DirVfs, bridge: &ScriptBridge) -> World {
     // schemas the blueprints validate against), sync schemas into the world
     // registry, then load the blueprints.
     for path in vfs.list("scripts").expect("list scripts") {
-        if path.ends_with(".luau") {
+        if path.ends_with(".luau") && !skip.contains(&leaf(&path)) {
             let src = vfs.read_to_string(&path).expect("read script");
             bridge.load(&path, &path, &src).expect("load script");
         }
@@ -61,6 +63,11 @@ fn build_world(vfs: &DirVfs, bridge: &ScriptBridge) -> World {
     bridge.sync_schemas(&mut world).expect("sync schemas");
     world.load(vfs).expect("load blueprints");
     world
+}
+
+/// The leaf file name of a VFS path (used to filter which scripts load).
+fn leaf(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 /// A bordered all-floor demo room with a pillar at `x % 8 == 4 && y % 6 == 3`,
@@ -93,13 +100,13 @@ fn spawn_actor(world: &World, broker: &mut EntityBroker, bp: &str, x: i32, y: i3
 }
 
 /// Build the sim: a player at (1,1) and a goblin at `gbx, gby`, with the
-/// shipped scripts loaded and a world-state singleton installed (respawn
-/// anchor). Returns the sim and the shared broker.
-fn build_sim(gbx: i32, gby: i32) -> (Sim, Arc<RwLock<EntityBroker>>) {
+/// shipped scripts (minus the leaf names in `skip`) loaded and a world-state
+/// singleton installed (respawn anchor). Returns the sim and shared broker.
+fn build_sim_skipping(gbx: i32, gby: i32, skip: &[&str]) -> (Sim, Arc<RwLock<EntityBroker>>) {
     let vfs = DirVfs::new(PathBuf::from(DATA));
     let broker: Arc<RwLock<EntityBroker>> = Arc::new(RwLock::new(EntityBroker::new()));
     let bridge = ScriptBridge::new(broker.clone());
-    let world = Arc::new(build_world(&vfs, &bridge));
+    let world = Arc::new(build_world(&vfs, &bridge, skip));
     bridge.set_world(world.clone());
 
     let mut b = broker.write().unwrap();
@@ -121,6 +128,11 @@ fn build_sim(gbx: i32, gby: i32) -> (Sim, Arc<RwLock<EntityBroker>>) {
         Some(goblin),
     );
     (sim, broker)
+}
+
+/// Build the sim with every shipped script loaded.
+fn build_sim(gbx: i32, gby: i32) -> (Sim, Arc<RwLock<EntityBroker>>) {
+    build_sim_skipping(gbx, gby, &[])
 }
 
 /// Number of live "creature" entities: broker entities carrying both a
@@ -272,6 +284,46 @@ fn player_death_respawns_at_start_and_clock_counts_through() {
     let _ = &broker;
 }
 
+/// The goblin script alone does NOT handle the player's Death. With only
+/// `goblin_ai.luau` loaded (its `player_respawn.luau` sibling skipped), an
+/// adjacent goblin still kills the player — but the fresh `Player` never
+/// respawns: hp stays 0 across many more turns and no "player respawned" log
+/// is emitted. This pins the ownership split: the goblin's script owns only
+/// the goblin's respawn.
+#[test]
+fn goblin_script_alone_does_not_respawn_player() {
+    let (mut sim, _broker) = build_sim_skipping(2, 1, &["player_respawn.luau"]);
+    // The adjacent goblin (its AI is the loaded goblin_ai.luau) bites the
+    // player to death.
+    let mut reached_zero = false;
+    for _ in 0..120 {
+        sim.submit_action(PlayerAction::Wait).unwrap();
+        if sim.player_health() == 0 {
+            reached_zero = true;
+            break;
+        }
+    }
+    assert!(reached_zero, "goblin must be able to kill the player");
+
+    let death_turn = sim.player_turns_public();
+    // Many more turns later the player must STILL be dead: the goblin script
+    // does not respawn it.
+    for _ in 0..20 {
+        sim.submit_action(PlayerAction::Wait).unwrap();
+    }
+    assert_eq!(
+        sim.player_health(),
+        0,
+        "without the player's own script the killed player must stay dead (turns {} after death)",
+        sim.player_turns_public() - death_turn
+    );
+    assert!(
+        !sim.log().iter().any(|l| l.contains("player respawned at")),
+        "no player respawn may come from the goblin script, got {:?}",
+        sim.log()
+    );
+}
+
 /// Goblin death + 5-player-turn respawn timing.
 #[test]
 fn goblin_respawns_after_exactly_five_player_turns() {
@@ -337,7 +389,7 @@ fn full_map_random_tile_retry_does_not_crash() {
         let vfs = DirVfs::new(PathBuf::from(DATA));
         let broker: Arc<RwLock<EntityBroker>> = Arc::new(RwLock::new(EntityBroker::new()));
         let bridge = ScriptBridge::new(broker.clone());
-        let world = Arc::new(build_world(&vfs, &bridge));
+        let world = Arc::new(build_world(&vfs, &bridge, &[]));
         bridge.set_world(world.clone());
         let mut b = broker.write().unwrap();
         let player = spawn_actor(&world, &mut b, PLAYER_BP, 1, 1);
