@@ -10,4 +10,4 @@ pub mod scripting;
 pub mod sim;
 
 pub use scripting::ScriptBridge;
-pub use sim::{PlayerAction, Sim};
+pub use sim::{PlayerAction, RenderTarget, Sim, build_cells};

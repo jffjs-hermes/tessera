@@ -28,12 +28,14 @@ use tessera_core::events::{
     EARLY, HandlerAction, LATE, Move, NORMAL, Point, SimContext, TakeDamage,
 };
 use tessera_core::rng::SimRng;
-use tessera_core::tiles::TileRegistry;
+use tessera_core::tiles::{Rgb, Tile, TileRegistry, TileVisual};
 use tessera_core::turns::{
     ActorEnergy, BASE_SPEED, PART_ENERGY, Scheduler, TurnAction, TurnReport,
 };
 use tessera_core::world::RenderTile;
 use tessera_core::zone::Zone;
+use tessera_render::Cell;
+use tessera_render::atlas::Atlas;
 
 use crate::scripting::{ScriptBridge, entity_to_id, int_params};
 
@@ -53,6 +55,16 @@ pub enum PlayerAction {
     Zap,
     /// Do nothing this turn.
     Wait,
+}
+
+/// A positioned entity the renderer draws: a data-driven tile id at a grid
+/// cell, resolved against the tile registry at draw time (never a hardcoded
+/// glyph). Drawn in the deterministic (entity-id) order the caller supplies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderTarget {
+    pub x: i32,
+    pub y: i32,
+    pub tile: String,
 }
 
 /// The demo simulation harness: entity broker + map + rng + typed event bus +
@@ -179,16 +191,33 @@ impl Sim {
         &self.ctx.map
     }
 
-    /// The player's rendered tile id (from its `RenderTile` component).
-    pub fn player_tile(&self) -> String {
-        self.ctx
-            .broker
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .world()
-            .get::<&RenderTile>(self.player)
-            .ok()
-            .map_or_else(|| "creature.player.missing".to_string(), |r| r.tile.clone())
+    /// Every live entity carrying both a `RenderTile` (the `Render` part) and
+    /// a `Position`, as a positioned tile id to draw on top of the terrain.
+    /// Deterministic draw order: sorted by entity id (never hash order), so the
+    /// resulting cells are stable frame to frame. Meant for the renderer, which
+    /// stays a pure reader — this never dispatches events or mutates state.
+    pub fn renderables(&self) -> Vec<RenderTarget> {
+        use tessera_core::events::{PART_POSITION, Position};
+        let b = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
+        let mut targets: Vec<(Entity, RenderTarget)> = Vec::new();
+        for e in b.entities_with_part(PART_POSITION) {
+            let Some(pos) = b.typed_part::<Position>(e, &PART_POSITION.into()) else {
+                continue;
+            };
+            let Ok(rt) = b.world().get::<&RenderTile>(e) else {
+                continue;
+            };
+            targets.push((
+                e,
+                RenderTarget {
+                    x: pos.x,
+                    y: pos.y,
+                    tile: rt.tile.clone(),
+                },
+            ));
+        }
+        targets.sort_by_key(|(e, _)| *e);
+        targets.into_iter().map(|(_, t)| t).collect()
     }
 
     /// The player's turn clock (increments once per submitted player action).
@@ -703,6 +732,50 @@ impl Sim {
         }
         self.text_map(tiles)
     }
+}
+
+/// Build one frame's draw cells: terrain everywhere, then every renderable
+/// entity drawn on top at its cell. The player keeps its behavior — its
+/// background falls through to the terrain tile under it (an entity tile with
+/// no `bg` inherits the terrain's). A pure reader: no event dispatch, no sim
+/// mutation; `targets` must already be in deterministic (entity-id) order.
+pub fn build_cells(
+    map: &Zone,
+    tiles: &TileRegistry,
+    atlas: &Atlas,
+    targets: &[RenderTarget],
+) -> Vec<Cell> {
+    let mut cells: Vec<Option<Cell>> = vec![None; map.width * map.height];
+    let mut set = |x: usize, y: usize, id: &str, under: Option<&Tile>| {
+        let t = tiles.get(id);
+        let TileVisual::Glyph { ch } = t.visual;
+        let bg = t.bg.or(under.and_then(|u| u.bg)).unwrap_or(Rgb::BLACK);
+        let (f, b) = (t.fg.to_f32(), bg.to_f32());
+        cells[y * map.width + x] = Some(Cell {
+            x: x as u32,
+            y: y as u32,
+            glyph: atlas.slot(ch),
+            fg: [f[0], f[1], f[2], 1.0],
+            bg: [b[0], b[1], b[2], 1.0],
+        });
+    };
+    for y in 0..map.height {
+        for x in 0..map.width {
+            set(x, y, map.tile_id(x, y), None);
+        }
+    }
+    for t in targets {
+        let (x, y) = (t.x as usize, t.y as usize);
+        if x >= map.width || y >= map.height {
+            continue;
+        }
+        let under = tiles.get(map.tile_id(x, y)).clone();
+        set(x, y, &t.tile, Some(&under));
+    }
+    cells
+        .into_iter()
+        .map(|c| c.expect("every cell is set after terrain + overlay"))
+        .collect()
 }
 
 /// Deterministic headless action script. Cycle of `[right, right, down, down,
