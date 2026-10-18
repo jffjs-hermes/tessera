@@ -58,19 +58,25 @@ pub fn new_sandbox(
     lua.set_interrupt(move |_| {
         // Count down toward zero and stop there: the counter never underflows,
         // so `remaining()` stays a meaningful "instructions left" and the
-        // reported `Budget.used` (budget - remaining) is real, not a wraparound.
-        // (single-threaded VM, so the CAS loop below never contends).
-        let hit_zero = counter
-            .fetch_update(
+        // reported `Budget.used` (budget - remaining) is real. Uses a CAS loop
+        // (not fetch_update, which newer toolchains deprecate); the VM is
+        // single-threaded so the loop never actually retries.
+        let mut cur = counter.load(std::sync::atomic::Ordering::Relaxed);
+        loop {
+            if cur == 0 {
+                return Err(Error::RuntimeError(
+                    "tessera: instruction budget exceeded".into(),
+                ));
+            }
+            match counter.compare_exchange(
+                cur,
+                cur - 1,
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
-                |v| if v == 0 { None } else { Some(v - 1) },
-            )
-            .is_err();
-        if hit_zero {
-            return Err(Error::RuntimeError(
-                "tessera: instruction budget exceeded".into(),
-            ));
+            ) {
+                Ok(_) => break,
+                Err(actual) => cur = actual,
+            }
         }
         Ok(VmState::Continue)
     });
