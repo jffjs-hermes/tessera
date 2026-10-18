@@ -298,6 +298,13 @@ pub trait WorldRead: Send + Sync + 'static {
     /// The simulation's player-turn clock (increments once per submitted player
     /// action, cancelled or not).
     fn player_turns(&self) -> u64;
+    /// The zone's `start` tile `(x, y)` (the player respawn anchor; `None`
+    /// before a zone is set). Read-only, deterministic.
+    fn zone_start(&self) -> Option<(i32, i32)>;
+    /// The world-state singleton's script-facing entity id, if one has been
+    /// installed (the respawn-scheduling anchor for script policies). `None`
+    /// when the load wiring has not created one.
+    fn world_state(&self) -> Option<u64>;
 }
 
 /// A default [`WorldRead`] used when a host is built without a reader (tests /
@@ -339,6 +346,12 @@ impl WorldRead for DefaultWorldRead {
     }
     fn player_turns(&self) -> u64 {
         0
+    }
+    fn zone_start(&self) -> Option<(i32, i32)> {
+        None
+    }
+    fn world_state(&self) -> Option<u64> {
+        None
     }
 }
 
@@ -817,6 +830,18 @@ impl ScriptHost {
         t.set(
             "player_turns",
             lua.create_function(move |_, ()| Ok(world_read.player_turns()))?,
+        )?;
+
+        let world_read = shared.world_read.clone();
+        t.set(
+            "zone_start",
+            lua.create_function(move |lua2, ()| point_to_lua(lua2, world_read.zone_start()))?,
+        )?;
+
+        let world_read = shared.world_read.clone();
+        t.set(
+            "world_state",
+            lua.create_function(move |_, ()| Ok(world_read.world_state().map(|e| e as i64)))?,
         )?;
 
         // Actions queue a pending turn action / spawn-at; the sim resolves

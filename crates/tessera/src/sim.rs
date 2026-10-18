@@ -121,7 +121,10 @@ impl Sim {
         if let Some(b) = &bridge {
             let fwd = b.clone();
             ctx.register_observer::<tessera_core::events::Death>(LATE, move |_ctx, ev| {
-                fwd.forward_death(entity_to_id(ev.target));
+                // Defer forwarding: the respawn policy's spawn/despawn mutate
+                // the scheduler, and this observer runs *under* the scheduler
+                // lock during take_turn. Queue it; the sim drains post-turn.
+                fwd.push_death(entity_to_id(ev.target));
             });
         }
 
@@ -186,6 +189,11 @@ impl Sim {
             .get::<&RenderTile>(self.player)
             .ok()
             .map_or_else(|| "creature.player.missing".to_string(), |r| r.tile.clone())
+    }
+
+    /// The player's turn clock (increments once per submitted player action).
+    pub fn player_turns_public(&self) -> u64 {
+        self.player_turns
     }
 
     /// The accumulated event log, one entry per player action. Deterministic
@@ -270,10 +278,15 @@ impl Sim {
     /// player's are resolved first (the enemy attacks the player), so the
     /// shared dispatch path is exercised for both sides.
     pub fn submit_action(&mut self, action: PlayerAction) -> anyhow::Result<TurnReport> {
-        // Advance until the player is ready. If an enemy becomes ready first,
-        // resolve its turn (it attacks the player) and keep going. This lets
-        // the demo Zapper act on the scheduler's clock while preserving the
-        // exactly-once player-action contract of the harness.
+        // The player may have respawned since the last action: re-sync the
+        // live player entity from the shared bridge snapshot (a scripted
+        // respawn creates a *new* Player entity).
+        self.sync_player();
+        // Advance until the player is ready. If a non-player actor becomes
+        // ready first, resolve its turn via the script policy (ActorTurnStart
+        // -> Step/Attack/Wander) and keep going. This lets the goblin act on
+        // the scheduler's clock (chase, attack, wander, respawned goblins too)
+        // while preserving the exactly-once player-action contract.
         loop {
             let mut sched = self
                 .scheduler
@@ -286,15 +299,18 @@ impl Sim {
             if player_ready {
                 break;
             }
-            if let Some(enemy) = self.enemy {
-                if sched.ready().contains(&enemy) {
-                    drop(sched);
-                    self.take_turn(enemy, TurnAction::Attack(self.player))?;
-                    continue;
-                }
+            // Resolve the turn of the first ready non-player actor. This is
+            // the general rule (works for the original enemy and for a
+            // respawned goblin scheduled later), not a fixed-entity shortcut.
+            let other = sched.ready().into_iter().find(|e| *e != self.player);
+            if let Some(actor) = other {
+                drop(sched);
+                self.take_scripted_turn(actor)?;
+                self.sync_player();
+                continue;
             }
-            // No enemy and player not ready: can't happen (advance guarantees
-            // somebody is ready), but bail rather than spin.
+            // No non-player actor and player not ready: can't happen (advance
+            // guarantees somebody is ready), but bail rather than spin.
             anyhow::bail!("no actor became ready");
         }
         let from = self
@@ -330,6 +346,24 @@ impl Sim {
             self.take_turn(self.player, turn)?
         };
         Ok(report)
+    }
+
+    /// Re-point `self.player` at the live player entity. A scripted respawn
+    /// (goblin policy on `Death`) despawns the old player and spawns a fresh
+    /// one via `engine.spawn_at("Player", ...)`, so `self.player` must follow
+    /// the shared snapshot's current player id between actions.
+    fn sync_player(&mut self) {
+        let Some(bridge) = &self.bridge else {
+            return;
+        };
+        let Some(id) = bridge.player_id() else {
+            return;
+        };
+        // The shared player id is the real broker entity bits; `from_bits`
+        // reconstructs it exactly like `entity_to_id` produced it.
+        if let Some(e) = Entity::from_bits(id) {
+            self.player = e;
+        }
     }
 
     /// The live entity (enemy, then player) standing at a grid cell, if any.
@@ -384,6 +418,12 @@ impl Sim {
             sched.take_turn(&mut self.ctx, actor, action)?
         };
         self.log.push(self.format_log_line(&report, from));
+        // Drains any deaths observed during the turn *after* the scheduler
+        // lock is released, so the respawn policy's spawn/despawn can mutate
+        // the scheduler without re-entering the lock.
+        if let Some(b) = &self.bridge {
+            b.drain_deaths();
+        }
         // Scripted dispatch: the host's `engine.on` handlers share the same
         // broker, so e.g. a Zapper's scripted LATE Attack handler stacks its
         // zap on the native base hit, and a goblin AI acting on the exposed
@@ -396,24 +436,155 @@ impl Sim {
         Ok(report)
     }
 
+    /// Resolve a **non-player** actor's turn through the script policy: run the
+    /// `ActorTurnStart` hook (forwarding to the host and collecting the queued
+    /// Step/Attack/Wander turn actions), translate the first one into a
+    /// scheduler [`TurnAction`], and take the turn. When no script handler
+    /// queues an action (e.g. a Zapper whose script only hooks `Attack`, or a
+    /// goblin with no AI script in a test), fall back to the legacy default —
+    /// attack the player — so the existing Zapper / no-AI interactions are
+    /// unchanged.
+    fn take_scripted_turn(&mut self, actor: Entity) -> anyhow::Result<TurnReport> {
+        let pending = self.forward_actor_turn_start(actor);
+        let action = self
+            .pending_to_turn_action(actor, &pending)
+            .unwrap_or(TurnAction::Attack(self.player));
+        let from = self
+            .ctx
+            .position(actor)
+            .map(|p| (p.x, p.y))
+            .unwrap_or((0, 0));
+        let report = {
+            let mut sched = self.scheduler.lock().unwrap_or_else(|p| p.into_inner());
+            sched.take_turn(&mut self.ctx, actor, action)?
+        };
+        self.log.push(self.format_log_line(&report, from));
+        // Drain deaths observed during the turn once the scheduler lock is
+        // released (the respawn policy mutates the scheduler).
+        if let Some(b) = &self.bridge {
+            b.drain_deaths();
+        }
+        // Forward the acted event (Attack) so scripted LATE handlers stack on
+        // the native base hit, same as the player path.
+        if self.bridge.is_some() {
+            self.forward_scripted_action(actor, action);
+        }
+        Ok(report)
+    }
+
+    /// Translate the first turn-action pending for `actor` into a scheduler
+    /// [`TurnAction`]. Step -> MoveTo; Attack -> resolve defender and Attack;
+    /// Wander -> a native seeded walkable-empty neighbor step (or Wait when the
+    /// actor is boxed in). Actions queued for other entities are skipped.
+    fn pending_to_turn_action(
+        &mut self,
+        actor: Entity,
+        pending: &[tessera_script::PendingAction],
+    ) -> Option<TurnAction> {
+        use tessera_script::PendingAction;
+        let actor_id = entity_to_id(actor);
+        for pa in pending {
+            match pa {
+                PendingAction::Step { entity, x, y } if *entity == actor_id => {
+                    return Some(TurnAction::MoveTo(Point::new(*x, *y)));
+                }
+                PendingAction::Attack { attacker, defender } if *attacker == actor_id => {
+                    if let Some(bridge) = &self.bridge {
+                        if let Some(e) = bridge.resolve_script_entity(*defender) {
+                            return Some(TurnAction::Attack(e));
+                        }
+                    }
+                    if let Some(e) = Entity::from_bits(*defender) {
+                        return Some(TurnAction::Attack(e));
+                    }
+                    return None;
+                }
+                PendingAction::Wander { entity } if *entity == actor_id => {
+                    return Some(self.native_wander(actor));
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Native seeded wander primitive: pick one of the actor's walkable-empty
+    /// neighbours (fixed order) via a deterministic per-entity fork of the
+    /// sim RNG, or `Wait` when none exists. This is the "one native call"
+    /// behind `engine.wander` (the host surfaces the request as a pending
+    /// Wander action; the sim owns the seeded pick).
+    fn native_wander(&mut self, actor: Entity) -> TurnAction {
+        use tessera_core::events::Position;
+        let Some(pos) = self.ctx.position(actor) else {
+            return TurnAction::Wait;
+        };
+        // Fixed 8-neighbour order (row-major by dy, then dx).
+        const NB: [(i32, i32); 8] = [
+            (0, -1),
+            (1, -1),
+            (1, 0),
+            (1, 1),
+            (0, 1),
+            (-1, 1),
+            (-1, 0),
+            (-1, -1),
+        ];
+        let zone = self.ctx.map.clone();
+        let mut opts: Vec<(i32, i32)> = Vec::new();
+        for (dx, dy) in NB {
+            let (nx, ny) = (pos.x + dx, pos.y + dy);
+            if !zone.is_walkable(nx, ny) {
+                continue;
+            }
+            let b = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
+            let occ = b
+                .entities_with_part(tessera_core::events::PART_POSITION)
+                .iter()
+                .any(|e| {
+                    b.typed_part::<Position>(
+                        *e,
+                        &tessera_core::ecs::PartTypeId::new(tessera_core::events::PART_POSITION),
+                    )
+                    .map(|p| p.x == nx && p.y == ny)
+                    .unwrap_or(false)
+                });
+            if !occ {
+                opts.push((nx, ny));
+            }
+        }
+        if opts.is_empty() {
+            return TurnAction::Wait;
+        }
+        let mut rng = self.ctx.rng.fork(entity_to_id(actor));
+        let i = rng.below(opts.len() as u32) as usize;
+        let (ox, oy) = opts[i];
+        TurnAction::MoveTo(Point::new(ox, oy))
+    }
+
     /// Forward the actor's `ActorTurnStart` to the script host: the exposed
     /// turn hook (`engine.on("ActorTurnStart", ...)`) that lets a script
-    /// policy react to any actor's turn with the read/nav API.
-    fn forward_actor_turn_start(&mut self, actor: Entity) {
+    /// policy react to any actor's turn with the read/nav API. Returns the
+    /// turn actions the handlers queued (Step/Attack/Wander), so the caller can
+    /// resolve the goblin's turn from script policy instead of a hardcoded one.
+    fn forward_actor_turn_start(&mut self, actor: Entity) -> Vec<tessera_script::PendingAction> {
         let Some(bridge) = &self.bridge else {
-            return;
+            return Vec::new();
         };
         let host = bridge.host().clone();
         let actor_id = entity_to_id(actor);
-        let params = int_params(&[("actor", actor_id as i64)]);
+        let mut params = int_params(&[("actor", actor_id as i64)]);
+        if let Some(w) = bridge.world_state_id() {
+            params.push(("world_state", mlua::Value::Integer(w as i64)));
+        }
         let mut h = match host.lock() {
             Ok(h) => h,
-            Err(_) => return,
+            Err(_) => return Vec::new(),
         };
-        let _res = h.dispatch("ActorTurnStart", actor_id, &params);
+        let res = h.dispatch("ActorTurnStart", actor_id, &params);
         for line in h.drain_log() {
             self.log.push(line);
         }
+        res.pending_actions
     }
 
     /// Forward an actor's action event to the script host and append

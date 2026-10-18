@@ -78,9 +78,18 @@ fn base_sim(script_source: Option<&str>, enemy: bool) -> (Sim, Arc<RwLock<Entity
             r#"-- tessera-api: 1
                 engine.define_part("Charge", {
                   fields = { charges = { kind = "int", default = 1, min = 0, max = 99 } },
+                })
+                engine.define_part("GoblinBrain", {
+                  fields = { detect = { kind = "int", default = 10, min = 1, max = 100 } },
+                })
+                engine.define_part("RespawnSystem", {
+                  fields = {
+                    due = { kind = "int", default = -1, min = -1, max = 1000000000 },
+                    blueprint = { kind = "string", default = "" },
+                  },
                 })"#,
         )
-        .expect("register charge schema");
+        .expect("register charge + goblin schemas");
     if let Some(src) = script_source {
         bridge.load("worldtest", "Bp", src).expect("load script");
     }

@@ -59,6 +59,9 @@ pub struct SharedSim {
     /// The sim's player-turn clock (increments once per submitted player
     /// action, cancelled or not).
     player_turns: AtomicU64,
+    /// Script-facing id of the world-state singleton entity (the respawn /
+    /// policy anchor scripts read and write parts on it), 0 = not installed.
+    world_state: AtomicU64,
     /// The blueprint `World` used to resolve and stamp `engine.spawn_at`.
     world: RwLock<Option<Arc<World>>>,
     /// Script-facing entity id -> real broker entity bits. `engine.spawn_at`
@@ -67,6 +70,11 @@ pub struct SharedSim {
     /// forced high), so reads translate through this map. Deterministic
     /// (`BTreeMap`).
     script_entities: RwLock<BTreeMap<u64, u64>>,
+    /// Death events observed while a scheduler turn held its lock. Forwarded to
+    /// the host only after the lock is released (the respawn policy's
+    /// `spawn_at`/`despawn` re-lock the scheduler, so forwarding under the lock
+    /// would deadlock).
+    pending_deaths: Mutex<Vec<u64>>,
 }
 
 impl SharedSim {
@@ -151,6 +159,40 @@ impl SharedSim {
         self.player_turns.store(n, Ordering::Relaxed);
     }
 
+    /// Install the script-facing id of the world-state singleton entity (the
+    /// respawn anchor), set once at load wiring.
+    pub fn set_world_state_id(&self, id: u64) {
+        self.world_state.store(id, Ordering::Relaxed);
+    }
+
+    pub fn world_state(&self) -> Option<u64> {
+        let w = self.world_state.load(Ordering::Relaxed);
+        (w != 0).then_some(w)
+    }
+
+    /// Update the shared player id (used when a scripted `Player` respawn
+    /// replaces the live player entity).
+    pub fn set_player_id(&self, id: u64) {
+        self.player.store(id, Ordering::Relaxed);
+    }
+
+    /// Queue a death for forwarding once the scheduler lock is released.
+    pub fn push_death(&self, id: u64) {
+        self.pending_deaths
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(id);
+    }
+
+    /// Drain the queued deaths (caller must not hold the scheduler lock).
+    pub fn drain_deaths(&self) -> Vec<u64> {
+        self.pending_deaths
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .drain(..)
+            .collect()
+    }
+
     /// The current occupancy predicate over the shared broker: a `Position`
     /// part whose cell matches `(x, y)`.
     pub fn occupied(&self, broker: &EntityBroker, x: i32, y: i32) -> bool {
@@ -176,8 +218,10 @@ impl Default for SharedSim {
             scheduler: RwLock::new(None),
             player: AtomicU64::new(0),
             player_turns: AtomicU64::new(0),
+            world_state: AtomicU64::new(0),
             world: RwLock::new(None),
             script_entities: RwLock::new(BTreeMap::new()),
+            pending_deaths: Mutex::new(Vec::new()),
         }
     }
 }
@@ -329,6 +373,13 @@ impl WorldAccess for SimWorldAccess {
         // Record the script-facing id -> real entity mapping so every read the
         // script performs on the id it was told resolves to this live entity.
         self.shared.map_script_entity(id, entity_to_id(entity));
+        // A scripted `Player` respawn replaces the live player: keep the
+        // shared player id in sync so `engine.player()` and the sim's
+        // turn resolution follow the new entity (the old one is despawned by
+        // the policy's Death handler first).
+        if blueprint == "Player" {
+            self.shared.set_player_id(entity_to_id(entity));
+        }
 
         // Place the `Position` part: at the caller's cell, or a seeded random
         // walkable empty cell when none was given (the positionless spawn used
@@ -480,6 +531,17 @@ impl WorldRead for SimWorldAccess {
     fn player_turns(&self) -> u64 {
         self.shared.player_turns()
     }
+
+    fn zone_start(&self) -> Option<(i32, i32)> {
+        Some((
+            self.shared.read_zone().start.x,
+            self.shared.read_zone().start.y,
+        ))
+    }
+
+    fn world_state(&self) -> Option<u64> {
+        self.shared.world_state()
+    }
 }
 
 /// A deterministic seed for `engine.spawn_at(blueprint)` random placement.
@@ -549,12 +611,52 @@ impl ScriptBridge {
         self.shared.set_player_turns(n);
     }
 
+    /// The script-facing id of the installed world-state singleton entity.
+    pub fn world_state_id(&self) -> Option<u64> {
+        self.shared.world_state()
+    }
+
+    /// Install the world-state singleton entity (the respawn / policy anchor)
+    /// into the shared snapshot. The demo creates this non-scheduled entity at
+    /// load and the goblin policy reads/writes its parts through
+    /// `engine.world_state()`.
+    pub fn set_world_state_entity(&self, entity: Entity) {
+        self.shared.set_world_state_id(entity_to_id(entity));
+    }
+
+    /// The current shared player entity id (as stored by the sim's
+    /// `set_sim_world_state`, updated on player respawn).
+    pub fn player_id(&self) -> Option<u64> {
+        self.shared.player()
+    }
+
+    /// Queue a native `Death` observation to be forwarded to scripts once the
+    /// scheduler lock is released (avoids re-entrant scheduler locking).
+    pub fn push_death(&self, target: u64) {
+        self.shared.push_death(target);
+    }
+
+    /// Forward every queued death to the script host (safe without the
+    /// scheduler lock, since the respawn policy mutates the scheduler).
+    pub fn drain_deaths(&self) {
+        let deaths = self.shared.drain_deaths();
+        for target in deaths {
+            self.forward_death(target);
+        }
+    }
+
     /// Forward a native `Death` event (target entity id) to the script host so
     /// `engine.on("Death", ...)` handlers can react. Deterministic event
-    /// dispatch, same value boundary as every other script dispatch.
+    /// dispatch, same value boundary as every other script dispatch. Passes
+    /// the world-state singleton id as a param so it is in the handler's read
+    /// snapshot (`engine.get_part` on the respawn anchor works).
     pub fn forward_death(&self, target: u64) {
         let host = self.host.clone();
-        let params = int_params(&[("target", target as i64)]);
+        let ws = self.shared.world_state().map(|w| w as i64);
+        let mut params = int_params(&[("target", target as i64)]);
+        if let Some(w) = ws {
+            params.push(("world_state", mlua::Value::Integer(w)));
+        }
         let mut h = match host.lock() {
             Ok(h) => h,
             Err(_) => return,

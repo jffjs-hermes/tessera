@@ -23,6 +23,27 @@ Movement goes through the sim's typed event bus and energy scheduler: arrow
 keys and WASD submit a `Move`, `.` or Space submits a `Wait`, and a wall-blocked
 move is cancelled (costs no energy). `--headless <n>` is the display-free smoke
 path CI can run — it prints the final map then the one-event-per-line log.
+`--zone <id>` selects a named zone (`data/base/zones/*.toml`); the zone defaults
+to the single zone in the pack.
+
+## The demo cave
+
+The default demo loads a cave generated from `data/base/zones/start.toml`
+(`--zone start`, editing the TOML requires a restart — zone hot reload is out of
+scope). `@` is the player, `g` is a goblin. Both come from blueprints: the
+player at the zone's start tile, the goblin at a seeded random walkable tile.
+
+The goblin's AI and death/respawn policy live in `data/base/scripts/goblin_ai.luau`:
+
+- keep your distance and the `g` wanders aimlessly;
+- approach within 10 tiles (straight-line distance) and it chases you, biting for
+  damage when adjacent — watch `hp=` in the title bar;
+- `E` (Zap) the `@` into the goblin to kill it; after 5 of *your* turns a fresh
+  `g` reappears somewhere walkable;
+- if the goblin kills you, you respawn at the zone's start tile.
+
+`--headless <n>` exercises the same sim and prints the goblin's event log too.
+No field of view: the whole cave is visible by design.
 
 While it runs, edit `data/base/tiles/ascii.toml` (e.g. change the `creature.player`
 glyph or color) and the window updates immediately. A malformed edit logs a warning

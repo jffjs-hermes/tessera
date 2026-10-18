@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use notify::{RecursiveMode, Watcher};
 use sim::{PlayerAction, Sim};
 use tessera_core::ecs::{EntityBroker, Part};
-use tessera_core::events::{Health, PART_HEALTH, PART_POSITION, Point, Position};
+use tessera_core::events::{Health, PART_HEALTH, PART_POSITION, Position};
 use tessera_core::tiles::TileRegistry;
 use tessera_core::turns::ActorEnergy;
 use tessera_core::vfs::{DirVfs, Vfs};
@@ -42,8 +42,6 @@ const GRID_W: u32 = 80;
 const GRID_H: u32 = 50;
 /// The `[Player]` blueprint id in `data/base/blueprints/creatures.toml`.
 const PLAYER_BLUEPRINT: &str = "Player";
-/// The reference demo Zapper blueprint (`data/base/blueprints/zapper.toml`).
-const ZAPPER_BLUEPRINT: &str = "Zapper";
 
 enum UserEvent {
     ContentChanged,
@@ -182,18 +180,36 @@ fn load_content(data: &std::path::Path) -> Result<Content> {
     })
 }
 
-/// Spawn the `[Player]` (at the zone's start tile) and a `[Zapper]` (if the
-/// blueprint exists) into the shared broker, seed positions, and build the sim
-/// harness (with script bridge + enemy) around them.
+/// Spawn the demo world from the zone's `[spawns]` table: the `start`
+/// blueprint at the zone start tile, each `random` blueprint at a seeded
+/// random walkable-empty tile, and the world-state singleton (the respawn /
+/// policy anchor). Builds the sim harness (with script bridge + enemy wiring)
+/// around them. Falls back to a Player-only spawn when the zone declares no
+/// spawns.
 fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
+    let mut broker = content
+        .broker
+        .write()
+        .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
+
+    // World-state singleton: a non-scheduled anchor entity scripts read and
+    // write respawn/policy parts on via `engine.world_state()`. Created first
+    // so its id is stable, then installed on the bridge.
+    let world_state = broker.spawn();
+    drop(broker);
+    content.bridge.set_world_state_entity(world_state);
+
+    // Player: from zone.spawns.start (default "Player"), placed at the zone
+    // start tile.
+    let start_bp = zone.spawns.start.as_deref().unwrap_or(PLAYER_BLUEPRINT);
     let mut broker = content
         .broker
         .write()
         .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
     let player = content
         .world
-        .spawn_blueprint(PLAYER_BLUEPRINT, &mut broker)
-        .with_context(|| format!("spawning {PLAYER_BLUEPRINT:?}"))?;
+        .spawn_blueprint(start_bp, &mut broker)
+        .with_context(|| format!("spawning {start_bp:?}"))?;
     broker.insert_part(
         player,
         PART_POSITION,
@@ -201,43 +217,67 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
     )?;
     drop(broker);
 
-    // The reference demo Zapper: spawn adjacent to the player opposite its
-    // initial facing, only if the base pack ships the blueprint (falling back
-    // to a scripts-only run otherwise).
-    let has_zapper = match content.world.library().read() {
-        Ok(l) => l.contains(ZAPPER_BLUEPRINT),
-        Err(_) => false,
-    };
-    let zapper = if has_zapper {
-        let mut broker = content
-            .broker
-            .write()
-            .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
-        let z = content
-            .world
-            .spawn_blueprint(ZAPPER_BLUEPRINT, &mut broker)
-            .with_context(|| format!("spawning {ZAPPER_BLUEPRINT:?}"))?;
-        // Place the zapper on the first walkable cell stepping east of the
-        // player (deterministic; the demo spawns them side by side).
-        let zx = (zone.start.x + 1).min(zone.width as i32 - 1);
-        let zpos = if zone.is_walkable(zx, zone.start.y) {
-            Point::new(zx, zone.start.y)
-        } else {
-            zone.start
+    // Random spawns (e.g. the Goblin): one seeded random walkable-empty tile
+    // each, in `[spawns].random` order. The first becomes the reference enemy
+    // the sim schedules and resolves via the script policy.
+    let mut enemy: Option<hecs::Entity> = None;
+    let mut rng = zone_spawn_rng(&zone.id);
+    for bp in &zone.spawns.random {
+        let e = {
+            let mut broker = content
+                .broker
+                .write()
+                .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
+            content
+                .world
+                .spawn_blueprint(bp, &mut broker)
+                .with_context(|| format!("spawning {bp:?}"))?
         };
-        broker.insert_part(z, PART_POSITION, Box::new(Position::from_point(zpos)))?;
-        Some(z)
-    } else {
-        None
-    };
+        let to = {
+            let b = content.broker.read().unwrap_or_else(|p| p.into_inner());
+            let occupied = |cx: i32, cy: i32| {
+                b.entities_with_part(PART_POSITION).iter().any(|e| {
+                    b.typed_part::<Position>(*e, &PART_POSITION.into())
+                        .map(|p| p.x == cx && p.y == cy)
+                        .unwrap_or(false)
+                })
+            };
+            tessera_core::path::random_walkable_empty(zone, &occupied, &mut rng)
+                .ok_or_else(|| anyhow::anyhow!("no walkable-empty tile to spawn {bp:?}"))?
+        };
+        {
+            let mut broker = content
+                .broker
+                .write()
+                .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
+            broker.insert_part(e, PART_POSITION, Box::new(Position::from_point(to)))?;
+        }
+        if enemy.is_none() {
+            enemy = Some(e);
+        }
+    }
 
     Ok(Sim::from_shared(
         content.broker.clone(),
         Some(content.bridge.clone()),
         zone.clone(),
         player,
-        zapper,
+        enemy,
     ))
+}
+
+/// Deterministic per-zone RNG stream used to pick random spawn tiles (the
+/// `"zone-spawn"` stream). Derived from the zone id so the goblin's spawn
+/// position is a pure function of (seed, zone file), reproducible run to run.
+fn zone_spawn_rng(zone_id: &str) -> tessera_core::rng::SimRng {
+    const ZONE_SPAWN: u64 = 0x7a6f_6e65_5f73_7061; // "zone_spa"
+    let mut acc: u64 = ZONE_SPAWN;
+    for b in zone_id.bytes() {
+        acc = acc
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(b as u64);
+    }
+    tessera_core::rng::SimRng::from_seed(acc)
 }
 
 struct App {
@@ -383,7 +423,13 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Err(e) = self.sim.submit_action(action) {
                         tracing::warn!("submit_action failed: {e:#}");
                     }
+                    // One-line HP status readout (visible in the title bar).
                     if let Some(w) = &self.window {
+                        w.set_title(&format!(
+                            "Tessera  hp={}  turn={}",
+                            self.sim.player_health(),
+                            self.sim.player_turns_public()
+                        ));
                         w.request_redraw();
                     }
                 }
@@ -442,6 +488,15 @@ fn main() -> Result<()> {
         for line in sim.log() {
             println!("{line}");
         }
+        // One-line status readout: hp + player-turn clock (the combat / death
+        // / respawn behaviors' observable summary).
+        println!(
+            "status hp={} player_turns={} position=({},{})",
+            sim.player_health(),
+            sim.player_turns_public(),
+            sim.position().0,
+            sim.position().1
+        );
         return Ok(());
     }
 
