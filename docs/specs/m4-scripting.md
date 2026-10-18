@@ -2,8 +2,9 @@
 
 Status: research spec for M4 (author: researcher bot; pending Jeff's approval). Grounded in
 [architecture.md](../architecture.md) §3 (Scripting row, §6 "Mod and script safety"), §8 (M4 scope:
-*embed Luau, minimal API (`spawn`, get/set part, `on(event)`), one behavior (e.g. poison) written
-entirely in script*), [determinism.md](../determinism.md), and the shipped M2/M3 code
+*embed Luau, minimal API (`spawn`, get/set part, `on(event)`), one behavior written entirely
+in script*; the architecture's example behavior is named "zap" in this spec's demo — §9.1
+resolves the PR #14 review naming decision), [determinism.md](../determinism.md), and the shipped M2/M3 code
 (`crates/tessera-core/src/{ecs,events,world}.rs`) and specs
 ([m2-entities.md](m2-entities.md), [m3-events-turns.md](m3-events-turns.md)).
 
@@ -39,7 +40,7 @@ Resolves architecture §9 risk: **"Luau build on all desktop targets. `mlua` ven
 | Script part model | **Luau-declared schemas + one generic validated dynamic part** (`ScriptPart` in `PartMap`), not untyped TOML tables (§4) |
 | Script/native relation | Scripts implement *parts* registered as event handlers; they read/modify `ScriptPart` data by value, never borrow hecs components (§4.4) |
 | Versioning | `TESSERA_API_VERSION = 1`; queried via `engine.api_version()`; blueprint scripts carry `api = 1` in their header (§5.1) |
-| Poison behavior | A script handler that errors 3 consecutive times on the same hook is disabled (removed) and logged; the sim never panics because of script content (§6.2) |
+| Quarantine | A script handler that errors 3 consecutive times on the same hook is disabled (removed) and logged; the sim never panics because of script content (§6.2) |
 
 Spelling note: §5 tracks the versioned API surface; §6 the failure semantics; §8 build/CI risk;
 §9 module boundaries; §10 the test matrix.
@@ -107,7 +108,7 @@ lua.set_interrupt(interrupt)?;           // instruction budget, §3.2
 - No `debug` library. No `ffi`. No userdata. No network. No `LightUserData`. The only bridge to
   the engine is the `engine` table installed per script (§5).
 - Threat model: scripts are *semi-trusted* (they come from mods). The boundary target is
-  "wrong/hung script terminates *itself* with an error and is poisoned (§6), never writes
+  "wrong/hung script terminates *itself* with an error and is quarantined (§6), never writes
   outside the `PartMap`/API, never touches the filesystem/network/lifetime of the process."
   Luau's memory safety + read-only shared state + memory cap + instruction budget + the
   rejection of borrows across the boundary (§4.4) deliver that; defense-in-depth is cheap here
@@ -126,7 +127,7 @@ Budget accounting (host-side, deterministic):
   a fresh budget (default `SCRIPT_INSTRUCTION_BUDGET = 5_000_000` instructions ≈ tens of ms on
   punctuation-free work — the value is a tunable constant, not a gameplay quantity).
 - When the budget is exceeded the callback returns `Err(ScriptBudgetExceeded)` → the running
-  chunk trips with that error, and the poison-policy of §6.2 applies. The error is *returned*,
+  chunk trips with that error, and the quarantine policy of §6.2 applies. The error is *returned*,
   never unwound as panic: `mlua` reports it as an `mlua::Error`, `tessera-script` maps it to
   `ScriptError::Budget { script, phase, used }` per its error type.
 - Budget **does carry across nested engine→script→engine→script calls within one dispatch**:
@@ -196,7 +197,7 @@ schema.
    ad-hoc serializer for `toml::Value` with round-trip ambiguity questions.
 2. **Fail-closed content.** (A) turns every typo (`chargs = 3`) into a silent nil read — the
    classic mod bug class. (B) validates at define time (schema shape) and at write time (value
-   type/range), so bad content is a loud load/handler error that the poison policy (§6) and
+   type/range), so bad content is a loud load/handler error that the quarantine policy (§6) and
    CI (`--headless` smoke) surface immediately. M2 already chose fail-closed for *unknown* part
    names; (A) would quietly re-open that hole from the *inside*.
 3. **It composes with the existing registry.** `PartRegistry` already stores name→factory with
@@ -276,7 +277,8 @@ scripts = ["scripts/charge.luau"]   # blueprint-level script names, loaded by ho
 - Access boundary: scripts read engine components through API calls (`engine.get_part(e, "Health")`
   → `{ hp = 3 }`) and mutate their **own** `ScriptPart`s freely via `engine.set_part`; mutation
   of a *native* part through the API is provided only for whitelisted fields in v1 — nil for M4
-  except `Health.hp` (needed for poison) — implemented as explicit API functions, desugared from
+  except `Health.hp` (needed for the Zapper demo's zap damage) — implemented as explicit API
+  functions, desugared from
   `set_part` by type check: `set_part(e, "Health", v)` that targets a registered *native* part
   is `ScriptError::ImmutablePart` unless an API function exists.
 - No script ever holds a Rust reference/borrow into the ECS. All bridging is by value at call
@@ -347,7 +349,7 @@ not selected via `new_with` — safe constants only).
   the library at blueprint-load time; if an event name is unknown, load fails (fail-closed, same
   as M1 tileset / M2 reload policies).
 
-## 6. Failure semantics: errors, poison, reload
+## 6. Failure semantics: errors, quarantine, reload
 
 ### 6.1 Error taxonomy
 
@@ -366,24 +368,26 @@ pub enum ScriptError {
 All map from mlua errors; nothing panics the sim. Script errors are *runtime content bugs*:
 they surface as `tracing::error!` + counters, and the defeat policy in §6.2 decides what stops.
 
-### 6.2 Poison policy (decided)
+### 6.2 Quarantine policy (decided)
 
 - A handler that errors (including budget/memory exhaustion) **skips that handler for the
-  in-flight event** (the event continues with remaining handlers — a poisoned handler must not
+  in-flight event** (the event continues with remaining handlers — a quarantined handler must not
   corrupt gameplay state because it is removed mid-flight: `EventOutcome` for the *event itself*
   stays valid; the host records `HandlerError` in the event log).
-- **Poison = 3 consecutive errors on the same (script, event) pair ⇒ the handler is
+- **Quarantine = 3 consecutive errors on the same (script, event) pair ⇒ the handler is
   unregistered** (`EventBus::unregister`) and `tracing::warn!`s a summary. Consecutive means
   back-to-back invocations without a successful call — one success resets the count. This
   bounds repeated cost from a broken while-fraction handler without removing scripts that hit
   one unfortunate edge once.
-- Poison is in-memory only: the next hot reload that re-loads the script resets it. Poison state
-  is not serialized (it is a runtime hygiene mechanism, not game state).
-- A script whose *top level* fails at load poisons the whole file: the blueprint it belongs to
-  fails to spawn (`SpawnError::ScriptLoad`), matching the blueprint pass's fail-closed behavior;
-  during hot reload a bad script, like a bad TOML, keeps the previous library (M2 §2 policy).
-- The same 3-strike policy poisons `define_part`-only load errors at *spawn time*: a blueprint
-  whose schema-registration script is broken never spawns (loud, logged once per mode).
+- Quarantine is in-memory only: the next hot reload that re-loads the script resets it.
+  Quarantine state is not serialized (it is a runtime hygiene mechanism, not game state).
+- A script whose *top level* fails at load quarantines the whole file: the blueprint it belongs
+  to fails to spawn (`SpawnError::ScriptLoad`), matching the blueprint pass's fail-closed
+  behavior; during hot reload a bad script, like a bad TOML, keeps the previous library (M2 §2
+  policy).
+- The same 3-strike policy quarantines `define_part`-only load errors at *spawn time*: a
+  blueprint whose schema-registration script is broken never spawns (loud, logged once per
+  mode).
 
 ### 6.3 Script hot reload
 
@@ -452,27 +456,33 @@ they surface as `tracing::error!` + counters, and the defeat policy in §6.2 dec
   validation (`toml::Value` → `ScriptPart`), `PartRegistry` API additions
   (`register_script_part`, `script_schema`). ~1 builder.
 - `tessera-script`: VM lifecycle, sandbox setup, budgets/interrupt, `ScriptHost`
-  (spawn/get/set/on/api), error taxonomy, poison bookkeeping, versioning. ~1 builder; the
+  (spawn/get/set/on/api), error taxonomy, quarantine bookkeeping, versioning. ~1 builder; the
   largest card. Depends on the core card (schema types) — true dependency.
 - `tessera` bin: blueprint `scripts = [...]` key + loader wiring into `World::load`'s flow,
   hot-reload watcher extension, demo: the reference behavior. ~1 builder; depends on both.
 
 ### 9.1 Demo mapping (the M4 milestone goal)
 
-**One behavior written entirely in script: a `Charger` goblin variant that poisons the player
-on hit.** (The architecture names poison; the demo shows the full loop — define part, spawn,
-event, mutate, veto.)
+**One behavior written entirely in script: a `Zapper` goblin variant that spends one charge to
+zap the player for an extra point of damage on hit.** (The demo shows the full loop — define
+part, spawn, event, mutate, veto.)
+
+Gameplay: the Zapper is a goblin with a limited stock of charges. Each of its attacks spends
+one charge to deliver a zap: one extra point of damage to the defender, logged in the event log.
+When its charges run out, the attack is a plain hit with no zap. Starting from 3 charges, two
+attacks therefore cost the player 2 (1 per hit) + 2 (1 per zap) = 4 Health and leave the Zapper
+at 1 charge.
 
 ```toml
-# data/base/blueprints/charger.toml
-[Charger]
+# data/base/blueprints/zapper.toml
+[Zapper]
 inherits = "Goblin"
 parts.Charge = { charges = 3 }
-scripts = ["scripts/charger.luau"]
+scripts = ["scripts/zapper.luau"]
 ```
 
 ```lua
--- data/base/scripts/charger.luau
+-- data/base/scripts/zapper.luau
 -- tessera-api: 1
 engine.define_part("Charge", {
   fields = { charges = { kind = "int", default = 1, min = 0, max = 99 } },
@@ -489,20 +499,22 @@ engine.on("Attack", ATTACK_HOOK, function(ev)
       dmg.hp = dmg.hp - 1                        -- via the whitelisted Health.hp path (§4.4)
       engine.set_part(ev.defender, "Health", dmg)
     end
-    engine.log(("charger zaps %d"):format(ev.defender))
+    engine.log(("zapper zaps %d"):format(ev.defender))
   end
   return true
 end)
 ```
 
-Success criteria (mirrors architecture M4 line): spawn a `Charger` next to the player, let the
-scheduler act it twice, the player's `Health` drops by 2 and the charger's `Charge` reaches 1;
-`--headless n` prints the event log with the script handler's evidence. **Plus one scripted
-action for the player**: arrow keys already route through `Move`; the demo adds a `Zap` key
-(E) that dispatches `Attack` toward the last faced direction — proving scripts and native parts
+Success criteria (mirrors architecture M4 line): spawn a `Zapper` (charges = 3) next to the
+player, let the scheduler act it twice. Each action is one Attack: 1 damage from the base hit
+plus 1 zap damage, so the player's `Health` drops by 2 × 2 = 4, and the Zapper's `Charge` ends
+at 3 − 2 = 1; `--headless n` prints the event log with the script handler's evidence ("zapper
+zaps …" twice). **Plus one scripted action for the player**: arrow keys already route through
+`Move`; the demo adds a `Zap` key (E) that dispatches `Attack` toward the last faced direction —
+the player's own scripted strike, mirroring the Zapper's — proving scripts and native parts
 share one dispatch path. (If E-Attack is too large, the fallback demo is the script's veto
-behavior: a scripted handler cancels `Move` when `Charge.charges` is 0 — pick the smaller one
-at implementation time; the card carries both.)
+behavior: a scripted handler cancels `Move` when `Charge.charges` is 0 — the Zapper is out of
+charges and cannot zap; pick the smaller one at implementation time; the card carries both.)
 
 ## 10. Test matrix
 
@@ -519,12 +531,12 @@ at implementation time; the card carries both.)
 | 7 | schema change after registration is rejected | §6.3 |
 | 8 | `on("Move")` script handler vetoes: event Cancelled recorded, position unchanged, no energy spend | §5.3 + M3 §2.6 |
 | 9 | priority interleave: native armor EARLY mutator + script LATE mutator order asserted via event log | §5.3 ordering |
-| 10 | poison: handler errors 3× (throw in script) → unregistered, 4th dispatch has no script handler, event log says so | §6.2 |
-| 11 | poison resets on success (2 failures, 1 success, 1 failure → still registered) | §6.2 |
+| 10 | quarantine: handler errors 3× (throw in script) → unregistered, 4th dispatch has no script handler, event log says so | §6.2 |
+| 11 | quarantine resets on success (2 failures, 1 success, 1 failure → still registered) | §6.2 |
 | 12 | reload: change script on disk → new handlers take effect for subsequent spawns, old live `ScriptPart`s untouched, SimRng stream unchanged | §6.3 |
 | 13 | api-version mismatch → Load error before execution | §5.1 |
 | 14 | determinism: scripted 200-tick run twice, identical event log + positions incl. a scripted `math.random` consumer | §7.2 |
-| 15 | `--headless n` smoke with Charger demo in CI | §9.1 |
+| 15 | `--headless n` smoke with Zapper demo in CI | §9.1 |
 
 `tessera-core` (schema storage):
 
