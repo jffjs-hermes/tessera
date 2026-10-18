@@ -120,7 +120,7 @@ pub fn is_budget_error(err: &Error) -> bool {
 
 /// Read the vendored Luau version string as reported by the VM `_VERSION`
 /// global (e.g. `"Luau 740"`). Recorded in build/CI output for
-/// reproducibility (spec §2.2, §8.2) so `luau0-src` drift is visible between
+/// reproducibility so `luau0-src` drift is visible between
 /// cache misses.
 pub fn luau_version(lua: &Lua) -> String {
     lua.globals()

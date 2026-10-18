@@ -219,8 +219,8 @@ pub fn params_to_lua(lua: &Lua, params: &[(&str, Value)]) -> Result<Table, Scrip
     Ok(t)
 }
 
-/// Validate a `set_part` write against a scripted part's declared schema
-/// (§4.4): every field must be declared and its value must match the field's
+/// Validate a `set_part` write against a scripted part's declared schema:
+/// every field must be declared and its value must match the field's
 /// kind and be within the declared range — the same write-time check a spawn
 /// payload gets. Scripts may mutate their own scripted parts freely, but not
 /// arbitrarily; a violation is a runtime content bug, surfaced as a `set_part`

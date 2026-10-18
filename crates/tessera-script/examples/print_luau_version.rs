@@ -1,4 +1,4 @@
-//! Report the vendored Luau version this build links (spec §8.2 / §2.2).
+//! Report the vendored Luau version this build links.
 //!
 //! Run `cargo run -p tessera-script --example print_luau_version` (CI does
 //! this when tessera-script changes) to record the exact `luau0-src` version

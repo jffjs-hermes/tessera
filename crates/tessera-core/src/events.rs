@@ -140,7 +140,7 @@ pub enum HandlerAction {
     /// Abort the entire dispatch and surface `err` to the original caller. A
     /// handler that dispatched a nested event whose return was an
     /// [`EventError`] (e.g. [`EventError::DepthExceeded`]) returns this to
-    /// propagate it up, per spec §1.6 ("handler code returns the error up").
+    /// propagate it up to the original caller.
     Fail(EventError),
 }
 
@@ -190,9 +190,7 @@ pub struct SimContext {
     /// The entity store. Handlers read/write world state through this. Shared
     /// with the script host's [`WorldAccess`] (see `tessera-script`) so native
     /// typed handlers and scripted handlers operate on the *same* live broker;
-    /// the integration card (blueprint `scripts` wiring) constructs the sim
-    /// with [`Self::shared`] so a single `Arc<RwLock<EntityBroker>>` is seen by
-    /// both dispatch paths.
+    /// a single `Arc<RwLock<EntityBroker>>` is seen by both dispatch paths.
     pub broker: Arc<RwLock<EntityBroker>>,
     /// The current map (provided for handler-side spatial checks).
     pub map: Map,
@@ -210,8 +208,8 @@ impl SimContext {
     }
 
     /// Build a context over a *shared* broker handle. Native typed handlers
-    /// and the script host's world access lock the same handle (§4.4/§9: the
-    /// integration implements the script `WorldAccess` over this context).
+    /// and the script host's world access lock the same handle, so the script
+    /// `WorldAccess` is implemented over this context.
     pub fn shared(broker: Arc<RwLock<EntityBroker>>, map: Map, rng: SimRng) -> Self {
         Self {
             broker,
