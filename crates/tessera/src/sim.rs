@@ -25,13 +25,13 @@ use std::sync::{Arc, RwLock};
 use hecs::Entity;
 use tessera_core::ecs::EntityBroker;
 use tessera_core::events::{EARLY, HandlerAction, Move, NORMAL, Point, SimContext, TakeDamage};
-use tessera_core::map::Map;
 use tessera_core::rng::SimRng;
 use tessera_core::tiles::TileRegistry;
 use tessera_core::turns::{
     ActorEnergy, BASE_SPEED, PART_ENERGY, Scheduler, TurnAction, TurnReport,
 };
 use tessera_core::world::RenderTile;
+use tessera_core::zone::Zone;
 
 use crate::scripting::{ScriptBridge, entity_to_id, int_params};
 
@@ -75,9 +75,9 @@ impl Sim {
     /// Build the harness around an already-spawned `player` whose broker
     /// carries a `Position` part (no script host / no enemy).
     #[cfg_attr(not(test), allow(dead_code))] // used by the sim test fixture
-    pub fn new(broker: EntityBroker, map: Map, player: Entity) -> Self {
+    pub fn new(broker: EntityBroker, zone: Zone, player: Entity) -> Self {
         let broker = Arc::new(RwLock::new(broker));
-        Self::from_shared(broker, None, map, player, None)
+        Self::from_shared(broker, None, zone, player, None)
     }
 
     /// Build the harness around a *shared* broker handle (the same one a
@@ -88,11 +88,11 @@ impl Sim {
     pub fn from_shared(
         broker: Arc<RwLock<EntityBroker>>,
         bridge: Option<ScriptBridge>,
-        map: Map,
+        zone: Zone,
         player: Entity,
         enemy: Option<Entity>,
     ) -> Self {
-        let mut ctx = SimContext::shared(broker.clone(), map, SimRng::from_seed(SIM_SEED));
+        let mut ctx = SimContext::shared(broker.clone(), zone, SimRng::from_seed(SIM_SEED));
         // Content-level wall collision: cancel any Move whose target is not
         // walkable. This is the shipped cancellation handler.
         ctx.register::<Move>(EARLY, |ctx, ev| {
@@ -146,8 +146,8 @@ impl Sim {
         }
     }
 
-    /// Read-only map access (renderer / headless output).
-    pub fn map(&self) -> &Map {
+    /// Read-only zone access (renderer / headless output).
+    pub fn map(&self) -> &Zone {
         &self.ctx.map
     }
 
@@ -498,8 +498,25 @@ fn install_base_combat(ctx: &mut SimContext) {
 mod tests {
     use super::*;
     use tessera_core::events::Position;
+    use tessera_core::zone::Zone;
 
-    /// A demo fixture: one positioned, scheduled player in a demo map, with a
+    /// The demo room the fixture runs in: bordered all-floor grid with a pillar
+    /// at `x % 8 == 4 && y % 6 == 3`, matching the legacy hardcoded map.
+    fn demo_zone(width: usize, height: usize) -> Zone {
+        let mut cells = vec!["terrain.floor".to_string(); width * height];
+        for y in 0..height {
+            for x in 0..width {
+                let edge = x == 0 || y == 0 || x == width - 1 || y == height - 1;
+                let pillar = x % 8 == 4 && y % 6 == 3;
+                if edge || pillar {
+                    cells[y * width + x] = "terrain.wall".to_string();
+                }
+            }
+        }
+        Zone::from_cells("test", width, height, Point::new(1, 1), cells)
+    }
+
+    /// A demo fixture: one positioned, scheduled player in a demo room, with a
     /// spawn-order entity id and a `Position` part.
     fn fixture() -> Sim {
         let mut broker = EntityBroker::new();
@@ -513,7 +530,7 @@ mod tests {
                 Box::new(Position { x: 1, y: 1 }) as Box<dyn Part>
             })
             .unwrap();
-        let mut sim = Sim::new(broker, Map::demo(20, 10), player);
+        let mut sim = Sim::new(broker, demo_zone(20, 10), player);
         sim.log.clear(); // the harness doesn't log setup
         sim
     }

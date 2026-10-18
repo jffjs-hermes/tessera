@@ -16,10 +16,11 @@ use std::sync::{Arc, RwLock};
 use tessera::scripting::ScriptBridge;
 use tessera::sim::{PlayerAction, Sim};
 use tessera_core::ecs::EntityBroker;
-use tessera_core::map::Map;
+use tessera_core::events::Point;
 use tessera_core::vfs::{DirVfs, Vfs};
 use tessera_core::world::RenderTile;
 use tessera_core::world::World;
+use tessera_core::zone::Zone;
 
 const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/base");
 const PLAYER_BLUEPRINT: &str = "Player";
@@ -82,8 +83,25 @@ fn build_demo() -> Sim {
     .unwrap();
     drop(b);
 
-    let map = Map::demo(40, 20);
+    let map = demo_zone(40, 20);
     Sim::from_shared(broker, Some(bridge), map, player, Some(zapper))
+}
+
+/// The demo room for this integration fixture: bordered all-floor grid with a
+/// pillar at `x % 8 == 4 && y % 6 == 3` (the layout the player/Zapper positions
+/// below were authored against); player at (2,2), Zapper at (3,2).
+fn demo_zone(width: usize, height: usize) -> Zone {
+    let mut cells = vec!["terrain.floor".to_string(); width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let edge = x == 0 || y == 0 || x == width - 1 || y == height - 1;
+            let pillar = x % 8 == 4 && y % 6 == 3;
+            if edge || pillar {
+                cells[y * width + x] = "terrain.wall".to_string();
+            }
+        }
+    }
+    Zone::from_cells("test", width, height, Point::new(2, 2), cells)
 }
 
 /// Drive the schedule until the Zapper has landed exactly two Attacks on the

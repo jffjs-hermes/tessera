@@ -423,7 +423,6 @@ mod tests {
     use super::*;
     use crate::ecs::EntityBroker;
     use crate::events::{HandlerAction, PART_POSITION, Position};
-    use crate::map::Map;
     use crate::rng::SimRng;
 
     /// A SimContext whose broker already holds one positioned entity per speed
@@ -439,7 +438,11 @@ mod tests {
             ents.push(e);
         }
         (
-            SimContext::new(broker, Map::demo(20, 10), SimRng::from_seed(1)),
+            SimContext::new(
+                broker,
+                crate::zone::tests::demo_zone(20, 10),
+                SimRng::from_seed(1),
+            ),
             ents,
         )
     }

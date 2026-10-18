@@ -21,12 +21,12 @@ use anyhow::{Context, Result};
 use notify::{RecursiveMode, Watcher};
 use sim::{PlayerAction, Sim};
 use tessera_core::ecs::{EntityBroker, Part};
-use tessera_core::events::{Health, PART_HEALTH, PART_POSITION, Position};
-use tessera_core::map::Map;
+use tessera_core::events::{Health, PART_HEALTH, PART_POSITION, Point, Position};
 use tessera_core::tiles::TileRegistry;
 use tessera_core::turns::ActorEnergy;
 use tessera_core::vfs::{DirVfs, Vfs};
 use tessera_core::world::{RenderTile, World};
+use tessera_core::zone::{Zone, load_zones};
 use tessera_render::atlas::Atlas;
 use tessera_render::{Cell, Renderer};
 use winit::application::ApplicationHandler;
@@ -51,6 +51,9 @@ enum UserEvent {
 
 struct Args {
     data: PathBuf,
+    /// Which zone to load (`--zone <id>`); the pack must have exactly one zone
+    /// when omitted (fail-closed, no silent pick).
+    zone: Option<String>,
     /// Exit after this many frames (windowed smoke tests).
     frames: Option<u32>,
     /// Run this many scripted actions headlessly, print final map + log, exit 0.
@@ -59,23 +62,26 @@ struct Args {
 
 fn parse_args() -> Result<Args> {
     let mut data = PathBuf::from("data/base");
+    let mut zone = None;
     let mut frames = None;
     let mut headless = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--data" => data = it.next().context("--data needs a path")?.into(),
+            "--zone" => zone = Some(it.next().context("--zone needs an id")?.to_string()),
             "--frames" => frames = Some(it.next().context("--frames needs a number")?.parse()?),
             "--headless" => {
                 headless = Some(it.next().context("--headless needs a number")?.parse()?)
             }
             "-h" | "--help" => {
                 println!(
-                    "tessera [--data <dir>] [--frames <n>] [--headless <n>]\n\
+                    "tessera [--data <dir>] [--zone <id>] [--frames <n>] [--headless <n>]\n\
                      \n\
                      Interactive: arrow keys / WASD / hjklyubn to move, `.` or Space = wait,\n\
                      E = Zap (Attack toward the last faced direction), Esc to quit.\n\
-                     `--headless <n>`: run n scripted actions with no window, print final map + event log, exit 0."
+                     `--headless <n>`: run n scripted actions with no window, print final map + event log, exit 0.\n\
+                     `--zone <id>`: load the named zone (defaults to the single zone in the pack)."
                 );
                 std::process::exit(0);
             }
@@ -84,6 +90,7 @@ fn parse_args() -> Result<Args> {
     }
     Ok(Args {
         data,
+        zone,
         frames,
         headless,
     })
@@ -170,10 +177,10 @@ fn load_content(data: &std::path::Path) -> Result<Content> {
     })
 }
 
-/// Spawn the `[Player]` and a `[Zapper]` (if the blueprint exists) into the
-/// shared broker, seed positions, and build the sim harness (with script
-/// bridge + enemy) around them.
-fn build_sim(content: &Content, map: Map) -> Result<Sim> {
+/// Spawn the `[Player]` (at the zone's start tile) and a `[Zapper]` (if the
+/// blueprint exists) into the shared broker, seed positions, and build the sim
+/// harness (with script bridge + enemy) around them.
+fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
     let mut broker = content
         .broker
         .write()
@@ -185,7 +192,7 @@ fn build_sim(content: &Content, map: Map) -> Result<Sim> {
     broker.insert_part(
         player,
         PART_POSITION,
-        Box::new(Position { x: 2, y: 2 }) as Box<dyn Part>,
+        Box::new(Position::from_point(zone.start)) as Box<dyn Part>,
     )?;
     drop(broker);
 
@@ -205,11 +212,15 @@ fn build_sim(content: &Content, map: Map) -> Result<Sim> {
             .world
             .spawn_blueprint(ZAPPER_BLUEPRINT, &mut broker)
             .with_context(|| format!("spawning {ZAPPER_BLUEPRINT:?}"))?;
-        broker.insert_part(
-            z,
-            PART_POSITION,
-            Box::new(Position { x: 3, y: 2 }) as Box<dyn Part>,
-        )?;
+        // Place the zapper on the first walkable cell stepping east of the
+        // player (deterministic; the demo spawns them side by side).
+        let zx = (zone.start.x + 1).min(zone.width as i32 - 1);
+        let zpos = if zone.is_walkable(zx, zone.start.y) {
+            Point::new(zx, zone.start.y)
+        } else {
+            zone.start
+        };
+        broker.insert_part(z, PART_POSITION, Box::new(Position::from_point(zpos)))?;
         Some(z)
     } else {
         None
@@ -218,7 +229,7 @@ fn build_sim(content: &Content, map: Map) -> Result<Sim> {
     Ok(Sim::from_shared(
         content.broker.clone(),
         Some(content.bridge.clone()),
-        map,
+        zone.clone(),
         player,
         zapper,
     ))
@@ -405,14 +416,22 @@ fn main() -> Result<()> {
     let args = parse_args()?;
     let content = load_content(&args.data)
         .with_context(|| format!("loading content from {}", args.data.display()))?;
-    let map = Map::demo(GRID_W as usize, GRID_H as usize);
-    for id in map.missing_tile_ids(&content.tiles) {
-        tracing::warn!("map uses tile id {id:?} with no definition (will draw as '?')");
+
+    // Load the world pack and resolve the zone to simulate: `--zone <id>`, or
+    // the single zone when none was requested (fail-closed otherwise).
+    let vfs = DirVfs::new(&args.data);
+    let world_map = load_zones(&vfs, &content.tiles)
+        .with_context(|| format!("loading zones from {}", args.data.display()))?;
+    let zone = world_map
+        .resolve(args.zone.as_deref())
+        .with_context(|| format!("resolving zone for {}", args.data.display()))?;
+    for id in zone.missing_tile_ids(&content.tiles) {
+        tracing::warn!("zone uses tile id {id:?} with no definition (will draw as '?')");
     }
 
     // Headless path: no window, no event loop, no winit. Deterministic output.
     if let Some(n) = args.headless {
-        let mut sim = build_sim(&content, map)?;
+        let mut sim = build_sim(&content, zone)?;
         let map_text = sim.run_headless(&content.tiles, n);
         print!("{map_text}");
         for line in sim.log() {
@@ -421,7 +440,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let sim = build_sim(&content, map)?;
+    let sim = build_sim(&content, zone)?;
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);

@@ -39,8 +39,8 @@ use hecs::Entity;
 use thiserror::Error;
 
 use crate::ecs::{EntityBroker, PartTypeId};
-use crate::map::Map;
 use crate::rng::SimRng;
+use crate::zone::Zone;
 
 /// Priority band constants (i8 range, headroom for mods to slot before/after
 /// base handlers without renumbering). Mid-values (e.g. -32, 20) are allowed.
@@ -192,8 +192,8 @@ pub struct SimContext {
     /// typed handlers and scripted handlers operate on the *same* live broker;
     /// a single `Arc<RwLock<EntityBroker>>` is seen by both dispatch paths.
     pub broker: Arc<RwLock<EntityBroker>>,
-    /// The current map (provided for handler-side spatial checks).
-    pub map: Map,
+    /// The current zone (provided for handler-side spatial checks).
+    pub map: Zone,
     /// Forked, deterministic RNG available to handlers.
     pub rng: SimRng,
     /// The typed handler store and dispatch bookkeeping.
@@ -203,14 +203,14 @@ pub struct SimContext {
 impl SimContext {
     /// Build a context owning an exclusive broker (tests / callers that don't
     /// share with a script host).
-    pub fn new(broker: EntityBroker, map: Map, rng: SimRng) -> Self {
+    pub fn new(broker: EntityBroker, map: Zone, rng: SimRng) -> Self {
         Self::shared(Arc::new(RwLock::new(broker)), map, rng)
     }
 
     /// Build a context over a *shared* broker handle. Native typed handlers
     /// and the script host's world access lock the same handle, so the script
     /// `WorldAccess` is implemented over this context.
-    pub fn shared(broker: Arc<RwLock<EntityBroker>>, map: Map, rng: SimRng) -> Self {
+    pub fn shared(broker: Arc<RwLock<EntityBroker>>, map: Zone, rng: SimRng) -> Self {
         Self {
             broker,
             map,
@@ -610,7 +610,11 @@ mod tests {
     use std::rc::Rc;
 
     fn context() -> SimContext {
-        SimContext::new(EntityBroker::new(), Map::demo(20, 10), SimRng::from_seed(1))
+        SimContext::new(
+            EntityBroker::new(),
+            crate::zone::tests::demo_zone(20, 10),
+            SimRng::from_seed(1),
+        )
     }
 
     fn log() -> Rc<RefCell<Vec<String>>> {
@@ -967,7 +971,7 @@ mod tests {
         let run = |seed: u64| -> Vec<String> {
             let mut ctx = SimContext::new(
                 EntityBroker::new(),
-                Map::demo(20, 10),
+                crate::zone::tests::demo_zone(20, 10),
                 SimRng::from_seed(seed),
             );
             let e = spawn_pos(&mut ctx, 5, 5);
