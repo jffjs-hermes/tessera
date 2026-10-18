@@ -8,5 +8,6 @@
 # world registry before this library is validated.
 [Zapper]
 inherits = "Goblin"
+parts.Health = { hp = 20 }
 parts.Charge = { charges = 3 }
 scripts = ["scripts/zapper.luau"]

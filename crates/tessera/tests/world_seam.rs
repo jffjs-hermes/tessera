@@ -7,7 +7,10 @@
 //!   - `engine.spawn_at` registers a blueprint-spawned, `ActorEnergy`-carrying
 //!     actor with the scheduler (so it becomes scheduled);
 //!   - `player_turns` increments once per submitted player action including
-//!     cancelled (wall-blocked) ones.
+//!     cancelled (wall-blocked) ones;
+//!   - the Player blueprint's own `player_respawn.luau` script performs the
+//!     player's death/respawn (fresh `Player` at the start tile) — not the
+//!     goblin's script.
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -78,9 +81,18 @@ fn base_sim(script_source: Option<&str>, enemy: bool) -> (Sim, Arc<RwLock<Entity
             r#"-- tessera-api: 1
                 engine.define_part("Charge", {
                   fields = { charges = { kind = "int", default = 1, min = 0, max = 99 } },
+                })
+                engine.define_part("GoblinBrain", {
+                  fields = { detect = { kind = "int", default = 10, min = 1, max = 100 } },
+                })
+                engine.define_part("RespawnSystem", {
+                  fields = {
+                    due = { kind = "int", default = -1, min = -1, max = 1000000000 },
+                    blueprint = { kind = "string", default = "" },
+                  },
                 })"#,
         )
-        .expect("register charge schema");
+        .expect("register charge + goblin schemas");
     if let Some(src) = script_source {
         bridge.load("worldtest", "Bp", src).expect("load script");
     }
@@ -186,6 +198,46 @@ fn death_emitted_once_and_delivered_to_scripts() {
         1,
         "no Death re-emission on a dead entity, got {:?}",
         died_after
+    );
+}
+
+/// The Player blueprint's own `player_respawn.luau` script performs the
+/// player's death/respawn. With it loaded on the bridge (and no goblin script),
+/// the adjacent goblin's native fallback attack still kills the player; the
+/// script then respawns a fresh `Player` at the start tile and hp climbs back
+/// to the full baseline. This pins that the player policy lives in the
+/// Player-owned script, not `goblin_ai.luau`.
+#[test]
+fn player_respawn_script_respawns_player_on_death() {
+    let src = std::fs::read_to_string(format!("{DATA}/scripts/player_respawn.luau"))
+        .expect("read player_respawn.luau");
+    let (mut sim, _broker) = base_sim(Some(&src), true);
+
+    let mut saw_damage = false;
+    let mut saw_respawn = false;
+    for _ in 0..200 {
+        sim.submit_action(PlayerAction::Wait).unwrap();
+        let hp = sim.player_health();
+        if hp < 20 {
+            saw_damage = true;
+        }
+        // A jump back up to the full 20 baseline after damage = the fresh
+        // Player respawned at full health via the player's script.
+        if saw_damage && hp == 20 {
+            saw_respawn = true;
+            break;
+        }
+    }
+    assert!(saw_damage, "the adjacent goblin must damage the player");
+    assert!(
+        saw_respawn,
+        "player_respawn.luau must respawn the player to full hp (final hp {})",
+        sim.player_health()
+    );
+    assert!(
+        sim.log().iter().any(|l| l.contains("player respawned at")),
+        "player_respawn.luau must log the respawn, got {:?}",
+        sim.log()
     );
 }
 

@@ -35,6 +35,20 @@ use crate::events::Point;
 use crate::tiles::TileRegistry;
 use crate::vfs::Vfs;
 
+/// Blueprint spawn points a zone declares in its `[spawns]` table: which
+/// blueprint is placed at the zone `start` tile, and which blueprints are
+/// spawned at seeded random walkable-empty tiles (in list order). The demo
+/// binary reads this to seed the world; the blueprints themselves live in the
+/// blueprint library.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ZoneSpawns {
+    /// Blueprint id placed at the zone's `start` tile.
+    pub start: Option<String>,
+    /// Blueprint ids spawned at seeded random walkable-empty tiles, in list
+    /// order.
+    pub random: Vec<String>,
+}
+
 /// A single grid world. Row-major owned terrain storage.
 ///
 /// `TerrainId` is an owned [`String`] key into the tile registry; walkability
@@ -49,6 +63,8 @@ pub struct Zone {
     /// scan order (deterministic, no RNG); a file may override it, in which
     /// case the loader validates it is walkable (fail-closed).
     pub start: Point,
+    /// Blueprint spawn points (`[spawns]`), empty when the zone declares none.
+    pub spawns: ZoneSpawns,
     /// Terrain id per cell, row-major (`cells[y * width + x]`).
     cells: Vec<String>,
 }
@@ -60,6 +76,7 @@ impl Default for Zone {
             width: 0,
             height: 0,
             start: Point::new(0, 0),
+            spawns: ZoneSpawns::default(),
             cells: Vec::new(),
         }
     }
@@ -85,6 +102,7 @@ impl Zone {
             width,
             height,
             start,
+            spawns: ZoneSpawns::default(),
             cells,
         }
     }
@@ -315,6 +333,7 @@ fn load_zone(path: &str, text: &str, tiles: &TileRegistry) -> Result<Zone, ZoneE
         width,
         height,
         start,
+        spawns: raw.spawns.map(|s| s.into_zone_spawns()).unwrap_or_default(),
         cells,
     })
 }
@@ -326,6 +345,29 @@ struct ZoneFile {
     id: String,
     #[serde(rename = "gen")]
     settings: GenTable,
+    /// Optional `[spawns]` table: which blueprints to place at the start tile
+    /// and at seeded random walkable-empty tiles.
+    spawns: Option<SpawnsTable>,
+}
+
+/// The flat shape of a zone file's `[spawns]` table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpawnsTable {
+    /// Blueprint id placed at the zone `start` tile.
+    start: Option<String>,
+    /// Blueprint ids placed at seeded random walkable-empty tiles.
+    #[serde(default)]
+    random: Vec<String>,
+}
+
+impl SpawnsTable {
+    fn into_zone_spawns(self) -> ZoneSpawns {
+        ZoneSpawns {
+            start: self.start,
+            random: self.random,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -568,6 +610,26 @@ pub(crate) mod tests {
         assert_eq!(z.tile_id(1, 1), "terrain.floor");
         // Default start = first walkable cell in row-major scan.
         assert_eq!(z.start, Point::new(1, 1));
+        // No `[spawns]` table declared => empty spawn table.
+        assert_eq!(z.spawns, ZoneSpawns::default());
+    }
+
+    #[test]
+    fn spawns_table_is_parsed() {
+        let s = "id = \"start\"\n[gen]\ntype = \"ascii\"\n\
+                 [gen.glyphs]\n\".\" = \"terrain.floor\"\n\"#\" = \"terrain.wall\"\n\
+                 [gen.ascii]\nrows = [\"...\"]\n\
+                 [spawns]\nstart = \"Player\"\nrandom = [\"Goblin\", \"Wolf\"]\n";
+        let vfs = MemVfs::new().with("zones/start.toml", s);
+        let world = load_from(&vfs).unwrap();
+        let z = world.get("start").unwrap();
+        assert_eq!(
+            z.spawns,
+            ZoneSpawns {
+                start: Some("Player".to_string()),
+                random: vec!["Goblin".to_string(), "Wolf".to_string()],
+            }
+        );
     }
 
     // ---- validation: unknown generator -------------------------------------
@@ -845,6 +907,7 @@ pub(crate) mod tests {
             width: 2,
             height: 1,
             start: Point::new(0, 0),
+            spawns: ZoneSpawns::default(),
             cells: vec!["terrain.floor".into(), "terrain.wall".into()],
         };
         assert_eq!(

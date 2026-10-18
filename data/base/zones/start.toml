@@ -68,3 +68,7 @@ rows = [
 [gen.start]
 x = 2
 y = 2
+
+[spawns]
+start = "Player"
+random = ["Goblin"]

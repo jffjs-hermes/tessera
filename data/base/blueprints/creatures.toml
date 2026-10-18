@@ -18,7 +18,11 @@ parts.ActorEnergy = { speed = 100 }
 [Player]
 inherits = "Humanoid"
 parts.Render = { tile = "creature.player" }
+scripts = ["scripts/player_respawn.luau"]
 
 [Goblin]
 inherits = "Humanoid"
 parts.Render = { tile = "creature.goblin" }
+parts.GoblinBrain = { detect = 10 }
+parts.Health = { hp = 3 }
+scripts = ["scripts/goblin_ai.luau"]

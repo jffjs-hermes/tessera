@@ -227,6 +227,12 @@ impl WorldRead for NavWorld {
     fn player_turns(&self) -> u64 {
         *self.player_turns.lock().expect("lock")
     }
+    fn zone_start(&self) -> Option<(i32, i32)> {
+        Some((self.zone.start.x, self.zone.start.y))
+    }
+    fn world_state(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Build a host over a fresh [`NavWorld`] with the given reader installed.
