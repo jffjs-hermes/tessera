@@ -1976,6 +1976,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tessera-mods"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde",
+ "tessera-core",
+ "thiserror 2.0.21",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "tessera-render"
 version = "0.1.0"
 dependencies = [

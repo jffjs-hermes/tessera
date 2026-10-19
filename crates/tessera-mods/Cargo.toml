@@ -1,0 +1,15 @@
+[package]
+name = "tessera-mods"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+semver = "1.0.28"
+serde = { version = "1.0.229", features = ["derive"] }
+tessera-core = { path = "../tessera-core" }
+thiserror = "2.0.21"
+toml = "1.1.8"
+tracing = "0.1.44"
