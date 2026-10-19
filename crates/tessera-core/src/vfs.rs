@@ -278,6 +278,36 @@ mod tests {
     use zip::CompressionMethod;
     use zip::write::SimpleFileOptions;
 
+    #[test]
+    fn mem_vfs_read_and_list() {
+        let v = MemVfs::new()
+            .with("a/x.toml", "1")
+            .with("a/y.toml", "2")
+            .with("b/z", "3");
+        assert_eq!(v.read_to_string("a/x.toml").unwrap(), "1");
+        assert_eq!(v.list("a").unwrap(), vec!["a/x.toml", "a/y.toml"]);
+        assert!(v.read("nope").is_err());
+    }
+
+    #[test]
+    fn dir_vfs_rejects_escape_and_lists_sorted() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("t")).unwrap();
+        std::fs::write(d.path().join("t/b.txt"), "b").unwrap();
+        std::fs::write(d.path().join("t/a.txt"), "a").unwrap();
+        let v = DirVfs::new(d.path());
+        assert_eq!(v.list("t").unwrap(), vec!["t/a.txt", "t/b.txt"]);
+        assert_eq!(v.read_to_string("t/a.txt").unwrap(), "a");
+        assert_eq!(
+            v.read("../etc/passwd").unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            v.read("/etc/passwd").unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
     /// Minimal CRC-32 (IEEE) used to hand-craft raw zip archives for cases the
     /// `ZipWriter` refuses to build (e.g. literal duplicate entry names).
     fn crc32(data: &[u8]) -> u32 {
