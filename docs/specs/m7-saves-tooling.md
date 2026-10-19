@@ -1,6 +1,7 @@
 # M7 spec: saves and developer tooling
 
-Status: research spec for M7 (author: researcher bot; pending Jeff's approval). Grounded in
+Status: research spec for M7 (author: researcher bot; owner decisions from Jeff's PR #37 review
+folded in — see §4.2 and §11). Grounded in
 [architecture.md](../architecture.md) §3 (`Save/load: serde + postcard/bincode, versioned
 schemas, zstd`; `Dev UI: egui — Inspectors and a console (M7)`; `Logging/profiling: tracing`),
 §4 (planned `tessera-ui` crate), §5 ("The simulation is headless and deterministic, so it runs
@@ -36,7 +37,7 @@ with derive already in `tessera-core`. `hecs = 0.11`.
 | Atomic writes | temp file in the save dir → `sync_all` → backup old via rename → rename over → startup sweep of stale temp files; Windows sharing-violation retry | high |
 | egui integration | `egui-wgpu` 0.37 + `egui-winit` 0.37 wired directly onto the existing winit/wgpu objects (not eframe) | high |
 | Release exclusion | cargo feature `devtools` (non-default); release/dist builds omit it | high |
-| **Rust MSRV** | egui 0.36/0.37 require `rust_version = 1.95`; workspace pins 1.85 → **bump to 1.95 needs owner approval** | **BLOCKER** |
+| **Rust MSRV** | **Resolved (Jeff, PR #37 review):** bump workspace `rust-version` to **1.95** and adopt egui 0.37 — no longer a blocker | resolved |
 | Console | line grammar (`spawn`, `list`, `entities`, `print`, `sethp`, `tp`, `save`, `load`, `help`); parsed to a typed `ConsoleCommand` enum, executed between turns | medium |
 | Inspector | read-only egui window; per-frame snapshot taken under the broker read lock; entity list in deterministic id order | medium |
 | Where the code lives | save module in `tessera-core`; console/inspector as a `devtools` module inside the `tessera` binary (new `tessera-ui` crate deferred) | medium |
@@ -129,6 +130,14 @@ pub struct SavedEntity { pub bits: u64, pub parts: Vec<(String, toml::Value)> }
   rebuilds it from the same pack and the save records only `zone_id`, which must match — a
   mismatch is `SaveError::ZoneMismatch` (saves are pack-specific; fail closed rather than
   teleport entities into a different map).
+- **Pack-specific locking is the permanent rule (decided, Jeff, PR #37 review — issue comment
+  6276955918).** There are no cross-zone saves now or later, by design. Rationale: the runtime
+  only ever simulates one zone (M6 defers portals/multi-zone), and the save schema stores
+  `zone_id` as its single source of truth. If the game later gains real zone traversal, the
+  rule relaxes additively on load only — restore the saved `zone_id` and boot that zone from
+  the same pack — with no schema change. That future is explicitly out of scope for M7 and is
+  not designed for here: do not build for a world map that doesn't yet exist; revisit the
+  semantics only when portals land.
 - **Script parts** already implement `Serialize`/`Deserialize` over their data tables
   (`script_part.rs`); their hook serializes via the existing TOML value.
 - **RNG state.** `SimRng(ChaCha8Rng)` must round-trip or determinism-after-load dies. `rand_chacha`
@@ -210,21 +219,18 @@ flag for the future when the game stops being a developer-run demo.
     trimmed to what CI platforms need (verify exact feature list at implementation — macOS
     needs none of the Linux clipboard backends).
 
-### 4.2 BLOCKER B1 — MSRV conflict (needs owner decision)
+### 4.2 B1 — MSRV: RESOLVED (bump `rust-version` to 1.95)
 
 Every egui release that targets wgpu 30 (`0.36.1`, `0.37.0`) declares
-`rust_version = "1.95"`; the workspace pins `rust-version = 1.85`. There is **no egui version
-compatible with both wgpu 30 and Rust 1.85**. Options:
+`rust_version = "1.95"`; the workspace pinned `rust-version = 1.85`. There is no egui version
+compatible with both wgpu 30 and Rust 1.85.
 
-1. **(Recommended) Bump workspace `rust-version` to `1.95`** when adopting egui 0.37. Cheap
-   (stable toolchain is well past this), but it is a workspace-wide contract change → needs
-   Jeff's approval per the task policy on architecture decisions.
-2. Ship M7 dev tools without egui (a plain-key console + text dump inspector) and defer egui to
-   an MSRV bump later. Weaker demo, but zero MSRV movement.
-3. Vendor/patch egui with a lowered MSRV — rejected; maintenance poison.
-
-**Do not start egui work until B1 is answered.** Everything else in M7 (saves, console engine,
-headless paths) is MSRV-neutral and can proceed.
+**Decision (Jeff, PR #37 review — issue comment 6276955918): option 1 approved — the workspace
+`rust-version` ships at 1.95 and egui 0.37 is adopted on that MSRV.** The stable toolchain is
+well past 1.95, so this is not a practical blocker. B1 is resolved and no longer gates anything;
+Cards E/F may start. The workspace-wide `rust-version = 1.95` bump itself is part of Card E's
+diff. (Alternatives considered and rejected: shipping M7 without egui, or vendoring egui with a
+lowered MSRV — maintenance poison.)
 
 ### 4.3 Release exclusion: feature flag (not dev profile)
 
@@ -382,23 +388,26 @@ text). All five M7 architecture items map to visible behavior: a save written �
    parts; wire save/load into `Sim` (new `Sim::save`/`Sim::load`), zone-id check.
 4. **Card D — CLI + console engine:** `--save-dir/--load/--exec` args, parser + executor +
    `CMD` log lines. Tests 6–8. README flag/keys section.
-5. **Card E — egui wiring (gated; needs B1 resolved):** feature + deps, `egui_winit` input hook,
+5. **Card E — egui wiring (B1 resolved):** workspace `rust-version = 1.95` bump, feature + deps,
+   `egui_winit` input hook,
    `egui_wgpu` render pass, backtick/F3 toggles, console panel UI, CI feature job. Test 9.
 6. **Card F — inspector window:** snapshot builder + read-only entity list/detail pane; README
    inspector paragraph.
 
 Cards A–D are one PR-sized batch each and unblock the milestone's headless half; E and F carry
-the egui risk and wait on the B1 decision.
+the egui risk and may proceed now that B1 is resolved.
 
 ## 11. Blockers and open questions
 
-- **B1 (owner decision, blocks Card E/F):** egui 0.36/0.37 require `rust_version = 1.95`;
-  workspace pins 1.85 (§4.2). Recommend bumping to 1.95; needs approval.
+- **B1 (RESOLVED — Jeff, PR #37 review, issue comment 6276955918):** egui 0.36/0.37 require
+  `rust_version = 1.95`; workspace pinned 1.85 (§4.2). **Decision: bump workspace
+  `rust-version` to 1.95 and adopt egui 0.37.** No longer blocks Cards E/F.
 - **B2 (implementation-time check, blocks Card B):** confirm CI runners can build the C zstd
   (`zstd-sys`) on all three platforms; if not, add the `vendored` feature. The Luau C++ build
   already proves C++ toolchains exist on the runners, so risk is low.
 - **B3 (minor, blocks Card C):** `rand_chacha`'s `serde1` feature must expose the exact ChaCha8
   state used by `rand_core 0.10` — verify the feature still exists at that version; fallback is
   serializing the 32-byte seed + stream counter manually (both are public API).
-- Open question for the owner (non-blocking): should `load` support cross-zone saves later, or
-  is pack-specific locking (current `ZoneMismatch` proposal) the permanent rule?
+- **Cross-zone saves (RESOLVED — permanent rule):** pack-specific locking / `ZoneMismatch` is
+  the permanent rule; no cross-zone saves now or later, by design. Rationale and the additive
+  future relaxation path are recorded in §2.3.
