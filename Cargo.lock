@@ -1997,11 +1997,13 @@ dependencies = [
  "mlua",
  "notify",
  "tessera-core",
+ "tessera-mods",
  "tessera-render",
  "tessera-script",
  "tracing",
  "tracing-subscriber",
  "winit",
+ "zip",
 ]
 
 [[package]]

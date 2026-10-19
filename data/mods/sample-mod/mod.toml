@@ -1,0 +1,12 @@
+# Sample mod shipping with the demo: adds a "Bogling" creature (a new blueprint
+# that inherits the base Goblin and carries a mod-defined Charge part) and
+# patches the base Goblin's tile and strength in place.
+#
+# `id` and `version` are required; `api` must equal the engine's api version.
+# Base is the implicit first mod and is *not* declared as a dependency (naming
+# `base` as a dependency is illegal — it is always present and always first).
+id      = "sample-mod"
+version = "0.1.0"
+api     = 1
+title   = "Sample Mod"
+authors = ["jeff"]

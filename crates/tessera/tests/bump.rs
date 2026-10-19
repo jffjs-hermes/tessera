@@ -43,6 +43,9 @@ fn build_world(vfs: &DirVfs, bridge: &ScriptBridge) -> World {
     world
         .register_part::<tessera_core::events::Health>(tessera_core::events::PART_HEALTH)
         .expect("register Health");
+    world
+        .register_part::<tessera_core::events::Stats>(tessera_core::events::PART_STATS)
+        .expect("register Stats");
 
     for path in vfs.list("scripts").expect("list scripts") {
         if path.ends_with(".luau") {

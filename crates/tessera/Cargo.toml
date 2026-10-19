@@ -14,6 +14,10 @@ notify = "8.2.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tessera-core = { path = "../tessera-core" }
+tessera-mods = { path = "../tessera-mods" }
 tessera-script = { path = "../tessera-script" }
 tessera-render = { path = "../tessera-render" }
 winit = "0.30.13"
+
+[dev-dependencies]
+zip = { version = "6", default-features = false, features = ["deflate"] }

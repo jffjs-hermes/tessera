@@ -27,7 +27,10 @@ it instead of moving (bump rule). A wall-blocked move is cancelled (costs no
 energy). `--headless <n>` is the display-free smoke
 path CI can run — it prints the final map then the one-event-per-line log.
 `--zone <id>` selects a named zone (`data/base/zones/*.toml`); the zone defaults
-to the single zone in the pack.
+to the single zone in the pack. `--mods <dir>` discovers local directory and zip
+mods (default `data/mods`); the shipped `sample-mod` adds a Bogling creature,
+patches the base Goblin's tile and strength, and registers an Attack handler
+that appears in the event log.
 
 ## The demo cave
 
