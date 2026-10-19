@@ -56,6 +56,40 @@ pub enum BlueprintError {
         id: String,
         part: String,
     },
+    #[error("parsing patch file {file}: {source}")]
+    PatchParse {
+        file: String,
+        source: toml::de::Error,
+    },
+    #[error("patch file {file} targets unknown blueprint '{id}'")]
+    PatchTargetMissing { file: String, id: String },
+    #[error("replace op on '{path}' failed: no value to replace in blueprint '{id}' ({file})")]
+    ReplaceTargetMissing {
+        file: String,
+        id: String,
+        path: String,
+    },
+    #[error(
+        "merge op on '{path}' failed: intermediate target missing in blueprint '{id}' ({file})"
+    )]
+    MergeTargetMissing {
+        file: String,
+        id: String,
+        path: String,
+    },
+    #[error("remove op on '{path}' failed: no value to remove in blueprint '{id}' ({file})")]
+    RemoveTargetMissing {
+        file: String,
+        id: String,
+        path: String,
+    },
+    #[error("invalid patch path '{path}' in blueprint '{id}' ({file}): {msg}")]
+    InvalidPatchPath {
+        file: String,
+        id: String,
+        path: String,
+        msg: String,
+    },
 }
 
 /// A failed load pass carrying every `file + id` diagnostic collected so a typo

@@ -19,9 +19,12 @@ use crate::ecs::{Part, PartRegistry, PartTypeId};
 use crate::vfs::Vfs;
 
 mod error;
+mod patch;
 
 pub use error::BlueprintError;
 pub use error::LoadFail;
+pub use patch::PatchFile;
+pub use patch::PatchOps;
 
 /// A blueprint definition as collected from a single file, before inheritance.
 #[derive(Debug, Clone)]

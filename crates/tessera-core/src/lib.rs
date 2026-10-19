@@ -16,3 +16,9 @@ pub mod vfs;
 pub mod world;
 pub mod worldgen;
 pub mod zone;
+
+/// Version of the engine content API that mod manifests and scripts must match.
+/// A load error is raised before any content file is read when a mod's
+/// `api` field differs. One integer across the project keeps the engine,
+/// mods and scripts on the same versioned surface.
+pub const TESSERA_API_VERSION: u32 = 1;
