@@ -153,7 +153,7 @@ Run as small batches with human review between each.
 - [x] **M3 Events and turns:** `Move`, `Attack`, `TakeDamage` events, speed-based scheduler, headless simulation tests.
 - [x] **M4 Scripting:** embed Luau, minimal API (`spawn`, get/set part, `on(event)`), one behavior (a zapping goblin, the Zapper demo) written entirely in script.
 - [ ] **M5 Mod loader:** manifests, load order, patch operations, zip-able folders via the VFS, sample mod that changes a blueprint and adds a script.
-- [ ] **M6 World slice:** zones/chunks, cave worldgen, FOV, pathfinding, basic AI (wander/chase).
+- [x] **M6 World slice:** zones/chunks, cave worldgen, FOV, pathfinding, basic AI (wander/chase).
   Demo acceptance (all required, shown in the running demo):
   1. The map is loaded from data, then the player and one goblin are spawned from blueprints.
   2. The goblin wanders randomly, using the seeded `SimRng` stream.

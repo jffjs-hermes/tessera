@@ -11,7 +11,7 @@ Scripting: Luau via mlua. Desktop only.
 - [x] **M3** Event system, energy-based turn scheduler, headless sim tests
 - [x] **M4** Luau scripting (sandboxed), minimal API, one behavior written in script
 - [ ] **M5** Mod loader: manifests, load order, patch ops (zip-able folders via VFS)
-- [ ] **M6** Zones/chunks, cave worldgen, FOV, pathfinding, basic AI
+- [x] **M6** Zones/chunks, cave worldgen, FOV, pathfinding, basic AI
   - M6 includes the playable demo: a goblin that wanders, chases within 10 tiles, and respawns; the player respawns at the start tile.
 - [ ] **M7** Versioned saves, debug console, entity inspector
 
