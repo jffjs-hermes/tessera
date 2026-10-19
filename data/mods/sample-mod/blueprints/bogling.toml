@@ -1,0 +1,8 @@
+# The sample mod's own blueprint: a new creature id that only exists because the
+# mod is loaded. It inherits the base Goblin (cross-module inheritance through
+# the combined library) and adds a mod-defined `Charge` part plus a scripted
+# handler that logs on Attack.
+[Bogling]
+inherits = "Goblin"
+parts.Charge = { charges = 5 }
+scripts = ["scripts/bogling-tweak.luau"]

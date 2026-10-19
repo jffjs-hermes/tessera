@@ -1,0 +1,4 @@
+# Tile recolor shipped by the sample mod: the Goblin's patched tile id. Loading
+# this through the composed vfs proves a mod can ship new tile definitions that
+# layer onto base (later tile files override id-by-id).
+"creature.goblin.angry" = { glyph = "g", fg = "#ff6060" }

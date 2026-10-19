@@ -25,4 +25,5 @@ inherits = "Humanoid"
 parts.Render = { tile = "creature.goblin" }
 parts.GoblinBrain = { detect = 10 }
 parts.Health = { hp = 3 }
+parts.Stats = { strength = 18 }
 scripts = ["scripts/goblin_ai.luau"]
