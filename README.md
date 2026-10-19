@@ -9,7 +9,7 @@ inspired by Caves of Qud. Desktop only (Linux/macOS/Windows; CI builds and tests
 
 **Status:** M0 (scaffold), M1 (tile renderer), M2 (data-driven entities), M3 (typed event
 bus + energy scheduler wired into the demo), M4 (Luau scripting) and M6 (world slice
-and demo) complete. M5 (mod loader) is next.
+and demo) complete. M5 (mod loader) is next, with field of view planned as M8 after M7.
 
 ## Run
 
