@@ -2026,6 +2026,7 @@ version = "0.1.0"
 dependencies = [
  "semver",
  "serde",
+ "tempfile",
  "tessera-core",
  "thiserror 2.0.21",
  "toml",
