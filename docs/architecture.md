@@ -153,16 +153,16 @@ Run as small batches with human review between each.
 - [x] **M3 Events and turns:** `Move`, `Attack`, `TakeDamage` events, speed-based scheduler, headless simulation tests.
 - [x] **M4 Scripting:** embed Luau, minimal API (`spawn`, get/set part, `on(event)`), one behavior (a zapping goblin, the Zapper demo) written entirely in script.
 - [ ] **M5 Mod loader:** manifests, load order, patch operations, zip-able folders via the VFS, sample mod that changes a blueprint and adds a script.
-- [ ] **M6 World slice:** zones/chunks, cave worldgen, FOV, pathfinding, basic AI (wander/chase).
+- [x] **M6 World slice:** zones/chunks, cave worldgen, pathfinding, basic AI (wander/chase).
   Demo acceptance (all required, shown in the running demo):
   1. The map is loaded from data, then the player and one goblin are spawned from blueprints.
   2. The goblin wanders randomly, using the seeded `SimRng` stream.
   3. When the player is within 10 tiles by straight-line distance, the goblin moves toward the player along a path and attacks when adjacent.
   4. When the player dies, the player respawns at the start tile. If that tile is occupied, use the nearest free walkable tile.
   5. When the goblin dies, a new goblin spawns after 5 PLAYER turns, at a random walkable empty tile.
-  FOV: later; detection uses straight-line distance for now.
-  Execution order: M4, M6 (world slice and demo), M5 (mod loader), M7.
+  Execution order: M4, M6 (world slice and demo), M5 (mod loader), M7, M8.
 - [ ] **M7 Saves and tooling:** versioned saves, debug console, egui entity inspector.
+- [ ] **M8 Field of view:** recursive shadowcasting line of sight, visibility for the player and AI detection. Deferred from M6 by owner decision; detection was straight-line distance until then.
 
 After M7: inventory, stats, mutations, factions, quests, and layered worldgen.
 

@@ -17,8 +17,10 @@
 //!
 //! - `type = "ascii"` — a hand-authored grid: a glyph→terrain mapping plus one
 //!   row-string per map row. This is the fixture / hand-authored path; it is
-//!   the default and the only generator in this module (cave worldgen is a
-//!   later, separate module).
+//!   the default generator.
+//! - `type = "caves"` — the seeded cellular-automata cave generator from
+//!   [`crate::worldgen`]. Its parameters (`width`, `height`, `seed`, `fill`,
+//!   `passes`) come from the `[gen]` table.
 //!
 //! The loader validates every zone fail-closed: unknown generator type,
 //! invalid dimensions, unknown glyphs, unknown terrain ids, and an invalid
@@ -34,6 +36,7 @@ use thiserror::Error;
 use crate::events::Point;
 use crate::tiles::TileRegistry;
 use crate::vfs::Vfs;
+use crate::worldgen;
 
 /// Blueprint spawn points a zone declares in its `[spawns]` table: which
 /// blueprint is placed at the zone `start` tile, and which blueprints are
@@ -292,6 +295,7 @@ fn load_zone(path: &str, text: &str, tiles: &TileRegistry) -> Result<Zone, ZoneE
     }
     let (cells, width, height) = match generator {
         "ascii" => generate_ascii(path, &raw.id, &raw.settings, tiles)?,
+        "caves" => generate_caves(path, &raw.id, &raw.settings, tiles)?,
         other => {
             return Err(ZoneError::Invalid(format!(
                 "{path}: zone '{}' declares unknown generator {other:?}",
@@ -378,6 +382,13 @@ struct GenTable {
     r#type: Option<String>,
     width: Option<usize>,
     height: Option<usize>,
+    /// Caves-generator parameters (`type = "caves"`).
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default)]
+    fill: Option<u32>,
+    #[serde(default)]
+    passes: Option<u32>,
     /// Optional start tile override; defaults to the first walkable cell.
     start: Option<StartCfg>,
     /// Ascii-generator table (`type = "ascii"`): the glyph grid.
@@ -496,8 +507,34 @@ fn generate_ascii(
     }
 
     // Apply the overlay last (in sorted key order), overriding generated cells.
-    // Keys are "x,y"; every overlay must be in bounds and name a known terrain.
-    for (key, terrain_id) in &raw_type.overlay {
+    apply_overlay(
+        path,
+        id,
+        &raw_type.overlay,
+        width,
+        height,
+        &mut cells,
+        tiles,
+    )?;
+
+    Ok((cells, width, height))
+}
+
+/// Apply a zone's `[gen.overlay]` to generated cells in sorted key order,
+/// overriding whatever the generator produced. Keys are `"x,y"`; every overlay
+/// must be in bounds and name a known terrain (fail-closed, like the rest of
+/// the loader).
+fn apply_overlay(
+    path: &str,
+    id: &str,
+    overlay: &BTreeMap<String, String>,
+    width: usize,
+    height: usize,
+    cells: &mut [String],
+    tiles: &TileRegistry,
+) -> Result<(), ZoneError> {
+    let invalid = |msg: String| ZoneError::Invalid(format!("{path}: zone '{id}': {msg}"));
+    for (key, terrain_id) in overlay {
         if !tiles.contains(terrain_id) {
             return Err(invalid(format!(
                 "overlay {key:?} names unknown terrain id {terrain_id:?}"
@@ -512,7 +549,57 @@ fn generate_ascii(
         }
         cells[y * width + x] = terrain_id.clone();
     }
+    Ok(())
+}
 
+/// The caves generator (`type = "caves"`): run the seeded cellular-automata
+/// worldgen from [`crate::worldgen`] over the `[gen]` cave parameters and build
+/// row-major cells. Parameters are parsed from the `[gen]` table, validated
+/// fail-closed (the worldgen `validate` step), and the same seed + parameters
+/// always produce the same grid. An optional `[gen.overlay]` still applies
+/// afterwards, so a file can force cells on top of the generated cave.
+fn generate_caves(
+    path: &str,
+    id: &str,
+    raw_type: &GenTable,
+    tiles: &TileRegistry,
+) -> Result<(Vec<String>, usize, usize), ZoneError> {
+    let invalid = |msg: String| ZoneError::Invalid(format!("{path}: zone '{id}': {msg}"));
+
+    let width = raw_type
+        .width
+        .ok_or_else(|| invalid("caves generator requires `width`".into()))?;
+    let height = raw_type
+        .height
+        .ok_or_else(|| invalid("caves generator requires `height`".into()))?;
+    let params = worldgen::CaveParams {
+        width,
+        height,
+        seed: raw_type
+            .seed
+            .ok_or_else(|| invalid("caves generator requires `seed`".into()))?,
+        fill: raw_type
+            .fill
+            .ok_or_else(|| invalid("caves generator requires `fill`".into()))?,
+        passes: raw_type
+            .passes
+            .ok_or_else(|| invalid("caves generator requires `passes`".into()))?,
+    };
+    // Fail closed on bad parameters — nothing is generated from an invalid set.
+    worldgen::validate(&params)
+        .map_err(|msg| invalid(format!("invalid cave parameters: {msg}")))?;
+
+    let result = worldgen::generate(&params);
+    let mut cells = result.cells;
+    apply_overlay(
+        path,
+        id,
+        &raw_type.overlay,
+        width,
+        height,
+        &mut cells,
+        tiles,
+    )?;
     Ok((cells, width, height))
 }
 
@@ -578,6 +665,20 @@ pub(crate) mod tests {
     fn load_from(vfs: &MemVfs) -> Result<WorldMap, ZoneError> {
         let t = tiles();
         load_zones_from(vfs, &t, "zones")
+    }
+
+    /// A cave zone with `type = "caves"`. `gen_lines` holds the `[gen]`
+    /// parameter lines (width/height/seed/fill/passes); ship defaults are used
+    /// when it's empty. The `[spawns]` table mirrors the shipped start.toml.
+    fn caves_toml(gen_lines: &str) -> String {
+        let genlines = if gen_lines.is_empty() {
+            "width = 80\nheight = 50\nseed = 20260318\nfill = 45\npasses = 2\n".to_string()
+        } else {
+            gen_lines.to_string()
+        };
+        format!(
+            "id = \"start\"\n[gen]\ntype = \"caves\"\n{genlines}[spawns]\nstart = \"Player\"\nrandom = [\"Goblin\"]\n"
+        )
     }
 
     /// A zone whose `[gen]` carries `type = "ascii"`, the floor/wall glyph
@@ -830,6 +931,73 @@ pub(crate) mod tests {
         let vfs = MemVfs::new().with("zones/start.toml", file);
         let err = load_from(&vfs).unwrap_err();
         assert!(err.to_string().contains("not \"x,y\""), "{err}");
+    }
+
+    // ---- caves generator --------------------------------------------------
+
+    #[test]
+    fn caves_generator_is_deterministic_for_the_same_seed() {
+        // Loading the same zone file twice must produce byte-identical grids
+        // (the loader must pass the seed through to worldgen unchanged).
+        let vfs_a = MemVfs::new().with("zones/start.toml", caves_toml(""));
+        let vfs_b = MemVfs::new().with("zones/start.toml", caves_toml(""));
+        let a = load_from(&vfs_a).unwrap().get("start").unwrap().clone();
+        let b = load_from(&vfs_b).unwrap().get("start").unwrap().clone();
+
+        assert_eq!((a.width, a.height), (80, 50));
+        assert_eq!(a.cells, b.cells, "same seed must give the same cave grid");
+        // Generated caves are not the all-floor ascii room: there is wall, and
+        // there is a walkable start.
+        assert!(a.cells.iter().any(|t| t == "terrain.wall"), "cave has wall");
+        assert!(a.is_walkable(a.start.x, a.start.y), "start is walkable");
+    }
+
+    #[test]
+    fn caves_bad_parameters_fail_closed() {
+        // fill > 100.
+        let vfs = MemVfs::new().with(
+            "zones/start.toml",
+            caves_toml("width = 80\nheight = 50\nseed = 1\nfill = 101\npasses = 2\n"),
+        );
+        let err = load_from(&vfs).unwrap_err();
+        assert!(err.to_string().contains("invalid cave parameters"), "{err}");
+
+        // passes = 0.
+        let vfs = MemVfs::new().with(
+            "zones/start.toml",
+            caves_toml("width = 80\nheight = 50\nseed = 1\nfill = 45\npasses = 0\n"),
+        );
+        let err = load_from(&vfs).unwrap_err();
+        assert!(err.to_string().contains("invalid cave parameters"), "{err}");
+
+        // Dimensions too small for a cave.
+        let vfs = MemVfs::new().with(
+            "zones/start.toml",
+            caves_toml("width = 1\nheight = 1\nseed = 1\nfill = 45\npasses = 2\n"),
+        );
+        let err = load_from(&vfs).unwrap_err();
+        assert!(err.to_string().contains("invalid cave parameters"), "{err}");
+
+        // Missing a required parameter is a load error (no silent default).
+        let vfs = MemVfs::new().with(
+            "zones/start.toml",
+            caves_toml("width = 80\nheight = 50\nseed = 1\npasses = 2\n"),
+        );
+        let err = load_from(&vfs).unwrap_err();
+        assert!(err.to_string().contains("requires `fill`"), "{err}");
+    }
+
+    #[test]
+    fn caves_zone_parses_and_applies_overlay() {
+        // A caves zone may force cells via overlay after generation.
+        let s = format!(
+            "{}\n[gen.overlay]\n\"0,0\" = \"terrain.wall\"\n",
+            caves_toml("")
+        );
+        let vfs = MemVfs::new().with("zones/start.toml", s);
+        let world = load_from(&vfs).unwrap();
+        let z = world.get("start").unwrap();
+        assert!(!z.is_walkable(0, 0), "overlaid cave cell is wall");
     }
 
     // ---- ascii round-trip --------------------------------------------------

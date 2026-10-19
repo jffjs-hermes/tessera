@@ -25,15 +25,17 @@ use std::sync::{Arc, Mutex, RwLock};
 use hecs::Entity;
 use tessera_core::ecs::EntityBroker;
 use tessera_core::events::{
-    EARLY, HandlerAction, LATE, Move, NORMAL, Point, SimContext, TakeDamage,
+    EARLY, HandlerAction, LATE, Move, NORMAL, Point, SimContext, TakeDamage, TileEntry,
 };
 use tessera_core::rng::SimRng;
-use tessera_core::tiles::TileRegistry;
+use tessera_core::tiles::{Rgb, Tile, TileRegistry, TileVisual};
 use tessera_core::turns::{
     ActorEnergy, BASE_SPEED, PART_ENERGY, Scheduler, TurnAction, TurnReport,
 };
 use tessera_core::world::RenderTile;
 use tessera_core::zone::Zone;
+use tessera_render::Cell;
+use tessera_render::atlas::Atlas;
 
 use crate::scripting::{ScriptBridge, entity_to_id, int_params};
 
@@ -53,6 +55,16 @@ pub enum PlayerAction {
     Zap,
     /// Do nothing this turn.
     Wait,
+}
+
+/// A positioned entity the renderer draws: a data-driven tile id at a grid
+/// cell, resolved against the tile registry at draw time (never a hardcoded
+/// glyph). Drawn in the deterministic (entity-id) order the caller supplies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenderTarget {
+    pub x: i32,
+    pub y: i32,
+    pub tile: String,
 }
 
 /// The demo simulation harness: entity broker + map + rng + typed event bus +
@@ -101,13 +113,21 @@ impl Sim {
         enemy: Option<Entity>,
     ) -> Self {
         let mut ctx = SimContext::shared(broker.clone(), zone, SimRng::from_seed(SIM_SEED));
-        // Content-level wall collision: cancel any Move whose target is not
-        // walkable. This is the shipped cancellation handler.
+        // Content-level collision + occupancy: cancel any Move whose target is
+        // not walkable, or whose target is already occupied by a live actor
+        // other than the mover (a Caves-of-Qud bump target is converted to an
+        // `Attack` in the sim's action path before a `Move` is built, so this
+        // handler mainly blocks non-combat occupants and is the backstop that
+        // guarantees no two actors ever share a tile). This is the shipped
+        // cancellation handler.
         ctx.register::<Move>(EARLY, |ctx, ev| {
-            if ctx.map.is_walkable(ev.to.x, ev.to.y) {
-                HandlerAction::Continue
-            } else {
-                HandlerAction::Cancel
+            if !ctx.map.is_walkable(ev.to.x, ev.to.y) {
+                return HandlerAction::Cancel;
+            }
+            // Occupancy: at most one actor per tile. The mover is excluded.
+            match ctx.tile_entry(ev.to, ev.actor) {
+                TileEntry::Clear => HandlerAction::Continue,
+                _ => HandlerAction::Cancel,
             }
         });
         // Reference demo combat: an Attack on a Health-carrying defender
@@ -179,16 +199,33 @@ impl Sim {
         &self.ctx.map
     }
 
-    /// The player's rendered tile id (from its `RenderTile` component).
-    pub fn player_tile(&self) -> String {
-        self.ctx
-            .broker
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .world()
-            .get::<&RenderTile>(self.player)
-            .ok()
-            .map_or_else(|| "creature.player.missing".to_string(), |r| r.tile.clone())
+    /// Every live entity carrying both a `RenderTile` (the `Render` part) and
+    /// a `Position`, as a positioned tile id to draw on top of the terrain.
+    /// Deterministic draw order: sorted by entity id (never hash order), so the
+    /// resulting cells are stable frame to frame. Meant for the renderer, which
+    /// stays a pure reader — this never dispatches events or mutates state.
+    pub fn renderables(&self) -> Vec<RenderTarget> {
+        use tessera_core::events::{PART_POSITION, Position};
+        let b = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
+        let mut targets: Vec<(Entity, RenderTarget)> = Vec::new();
+        for e in b.entities_with_part(PART_POSITION) {
+            let Some(pos) = b.typed_part::<Position>(e, &PART_POSITION.into()) else {
+                continue;
+            };
+            let Ok(rt) = b.world().get::<&RenderTile>(e) else {
+                continue;
+            };
+            targets.push((
+                e,
+                RenderTarget {
+                    x: pos.x,
+                    y: pos.y,
+                    tile: rt.tile.clone(),
+                },
+            ));
+        }
+        targets.sort_by_key(|(e, _)| *e);
+        targets.into_iter().map(|(_, t)| t).collect()
     }
 
     /// The player's turn clock (increments once per submitted player action).
@@ -321,7 +358,7 @@ impl Sim {
         let turn = match action {
             PlayerAction::Move { dx, dy } => {
                 self.facing = (dx, dy);
-                TurnAction::MoveTo(Point::new(from.0 + dx, from.1 + dy))
+                self.step_or_bump(self.player, Point::new(from.0 + dx, from.1 + dy))
             }
             PlayerAction::Wait => TurnAction::Wait,
             PlayerAction::Zap => {
@@ -486,7 +523,7 @@ impl Sim {
         for pa in pending {
             match pa {
                 PendingAction::Step { entity, x, y } if *entity == actor_id => {
-                    return Some(TurnAction::MoveTo(Point::new(*x, *y)));
+                    return Some(self.step_or_bump(actor, Point::new(*x, *y)));
                 }
                 PendingAction::Attack { attacker, defender } if *attacker == actor_id => {
                     if let Some(bridge) = &self.bridge {
@@ -506,6 +543,20 @@ impl Sim {
             }
         }
         None
+    }
+
+    /// Build the turn action for `actor` entering `to`: a Caves-of-Qud bump. A
+    /// live, attackable actor at the destination makes it an `Attack` on that
+    /// defender (the mover does NOT move, and the attack costs the normal
+    /// attack energy); any other target is a plain `MoveTo`, which a wall or a
+    /// blocking non-combat occupant cancels downstream with no energy cost.
+    /// Used by both the player's move action and the scripted goblin `Step`,
+    /// so a goblin stepping onto the player bumps it instead of overlapping.
+    fn step_or_bump(&self, actor: Entity, to: Point) -> TurnAction {
+        match self.ctx.tile_entry(to, actor) {
+            TileEntry::Bump(defender) => TurnAction::Attack(defender),
+            _ => TurnAction::MoveTo(to),
+        }
     }
 
     /// Native seeded wander primitive: pick one of the actor's walkable-empty
@@ -705,6 +756,50 @@ impl Sim {
     }
 }
 
+/// Build one frame's draw cells: terrain everywhere, then every renderable
+/// entity drawn on top at its cell. The player keeps its behavior — its
+/// background falls through to the terrain tile under it (an entity tile with
+/// no `bg` inherits the terrain's). A pure reader: no event dispatch, no sim
+/// mutation; `targets` must already be in deterministic (entity-id) order.
+pub fn build_cells(
+    map: &Zone,
+    tiles: &TileRegistry,
+    atlas: &Atlas,
+    targets: &[RenderTarget],
+) -> Vec<Cell> {
+    let mut cells: Vec<Option<Cell>> = vec![None; map.width * map.height];
+    let mut set = |x: usize, y: usize, id: &str, under: Option<&Tile>| {
+        let t = tiles.get(id);
+        let TileVisual::Glyph { ch } = t.visual;
+        let bg = t.bg.or(under.and_then(|u| u.bg)).unwrap_or(Rgb::BLACK);
+        let (f, b) = (t.fg.to_f32(), bg.to_f32());
+        cells[y * map.width + x] = Some(Cell {
+            x: x as u32,
+            y: y as u32,
+            glyph: atlas.slot(ch),
+            fg: [f[0], f[1], f[2], 1.0],
+            bg: [b[0], b[1], b[2], 1.0],
+        });
+    };
+    for y in 0..map.height {
+        for x in 0..map.width {
+            set(x, y, map.tile_id(x, y), None);
+        }
+    }
+    for t in targets {
+        let (x, y) = (t.x as usize, t.y as usize);
+        if x >= map.width || y >= map.height {
+            continue;
+        }
+        let under = tiles.get(map.tile_id(x, y)).clone();
+        set(x, y, &t.tile, Some(&under));
+    }
+    cells
+        .into_iter()
+        .map(|c| c.expect("every cell is set after terrain + overlay"))
+        .collect()
+}
+
 /// Deterministic headless action script. Cycle of `[right, right, down, down,
 /// wait]`, so within a few steps the player walks into a map collision (the
 /// pillar at x%8==4 && y%6==3) and the cancellation path is exercised.
@@ -779,7 +874,8 @@ fn install_base_combat(ctx: &mut SimContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tessera_core::events::Position;
+    use tessera_core::events::{Health, PART_HEALTH, PART_POSITION, Position};
+    use tessera_core::turns::TURN_THRESHOLD;
     use tessera_core::zone::Zone;
 
     /// The demo room the fixture runs in: bordered all-floor grid with a pillar
@@ -892,5 +988,136 @@ mod tests {
         for line in sim.log() {
             assert!(line.starts_with("EVENT "), "unexpected log line: {line}");
         }
+    }
+
+    // ---- Caves-of-Qud bump combat ------------------------------------------
+
+    /// A fixture with a living player (Health 20) and an adjacent live goblin
+    /// (Health `goblin_hp`) in the demo room. Only the player is scheduled
+    /// (a goblin's independent turns would inject nondeterminism into these
+    /// focused tests). Returns the sim, the player, and the goblin entity.
+    fn combat_fixture(goblin_hp: i32) -> (Sim, hecs::Entity, hecs::Entity) {
+        use tessera_core::ecs::Part;
+        let mut broker = EntityBroker::new();
+        let player = broker.spawn();
+        broker
+            .insert_part(player, PART_ENERGY, Box::new(ActorEnergy::new(100)))
+            .unwrap();
+        broker
+            .insert_part(
+                player,
+                PART_POSITION,
+                Box::new(Position { x: 2, y: 2 }) as Box<dyn Part>,
+            )
+            .unwrap();
+        broker
+            .insert_part(
+                player,
+                PART_HEALTH,
+                Box::new(Health { hp: 20 }) as Box<dyn Part>,
+            )
+            .unwrap();
+        let goblin = broker.spawn();
+        broker
+            .insert_part(goblin, PART_ENERGY, Box::new(ActorEnergy::new(100)))
+            .unwrap();
+        broker
+            .insert_part(
+                goblin,
+                PART_POSITION,
+                Box::new(Position { x: 3, y: 2 }) as Box<dyn Part>,
+            )
+            .unwrap();
+        broker
+            .insert_part(
+                goblin,
+                PART_HEALTH,
+                Box::new(Health { hp: goblin_hp }) as Box<dyn Part>,
+            )
+            .unwrap();
+        let mut sim = Sim::new(broker, demo_zone(20, 10), player);
+        sim.log.clear();
+        (sim, player, goblin)
+    }
+
+    #[test]
+    fn move_onto_health_actor_bumps_and_charges_attack_energy() {
+        let (mut sim, _player, _goblin) = combat_fixture(3);
+        let report = sim
+            .submit_action(PlayerAction::Move { dx: 1, dy: 0 })
+            .unwrap();
+        // (2,2) -> (3,2) is the goblin's tile: it becomes an Attack, not a move.
+        assert_eq!(sim.position(), (2, 2), "a bump must NOT move the mover");
+        assert!(
+            report.charged,
+            "a bump attack charges the normal attack energy"
+        );
+        assert_eq!(
+            report.energy_after, 0,
+            "one normal attack costs exactly one threshold from fresh energy"
+        );
+        assert!(
+            sim.log().iter().any(|l| l.contains("EVENT Attack")),
+            "expected an Attack log line, got {:?}",
+            sim.log()
+        );
+    }
+
+    #[test]
+    fn move_onto_non_health_blocking_actor_is_cancelled_free() {
+        use tessera_core::ecs::Part;
+        let mut broker = EntityBroker::new();
+        let player = broker.spawn();
+        broker
+            .insert_part(player, PART_ENERGY, Box::new(ActorEnergy::new(100)))
+            .unwrap();
+        broker
+            .insert_part(
+                player,
+                PART_POSITION,
+                Box::new(Position { x: 2, y: 2 }) as Box<dyn Part>,
+            )
+            .unwrap();
+        // A blocking actor that carries a Position but no Health (a non-combat
+        // obstacle), standing where the player tries to move.
+        let blocker = broker.spawn();
+        broker
+            .insert_part(
+                blocker,
+                PART_POSITION,
+                Box::new(Position { x: 3, y: 2 }) as Box<dyn Part>,
+            )
+            .unwrap();
+        let mut sim = Sim::new(broker, demo_zone(20, 10), player);
+        sim.log.clear();
+
+        let report = sim
+            .submit_action(PlayerAction::Move { dx: 1, dy: 0 })
+            .unwrap();
+        assert_eq!(sim.position(), (2, 2), "blocked move leaves position");
+        assert!(!report.charged, "a blocked move costs no energy");
+        assert_eq!(report.energy_after, TURN_THRESHOLD, "energy untouched");
+        let line = &sim.log()[0];
+        assert!(
+            line.contains("Move") && line.contains("cancelled"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn scripted_step_onto_player_becomes_bump_attack() {
+        let (mut sim, player, goblin) = combat_fixture(3);
+        // A scripted goblin step aimed at the player's tile (2,2) resolves as
+        // an Attack on the player, never an overlapping move.
+        let goblin_id = crate::scripting::entity_to_id(goblin);
+        let action = sim.pending_to_turn_action(
+            goblin,
+            &[tessera_script::PendingAction::Step {
+                entity: goblin_id,
+                x: 2,
+                y: 2,
+            }],
+        );
+        assert_eq!(action, Some(TurnAction::Attack(player)));
     }
 }

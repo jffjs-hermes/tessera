@@ -4,8 +4,9 @@
 //! (new spawns use the new library; existing entities keep their parts).
 //!
 //! Turn-by-turn: input is routed through the
-//! event/scheduler harness in [`sim::Sim`]. Arrow keys / WASD move the `@`,
-//! `.` / Space wait; a wall-blocked move is cancelled by an EARLY map-collision
+//! event/scheduler harness in [`sim::Sim`]. Arrow keys / WASD / `hjklyubn` and
+//! the numpad move the `@`, `.` / Space / numpad 5 wait; a wall-blocked move is
+//! cancelled by an EARLY map-collision
 //! handler (no energy cost). `--headless <n>` runs `n` scripted actions with no
 //! window and prints the final map + event log — the deterministic CI smoke
 //! path. The renderer stays a pure reader: it never dispatches events or
@@ -33,7 +34,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::scripting::ScriptBridge;
@@ -76,7 +77,8 @@ fn parse_args() -> Result<Args> {
                 println!(
                     "tessera [--data <dir>] [--zone <id>] [--frames <n>] [--headless <n>]\n\
                      \n\
-                     Interactive: arrow keys / WASD / hjklyubn to move, `.` or Space = wait,\n\
+                     Interactive: arrow keys / WASD / hjklyubn or numpad to move (all 8\n\
+                     directions, numpad 5 = wait), `.` / Space = wait,\n\
                      E = Zap (Attack toward the last faced direction), Esc to quit.\n\
                      `--headless <n>`: run n scripted actions with no window, print final map + event log, exit 0.\n\
                      `--zone <id>`: load the named zone (defaults to the single zone in the pack)."
@@ -280,6 +282,47 @@ fn zone_spawn_rng(zone_id: &str) -> tessera_core::rng::SimRng {
     tessera_core::rng::SimRng::from_seed(acc)
 }
 
+/// Map a pressed key to the sim action it submits. The numpad is matched on
+/// the *physical* key code (so movement works identically regardless of NumLock
+/// state), all other bindings use the logical key. Returns `None` for keys that
+/// map to nothing. A `Move` here is the same typed action the arrow/vi/wsad
+/// bindings submit, so every direction — including diagonals — goes through the
+/// sim's event/energy scheduler and the bump rule applies to all of them.
+fn key_to_action(physical: PhysicalKey, logical: &Key) -> Option<PlayerAction> {
+    match physical {
+        PhysicalKey::Code(KeyCode::Numpad1) => return Some(PlayerAction::Move { dx: -1, dy: 1 }),
+        PhysicalKey::Code(KeyCode::Numpad2) => return Some(PlayerAction::Move { dx: 0, dy: 1 }),
+        PhysicalKey::Code(KeyCode::Numpad3) => return Some(PlayerAction::Move { dx: 1, dy: 1 }),
+        PhysicalKey::Code(KeyCode::Numpad4) => return Some(PlayerAction::Move { dx: -1, dy: 0 }),
+        PhysicalKey::Code(KeyCode::Numpad6) => return Some(PlayerAction::Move { dx: 1, dy: 0 }),
+        PhysicalKey::Code(KeyCode::Numpad7) => return Some(PlayerAction::Move { dx: -1, dy: -1 }),
+        PhysicalKey::Code(KeyCode::Numpad8) => return Some(PlayerAction::Move { dx: 0, dy: -1 }),
+        PhysicalKey::Code(KeyCode::Numpad9) => return Some(PlayerAction::Move { dx: 1, dy: -1 }),
+        PhysicalKey::Code(KeyCode::Numpad5) => return Some(PlayerAction::Wait),
+        _ => {}
+    }
+    match logical {
+        Key::Named(NamedKey::ArrowLeft) => Some(PlayerAction::Move { dx: -1, dy: 0 }),
+        Key::Named(NamedKey::ArrowRight) => Some(PlayerAction::Move { dx: 1, dy: 0 }),
+        Key::Named(NamedKey::ArrowUp) => Some(PlayerAction::Move { dx: 0, dy: -1 }),
+        Key::Named(NamedKey::ArrowDown) => Some(PlayerAction::Move { dx: 0, dy: 1 }),
+        Key::Character(c) => match c.as_str() {
+            "h" | "a" => Some(PlayerAction::Move { dx: -1, dy: 0 }),
+            "l" | "d" => Some(PlayerAction::Move { dx: 1, dy: 0 }),
+            "k" | "w" => Some(PlayerAction::Move { dx: 0, dy: -1 }),
+            "j" | "s" => Some(PlayerAction::Move { dx: 0, dy: 1 }),
+            "y" => Some(PlayerAction::Move { dx: -1, dy: -1 }),
+            "u" => Some(PlayerAction::Move { dx: 1, dy: -1 }),
+            "b" => Some(PlayerAction::Move { dx: -1, dy: 1 }),
+            "n" => Some(PlayerAction::Move { dx: 1, dy: 1 }),
+            "e" => Some(PlayerAction::Zap),
+            "." | " " => Some(PlayerAction::Wait),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 struct App {
     args: Args,
     window: Option<Arc<Window>>,
@@ -295,39 +338,13 @@ impl App {
     /// Build the draw cells by reading sim + map state only (pure reader). It
     /// never dispatches events and never mutates sim state.
     fn build_cells(&self) -> Vec<Cell> {
-        let map = self.sim.map();
-        let mut cells = Vec::with_capacity(map.width * map.height);
-        let mut push = |x: usize, y: usize, id: &str, under: Option<&tessera_core::tiles::Tile>| {
-            let t = self.content.tiles.get(id);
-            let tessera_core::tiles::TileVisual::Glyph { ch } = t.visual;
-            let bg =
-                t.bg.or(under.and_then(|u| u.bg))
-                    .unwrap_or(tessera_core::tiles::Rgb::BLACK);
-            let (f, b) = (t.fg.to_f32(), bg.to_f32());
-            cells.push(Cell {
-                x: x as u32,
-                y: y as u32,
-                glyph: self.content.atlas.slot(ch),
-                fg: [f[0], f[1], f[2], 1.0],
-                bg: [b[0], b[1], b[2], 1.0],
-            });
-        };
-        // Read the player's tile id from its live RenderTile each frame so the
-        // draw path stays data-driven (spawned from `[Player]`, not hardcoded).
-        let player_tile = self.sim.player_tile();
-        let (px, py) = self.sim.position();
-        for y in 0..map.height {
-            for x in 0..map.width {
-                let terrain = map.tile_id(x, y);
-                if (x as i32, y as i32) == (px, py) {
-                    let under = self.content.tiles.get(terrain).clone();
-                    push(x, y, &player_tile, Some(&under));
-                } else {
-                    push(x, y, terrain, None);
-                }
-            }
-        }
-        cells
+        let targets = self.sim.renderables();
+        sim::build_cells(
+            self.sim.map(),
+            &self.content.tiles,
+            &self.content.atlas,
+            &targets,
+        )
     }
 
     /// Hot reload (script + blueprint + tileset): rebuild the whole content
@@ -394,31 +411,15 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                // Arrow keys / WASD (and the existing hjklyubn) map to a Move,
-                // `.` / Space map to Wait. The action is
+                // Arrows / WASD / hjklyubn and the numpad (all eight directions,
+                // physical codes so NumLock state doesn't matter) map to a Move;
+                // `.` / Space / numpad 5 map to Wait; `e` is Zap. The action is
                 // submitted to the sim, which runs the scheduler until the
                 // player's turn and dispatches the event.
-                let action = match &event.logical_key {
-                    Key::Named(NamedKey::Escape) => return el.exit(),
-                    Key::Named(NamedKey::ArrowLeft) => Some(PlayerAction::Move { dx: -1, dy: 0 }),
-                    Key::Named(NamedKey::ArrowRight) => Some(PlayerAction::Move { dx: 1, dy: 0 }),
-                    Key::Named(NamedKey::ArrowUp) => Some(PlayerAction::Move { dx: 0, dy: -1 }),
-                    Key::Named(NamedKey::ArrowDown) => Some(PlayerAction::Move { dx: 0, dy: 1 }),
-                    Key::Character(c) => match c.as_str() {
-                        "h" | "a" => Some(PlayerAction::Move { dx: -1, dy: 0 }),
-                        "l" | "d" => Some(PlayerAction::Move { dx: 1, dy: 0 }),
-                        "k" | "w" => Some(PlayerAction::Move { dx: 0, dy: -1 }),
-                        "j" | "s" => Some(PlayerAction::Move { dx: 0, dy: 1 }),
-                        "y" => Some(PlayerAction::Move { dx: -1, dy: -1 }),
-                        "u" => Some(PlayerAction::Move { dx: 1, dy: -1 }),
-                        "b" => Some(PlayerAction::Move { dx: -1, dy: 1 }),
-                        "n" => Some(PlayerAction::Move { dx: 1, dy: 1 }),
-                        "e" => Some(PlayerAction::Zap),
-                        "." | " " => Some(PlayerAction::Wait),
-                        _ => None,
-                    },
-                    _ => None,
-                };
+                if event.logical_key == Key::Named(NamedKey::Escape) {
+                    return el.exit();
+                }
+                let action = key_to_action(event.physical_key, &event.logical_key);
                 if let Some(action) = action {
                     if let Err(e) = self.sim.submit_action(action) {
                         tracing::warn!("submit_action failed: {e:#}");
@@ -537,4 +538,177 @@ fn main() -> Result<()> {
     };
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mv(dx: i32, dy: i32) -> Option<PlayerAction> {
+        Some(PlayerAction::Move { dx, dy })
+    }
+
+    /// A physical numpad code, as the event handler reports it.
+    fn numpad(code: KeyCode) -> PhysicalKey {
+        PhysicalKey::Code(code)
+    }
+
+    /// A non-numpad physical code — falls through to the logical-key match.
+    fn other() -> PhysicalKey {
+        PhysicalKey::Code(KeyCode::KeyA)
+    }
+
+    /// All eight numpad directions map to a Move (physical key codes, so the
+    /// NumLock state does not change the binding).
+    #[test]
+    fn numpad_all_eight_directions() {
+        assert_eq!(
+            key_to_action(numpad(KeyCode::Numpad8), &Key::Character("8".into())),
+            mv(0, -1)
+        );
+        assert_eq!(
+            key_to_action(numpad(KeyCode::Numpad2), &Key::Character("2".into())),
+            mv(0, 1)
+        );
+        assert_eq!(
+            key_to_action(numpad(KeyCode::Numpad4), &Key::Character("4".into())),
+            mv(-1, 0)
+        );
+        assert_eq!(
+            key_to_action(numpad(KeyCode::Numpad6), &Key::Character("6".into())),
+            mv(1, 0)
+        );
+        assert_eq!(
+            key_to_action(numpad(KeyCode::Numpad7), &Key::Character("7".into())),
+            mv(-1, -1)
+        );
+        assert_eq!(
+            key_to_action(numpad(KeyCode::Numpad9), &Key::Character("9".into())),
+            mv(1, -1)
+        );
+        assert_eq!(
+            key_to_action(numpad(KeyCode::Numpad1), &Key::Character("1".into())),
+            mv(-1, 1)
+        );
+        assert_eq!(
+            key_to_action(numpad(KeyCode::Numpad3), &Key::Character("3".into())),
+            mv(1, 1)
+        );
+    }
+
+    #[test]
+    fn numpad_five_waits() {
+        assert_eq!(
+            key_to_action(numpad(KeyCode::Numpad5), &Key::Character("5".into())),
+            Some(PlayerAction::Wait)
+        );
+    }
+
+    #[test]
+    fn arrow_keys_still_move() {
+        assert_eq!(
+            key_to_action(other(), &Key::Named(NamedKey::ArrowLeft)),
+            mv(-1, 0)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Named(NamedKey::ArrowRight)),
+            mv(1, 0)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Named(NamedKey::ArrowUp)),
+            mv(0, -1)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Named(NamedKey::ArrowDown)),
+            mv(0, 1)
+        );
+    }
+
+    #[test]
+    fn vi_keys_still_move() {
+        assert_eq!(
+            key_to_action(other(), &Key::Character("h".into())),
+            mv(-1, 0)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Character("j".into())),
+            mv(0, 1)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Character("k".into())),
+            mv(0, -1)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Character("l".into())),
+            mv(1, 0)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Character("y".into())),
+            mv(-1, -1)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Character("u".into())),
+            mv(1, -1)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Character("b".into())),
+            mv(-1, 1)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Character("n".into())),
+            mv(1, 1)
+        );
+    }
+
+    #[test]
+    fn wasd_keys_still_move() {
+        assert_eq!(
+            key_to_action(other(), &Key::Character("a".into())),
+            mv(-1, 0)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Character("d".into())),
+            mv(1, 0)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Character("w".into())),
+            mv(0, -1)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Character("s".into())),
+            mv(0, 1)
+        );
+    }
+
+    #[test]
+    fn wait_and_zap_still_map() {
+        assert_eq!(
+            key_to_action(other(), &Key::Character(".".into())),
+            Some(PlayerAction::Wait)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Character(" ".into())),
+            Some(PlayerAction::Wait)
+        );
+        assert_eq!(
+            key_to_action(other(), &Key::Character("e".into())),
+            Some(PlayerAction::Zap)
+        );
+    }
+
+    #[test]
+    fn unmapped_keys_are_none() {
+        assert_eq!(key_to_action(other(), &Key::Character("z".into())), None);
+        assert_eq!(
+            key_to_action(
+                PhysicalKey::Code(KeyCode::KeyQ),
+                &Key::Character("q".into())
+            ),
+            None
+        );
+        assert_eq!(
+            key_to_action(numpad(KeyCode::Numpad0), &Key::Character("0".into())),
+            None
+        );
+    }
 }

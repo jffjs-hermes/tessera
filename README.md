@@ -8,20 +8,23 @@ A data-driven, scriptable, mod-friendly tile-based roguelike engine in Rust,
 inspired by Caves of Qud. Desktop only (Linux/macOS/Windows; CI builds and tests all three).
 
 **Status:** M0 (scaffold), M1 (tile renderer), M2 (data-driven entities), M3 (typed event
-bus + energy scheduler wired into the demo) and M4 (Luau scripting) complete. M6 (world slice
-and demo) is next.
+bus + energy scheduler wired into the demo), M4 (Luau scripting) and M6 (world slice
+and demo) complete. M5 (mod loader) is next, with field of view planned as M8 after M7.
 
 ## Run
 
 ```sh
-cargo run -p tessera            # arrow keys / hjklyubn / wasd to move, `.`/Space to wait, Esc to quit
+cargo run -p tessera            # arrows / WASD / hjklyubn / numpad to move, `.`/Space/numpad 5 to wait, `e` zap, Esc to quit
 cargo run -p tessera -- --headless 12   # run 12 scripted actions, print final map + event log, exit 0
 cargo run -p tessera -- --help
 ```
 
-Movement goes through the sim's typed event bus and energy scheduler: arrow
-keys and WASD submit a `Move`, `.` or Space submits a `Wait`, and a wall-blocked
-move is cancelled (costs no energy). `--headless <n>` is the display-free smoke
+Movement goes through the sim's typed event bus and energy scheduler: arrows,
+WASD, `hjklyubn`, and the numpad (all eight directions — `7 8 9` / `4 6` /
+`1 2 3`) submit a `Move`; `.`, Space, and numpad `5` submit a `Wait`; `e` is a
+`Zap` attack toward the last faced direction. Moving into a live enemy attacks
+it instead of moving (bump rule). A wall-blocked move is cancelled (costs no
+energy). `--headless <n>` is the display-free smoke
 path CI can run — it prints the final map then the one-event-per-line log.
 `--zone <id>` selects a named zone (`data/base/zones/*.toml`); the zone defaults
 to the single zone in the pack.
