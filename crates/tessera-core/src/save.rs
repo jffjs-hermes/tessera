@@ -14,6 +14,13 @@
 //! [`SaveError::BadMagic`]; unknown/unsupported version → [`SaveError::UnsupportedVersion`];
 //! zstd frame error or postcard decode error → [`SaveError::Corrupt`]. Never panic on bad input.
 
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+#[cfg(windows)]
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 
 use crate::rng::SimRng;
@@ -42,6 +49,16 @@ pub enum SaveError {
     UnsupportedVersion { found: u32, supported: u32 },
     #[error("save data corrupt: {0}")]
     Corrupt(String),
+    #[error("save write failed at {path}: {source}")]
+    WriteFailed {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("save read failed at {path}: {source}")]
+    ReadFailed {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 /// A serialized snapshot of simulation state.
@@ -135,6 +152,182 @@ pub fn load_from_bytes(bytes: &[u8]) -> Result<SaveData, SaveError> {
         )));
     }
     postcard::from_bytes(&payload).map_err(|e| SaveError::Corrupt(format!("postcard decode: {e}")))
+}
+
+/// The temp sibling of a save path (`path.tmp`), in the same directory so the
+/// final rename is atomic (same volume).
+fn tmp_path(path: &Path) -> PathBuf {
+    path.with_extension("tmp")
+}
+
+/// The backup sibling of a save path (`path.bak`), produced by best-effort
+/// rotation of the previous save before the new one lands.
+fn bak_path(path: &Path) -> PathBuf {
+    path.with_extension("bak")
+}
+
+/// Rename `from` onto `to`, replacing an existing `to`.
+///
+/// On Windows `std::fs::rename` uses `MoveFileExW` with replace-existing, but a
+/// concurrent handle on the destination (antivirus/indexer scan) can make it
+/// fail with a sharing violation, so the rename is retried up to 3 times with a
+/// short pause between attempts. Unix needs no retry: a same-directory rename
+/// is atomic and takes no lock on the destination.
+fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        const ATTEMPTS: u32 = 3;
+        const PAUSE: Duration = Duration::from_millis(50);
+        let mut attempt = 0u32;
+        loop {
+            match fs::rename(from, to) {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt + 1 < ATTEMPTS => {
+                    attempt += 1;
+                    std::thread::sleep(PAUSE);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(from, to)
+    }
+}
+
+/// Best-effort fsync of the directory containing `path`, the POSIX guarantee
+/// that a completed rename survives power loss. Unix-only: there is no portable
+/// Windows equivalent, and on Windows the NTFS journal provides the same
+/// durability for the rename itself. Failures are logged, not returned — the
+/// save data is already durable from the file `sync_all` in [`write_atomic`].
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) {
+    let Some(parent) = path.parent() else { return };
+    if parent.as_os_str().is_empty() {
+        return;
+    }
+    if let Ok(dir) = File::open(parent) {
+        if let Err(e) = dir.sync_all() {
+            tracing::warn!(path = %parent.display(), error = %e, "could not fsync save directory");
+        }
+    }
+}
+
+/// Write `data` to `path` crash-safely: a process kill at any instant leaves
+/// either the previous save or the new save intact and loadable, never a
+/// half-written file.
+///
+/// Sequence (same-directory tmp → fsync → best-effort `.bak` rotation →
+/// atomic rename → Unix parent-dir sync):
+/// 1. write the full encoded save to `path.tmp` in the same directory, `flush`
+///    and `sync_all` it;
+/// 2. best-effort rotate any previous `path` to `path.bak` (failure only loses
+///    the extra recovery copy — the tmp→final rename is still atomic);
+/// 3. rename `path.tmp` over `path` (Windows: retried up to 3 times on a
+///    sharing violation);
+/// 4. Unix only: fsync the parent directory so the rename itself is durable.
+///
+/// On a final rename failure this returns [`SaveError::WriteFailed`] and leaves
+/// the previous save and `.bak` intact; the leftover tmp is swept on next
+/// startup. Encoding errors (e.g. an unsupported payload version) are returned
+/// before any file is touched.
+pub fn write_atomic(path: &Path, data: &SaveData) -> Result<(), SaveError> {
+    let tmp = tmp_path(path);
+    let bak = bak_path(path);
+
+    let bytes = save_to_bytes(data)?;
+
+    // 1. Write to the same-directory temp file (same volume ⇒ atomic rename).
+    //    A stale tmp from a crashed previous run is truncated by `File::create`.
+    {
+        let mut file = File::create(&tmp).map_err(|e| SaveError::WriteFailed {
+            path: tmp.clone(),
+            source: e,
+        })?;
+        file.write_all(&bytes).map_err(|e| SaveError::WriteFailed {
+            path: tmp.clone(),
+            source: e,
+        })?;
+        file.flush().map_err(|e| SaveError::WriteFailed {
+            path: tmp.clone(),
+            source: e,
+        })?;
+        file.sync_all().map_err(|e| SaveError::WriteFailed {
+            path: tmp.clone(),
+            source: e,
+        })?;
+    }
+
+    // 2. Best-effort rotation of the previous save to `.bak`.
+    if path.exists() {
+        if let Err(e) = rename_replacing(path, &bak) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "could not rotate previous save to .bak; the save itself is still atomic"
+            );
+        }
+    }
+
+    // 3. Atomic tmp → final rename. If this fails after retries, the previous
+    //    save (or its `.bak` if step 2 rotated) is left intact and the tmp
+    //    remains for the next startup sweep.
+    rename_replacing(&tmp, path).map_err(|e| SaveError::WriteFailed {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+
+    // 4. Unix parent-directory sync so the rename survives power loss.
+    #[cfg(unix)]
+    sync_parent_dir(path);
+
+    Ok(())
+}
+
+/// Read and decode the save file at `path`.
+///
+/// There is no silent fallback: if the file at `path` is missing or fails to
+/// decode, the error is returned as-is — a sibling `.bak` is never loaded
+/// implicitly. A caller that wants the backup explicitly points at `path.bak`.
+pub fn load(path: &Path) -> Result<SaveData, SaveError> {
+    let bytes = fs::read(path).map_err(|e| SaveError::ReadFailed {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    load_from_bytes(&bytes)
+}
+
+/// True if `name` matches the stale-temp pattern `*.tmp` / `*.tmp.*` left by a
+/// crashed [`write_atomic`].
+fn is_stale_tmp_name(name: &str) -> bool {
+    name.ends_with(".tmp") || name.contains(".tmp.")
+}
+
+/// Remove stale temp files from `dir` — any regular file whose name matches the
+/// `*.tmp` / `*.tmp.*` patterns. A `.bak` file (and everything else) is never
+/// touched. Run this on startup before any load. Returns the number of files
+/// removed; a missing directory is a no-op (`Ok(0)`).
+pub fn sweep_stale_tmp(dir: &Path) -> std::io::Result<usize> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    let mut removed = 0usize;
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if is_stale_tmp_name(&name) {
+            fs::remove_file(entry.path())?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
