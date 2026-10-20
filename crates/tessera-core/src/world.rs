@@ -212,6 +212,16 @@ impl World {
         &self.library
     }
 
+    /// The whitelist [`SaveHooks`] built from this world's registry: the
+    /// engine-native parts (Position/Health/ActorEnergy/Stats) plus every
+    /// schema-backed script part the loaded pack registered. This is the hook
+    /// set `Sim::save`/`Sim::load` and the console save/load commands use — it
+    /// must match exactly what the world can spawn, so a save never fails on a
+    /// part the pack itself declares.
+    pub fn save_hooks(&self) -> crate::save::SaveHooks {
+        crate::save::build_save_hooks(&self.registry).0
+    }
+
     /// Resolve the flattened blueprint `id`, instantiate its registered engine
     /// components into `hecs` via [`EntityBroker`], and store every remaining
     /// part in the entity's `PartMap`. Returns the single entity handle.

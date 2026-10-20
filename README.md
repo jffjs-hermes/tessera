@@ -17,6 +17,7 @@ and demo) and M7 (saves and tooling) complete. M5 (mod loader) is next, with fie
 cargo run -p tessera            # arrows / WASD / hjklyubn / numpad to move, `.`/Space/numpad 5 to wait, `e` zap, Esc to quit
 cargo run -p tessera -- --headless 12   # run 12 scripted actions, print final map + event log, exit 0
 cargo run -p tessera -- --help
+cargo run -p tessera --features devtools      # windowed devtools: backtick = console panel, F3 = entity inspector
 ```
 
 Movement goes through the sim's typed event bus and energy scheduler: arrows,
@@ -31,6 +32,65 @@ to the single zone in the pack. `--mods <dir>` discovers local directory and zip
 mods (default `data/mods`); the shipped `sample-mod` adds a Bogling creature,
 patches the base Goblin's tile and strength, and registers an Attack handler
 that appears in the event log.
+
+### Saves and the debug console (headless)
+
+Saves use the M7 versioned, compressed (`postcard` + `zstd`) format with atomic
+writes and a `.bak` rotation — see `docs/specs/m7-saves-tooling.md`. They are
+pack-specific: a save can only load into the same zone that wrote it
+(unknown-version files from a newer build are rejected loudly).
+
+```sh
+# Save target directory (default ./saves), and load a named save at startup:
+cargo run -p tessera -- --headless 2 --save-dir saves --exec "save demo"
+cargo run -p tessera -- --headless 2 --save-dir saves --load demo --exec "entities"
+
+# The typed console runs headlessly too, before the scripted actions:
+cargo run -p tessera -- --headless 0 --exec "spawn Goblin 5 5" --exec "entities"
+```
+
+`--exec "<line>"` is repeatable; each line runs **between** turns, before the
+scripted `--headless` actions, and prints its outcome to stdout. Every executed
+command appends a deterministic `CMD <verb> ... tick=..` line to the event log,
+so a headless run is a complete record of how its final state was reached.
+
+Console grammar (whitespace-tokenized; `#` starts a comment; malformed input
+prints a usage error, never panics):
+
+| Command | Effect |
+|---|---|
+| `help` | list commands |
+| `list` | list blueprint ids in the loaded library |
+| `entities` | list live entities: `<id> <blueprint> <pos> <hp>` |
+| `spawn <blueprint> [x y]` | spawn (default = zone start tile) |
+| `kill <entity-id>` / `kill all <blueprint>` | despawn one / all matching |
+| `print <entity-id>` | dump an entity's parts |
+| `sethp <entity-id> <n>` | write the `Health` part |
+| `tp <entity-id> <x> <y>` | teleport (writes `Position`) |
+| `save [name]` | write a save (default name `quicksave`) |
+| `load <name>` | replace live state from a save |
+| `clear` | clear the transcript |
+
+The same grammar drives the **windowed** devtools build (`--features devtools`),
+which is compiled only with that non-default feature (a default build keeps egui
+out of the dependency graph entirely):
+
+- **`` ` `` (backtick)** toggles the console panel — a windowed transcript with an
+  input line at the bottom. Type a Card D command and press Enter: the line is
+  echoed, executed between turns, and the outcome joins the transcript. While the
+  console has focus, its keys go to egui, not the game (typing `s` in the console
+  does not move the player).
+- **F3** toggles the **entity inspector** — a **read-only** window listing live
+  entities as `#<id> <blueprint> (x, y) hp=<n>` in deterministic entity-id order,
+  with a per-frame snapshot taken under the broker's read lock and dropped before
+  egui draws (the renderer is a strict reader). Selecting a row shows that
+  entity's native part names and their `Debug` output. The inspector never
+  mutates broker state; the console (`sethp`/`tp`) remains the only mutation
+  path. Script-owned state (e.g. goblin AI internals) is deliberately **not**
+  exposed in M7 — a scripted `describe()` hook is the eventual path.
+- `--features devtools` also honors the same `--exec / --save-dir / --load`
+  startup flags; the headless parser + executor above cover the grammar without
+  any window.
 
 ## The demo cave
 
