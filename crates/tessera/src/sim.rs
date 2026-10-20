@@ -28,6 +28,8 @@ use tessera_core::events::{
     EARLY, HandlerAction, LATE, Move, NORMAL, Point, SimContext, TakeDamage, TileEntry,
 };
 use tessera_core::rng::SimRng;
+use tessera_core::save::SAVE_FORMAT_VERSION;
+use tessera_core::save::{SaveData, SaveError, SaveHooks, restore_broker, snapshot_entities};
 use tessera_core::tiles::{Rgb, Tile, TileRegistry, TileVisual};
 use tessera_core::turns::{
     ActorEnergy, BASE_SPEED, PART_ENERGY, Scheduler, TurnAction, TurnReport,
@@ -113,40 +115,10 @@ impl Sim {
         enemy: Option<Entity>,
     ) -> Self {
         let mut ctx = SimContext::shared(broker.clone(), zone, SimRng::from_seed(SIM_SEED));
-        // Content-level collision + occupancy: cancel any Move whose target is
-        // not walkable, or whose target is already occupied by a live actor
-        // other than the mover (a Caves-of-Qud bump target is converted to an
-        // `Attack` in the sim's action path before a `Move` is built, so this
-        // handler mainly blocks non-combat occupants and is the backstop that
-        // guarantees no two actors ever share a tile). This is the shipped
-        // cancellation handler.
-        ctx.register::<Move>(EARLY, |ctx, ev| {
-            if !ctx.map.is_walkable(ev.to.x, ev.to.y) {
-                return HandlerAction::Cancel;
-            }
-            // Occupancy: at most one actor per tile. The mover is excluded.
-            match ctx.tile_entry(ev.to, ev.actor) {
-                TileEntry::Clear => HandlerAction::Continue,
-                _ => HandlerAction::Cancel,
-            }
-        });
-        // Reference demo combat: an Attack on a Health-carrying defender
-        // resolves to a base `TakeDamage`, and a TakeDamage always reduces
-        // `Health.hp`. This is the native "base hit" the Zapper's scripted zap
-        // stacks on top of.
-        install_base_combat(&mut ctx);
-        // Forward the reserved `Death` event (dispatched by the native
-        // TakeDamage applicator when hp clamps to zero) to the script host, so
-        // scripts can react with respawn/policy (the turn hook contract).
-        if let Some(b) = &bridge {
-            let fwd = b.clone();
-            ctx.register_observer::<tessera_core::events::Death>(LATE, move |_ctx, ev| {
-                // Defer forwarding: the respawn policy's spawn/despawn mutate
-                // the scheduler, and this observer runs *under* the scheduler
-                // lock during take_turn. Queue it; the sim drains post-turn.
-                fwd.push_death(entity_to_id(ev.target));
-            });
-        }
+        // Content-level handlers (collision, base combat, script death forward)
+        // are re-registered identically on every construction — a save captures
+        // *state*, not wiring, and load re-runs them exactly as zone start.
+        install_default_handlers(&mut ctx, bridge.as_ref());
 
         let speed = ctx
             .broker
@@ -303,6 +275,125 @@ impl Sim {
             Some(PartValue::Int(n)) => Some(*n),
             _ => None,
         }
+    }
+
+    /// Snapshot the sim's full live state into a [`SaveData`] via the hook
+    /// registry. Fail-closed: any entity part not in the whitelist returns
+    /// [`SaveError::UnserializablePart`]. A save captures *state*, not event
+    /// handlers or blueprint wiring — those are re-registered on load exactly
+    /// as at zone start ([`Sim::load`]).
+    // NB: exercised by the unit/integration tests and the snapshot_smoke
+    // example; the CLI --save binding lands with the headless console work.
+    #[allow(dead_code)]
+    pub fn save(&self, hooks: &SaveHooks) -> Result<SaveData, SaveError> {
+        let broker = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
+        let snapshot = snapshot_entities(&broker, hooks)?;
+        let scheduler = self.scheduler.lock().unwrap_or_else(|p| p.into_inner());
+        let actors = scheduler
+            .actors()
+            .map(|e| {
+                (
+                    e.to_bits().get(),
+                    scheduler.energy(e).unwrap_or(0),
+                    scheduler.speed(e).unwrap_or(BASE_SPEED),
+                )
+            })
+            .collect();
+        Ok(SaveData {
+            version: SAVE_FORMAT_VERSION,
+            zone_id: self.ctx.map.id.clone(),
+            next_entity_bits: snapshot.next_entity_bits,
+            entities: snapshot.entities,
+            player: Some(self.player.to_bits().get()),
+            clock: scheduler.ticks(),
+            actors,
+            rng: self.ctx.rng.clone(),
+            player_turns: self.player_turns,
+            facing: self.facing,
+        })
+    }
+
+    /// Rebuild a sim from a saved snapshot. The zone is *not* serialized (it is
+    /// a pure function of the pack), so the caller provides it — and the saved
+    /// `zone_id` must match it or this returns
+    /// [`SaveError::ZoneMismatch`] (saves are pack-specific; fail closed
+    /// rather than teleport entities into a different map).
+    ///
+    /// Re-registers the demo world's default handlers exactly as [`Sim::new`] /
+    /// [`Sim::from_shared`] do at zone start (event handlers are wiring, not
+    /// state, and are never saved), restores the exact entity ids so
+    /// deterministic id-ordering is preserved, and restores the scheduler
+    /// clock/actor energies, the ChaCha8 RNG stream, the player, facing and
+    /// player-turn clock. On load the event log starts empty.
+    #[allow(dead_code)] // exercised by tests + the snapshot_smoke example
+    pub fn load(
+        data: SaveData,
+        zone: Zone,
+        hooks: &SaveHooks,
+        bridge: Option<ScriptBridge>,
+    ) -> Result<Self, SaveError> {
+        if data.zone_id != zone.id {
+            return Err(SaveError::ZoneMismatch {
+                saved: data.zone_id.clone(),
+                current: zone.id,
+            });
+        }
+        // Restore the broker at exact saved entity ids with all parts.
+        let broker = Arc::new(RwLock::new(restore_broker(&data, hooks)?));
+
+        // Restore the scheduler state of record: clock + (entity, energy,
+        // speed). Fail closed on an entity id that no longer resolves.
+        let mut sched_actors = Vec::new();
+        for (bits, energy, speed) in &data.actors {
+            let e = Entity::from_bits(*bits).ok_or_else(|| SaveError::PartRestore {
+                name: "ActorEnergy".into(),
+                msg: format!("saved actor entity id {bits:#x} does not resolve"),
+            })?;
+            sched_actors.push((
+                e,
+                ActorEnergy {
+                    speed: *speed,
+                    energy: *energy,
+                },
+            ));
+        }
+        let scheduler = Arc::new(Mutex::new(Scheduler::restore(data.clock, sched_actors)));
+
+        // Player entity: the saved handle, restored into the live broker.
+        let player =
+            data.player
+                .and_then(Entity::from_bits)
+                .ok_or_else(|| SaveError::PartRestore {
+                    name: "Player".into(),
+                    msg: "save has no valid player entity".into(),
+                })?;
+
+        // Live context over the restored broker, re-registering the default
+        // handlers (never saved — wiring is re-created at zone start).
+        let mut ctx = SimContext::shared(broker.clone(), zone, data.rng);
+        install_default_handlers(&mut ctx, bridge.as_ref());
+
+        // The reference enemy is the first scheduled non-player actor
+        // (deterministic entity-id order); matches how `from_shared` treats the
+        // demo's single scheduled goblin after a reload.
+        let enemy = {
+            let s = scheduler.lock().unwrap_or_else(|p| p.into_inner());
+            s.actors().find(|e| *e != player)
+        };
+        if let Some(b) = &bridge {
+            b.set_sim_world_state(ctx.map.clone(), scheduler.clone(), player);
+        }
+
+        Ok(Sim {
+            ctx,
+            scheduler,
+            player,
+            bridge,
+            enemy,
+            facing: data.facing,
+            log: Vec::new(),
+            player_turns: data.player_turns,
+        })
     }
 
     /// Submit one player action: run the scheduler until the player's turn
@@ -820,6 +911,48 @@ fn tile_glyph(tiles: &TileRegistry, id: &str) -> char {
     }
 }
 
+/// The demo world's default content-level handlers, re-registered on EVERY sim
+/// construction (zone start and save/load alike). Handlers capture *wiring*,
+/// never saved state, so a loaded world re-runs this exact registration:
+///
+/// - a `Move` collision + occupancy cancel (no actor ever enters a wall or
+///   another actor's tile);
+/// - the reference demo combat (Attack → base TakeDamage → Health.hp);
+/// - when a script bridge is present, forward the reserved `Death` event to the
+///   host so scripts can respond (respawn/policy).
+fn install_default_handlers(ctx: &mut SimContext, bridge: Option<&ScriptBridge>) {
+    // Content-level collision + occupancy: cancel any Move whose target is
+    // not walkable, or whose target is already occupied by a live actor other
+    // than the mover. This is the shipped cancellation handler.
+    ctx.register::<Move>(EARLY, |ctx, ev| {
+        if !ctx.map.is_walkable(ev.to.x, ev.to.y) {
+            return HandlerAction::Cancel;
+        }
+        // Occupancy: at most one actor per tile. The mover is excluded.
+        match ctx.tile_entry(ev.to, ev.actor) {
+            TileEntry::Clear => HandlerAction::Continue,
+            _ => HandlerAction::Cancel,
+        }
+    });
+    // Reference demo combat: an Attack on a Health-carrying defender
+    // resolves to a base `TakeDamage`, and a TakeDamage always reduces
+    // `Health.hp`. This is the native "base hit" the Zapper's scripted zap
+    // stacks on top of.
+    install_base_combat(ctx);
+    // Forward the reserved `Death` event (dispatched by the native TakeDamage
+    // applicator when hp clamps to zero) to the script host, so scripts can
+    // react with respawn/policy (the turn hook contract).
+    if let Some(b) = bridge {
+        let fwd = b.clone();
+        ctx.register_observer::<tessera_core::events::Death>(LATE, move |_ctx, ev| {
+            // Defer forwarding: the respawn policy's spawn/despawn mutate the
+            // scheduler, and this observer runs *under* the scheduler lock
+            // during take_turn. Queue it; the sim drains post-turn.
+            fwd.push_death(entity_to_id(ev.target));
+        });
+    }
+}
+
 /// Register the reference demo combat: an `Attack` on a Health-carrying
 /// defender resolves to `TakeDamage` (base hit, `NORMAL`), and a `TakeDamage`
 /// always reduces `Health.hp` by its amount. The base hit is the native half
@@ -1119,5 +1252,258 @@ mod tests {
             }],
         );
         assert_eq!(action, Some(TurnAction::Attack(player)));
+    }
+
+    // ---- save/load round-trip ------------------------------------------
+
+    /// Hooks covering the whitelist (Position/Health/ActorEnergy/Stats native,
+    /// registered unconditionally by `build_save_hooks`) plus a `Charge` script
+    /// part, mirroring the shipped demo. `build_save_hooks` only uses the
+    /// registry to identify script-part names, so we register just the script
+    /// schema.
+    fn roundtrip_hooks() -> SaveHooks {
+        use std::collections::BTreeMap;
+        use tessera_core::ecs::PartRegistry;
+        use tessera_core::script_part::{FieldDef, PartValue, ScriptPartType};
+        let mut reg = PartRegistry::new();
+        let mut schema = BTreeMap::new();
+        schema.insert(
+            "charges".to_string(),
+            FieldDef::int().default(PartValue::Int(1)),
+        );
+        reg.register_script_part(ScriptPartType::new("Charge", schema))
+            .unwrap();
+        tessera_core::save::build_save_hooks(&reg).0
+    }
+
+    /// A populated boxed world: player + scheduled goblin carrying Health,
+    /// Position, ActorEnergy and a `Charge` script part. Returns the sim and its
+    /// player/goblin entities (scheduled together, no script bridge — native
+    /// deterministic behavior only).
+    fn populated_sim(hp: i32) -> (Sim, hecs::Entity, hecs::Entity) {
+        use tessera_core::ecs::Part;
+        use tessera_core::script_part::ScriptPart;
+        let mut broker = EntityBroker::new();
+        let player = broker.spawn();
+        broker
+            .insert_part(player, PART_ENERGY, Box::new(ActorEnergy::new(100)))
+            .unwrap();
+        broker
+            .insert_part(
+                player,
+                PART_POSITION,
+                Box::new(Position { x: 2, y: 2 }) as Box<dyn Part>,
+            )
+            .unwrap();
+        broker
+            .insert_part(
+                player,
+                PART_HEALTH,
+                Box::new(Health { hp: 20 }) as Box<dyn Part>,
+            )
+            .unwrap();
+        let goblin = broker.spawn();
+        broker
+            .insert_part(goblin, PART_ENERGY, Box::new(ActorEnergy::new(100)))
+            .unwrap();
+        broker
+            .insert_part(
+                goblin,
+                PART_POSITION,
+                Box::new(Position { x: 4, y: 4 }) as Box<dyn Part>,
+            )
+            .unwrap();
+        broker
+            .insert_part(
+                goblin,
+                PART_HEALTH,
+                Box::new(Health { hp }) as Box<dyn Part>,
+            )
+            .unwrap();
+        let mut sp = ScriptPart::default();
+        sp.insert(
+            "charges".into(),
+            tessera_core::script_part::PartValue::Int(3),
+        );
+        broker.insert_part(goblin, "Charge", Box::new(sp)).unwrap();
+        let zone = demo_zone(20, 10);
+        // Shared broker so the goblin is scheduled alongside the player (enemy).
+        let broker = Arc::new(RwLock::new(broker));
+        let sim = Sim::from_shared(broker, None, zone, player, Some(goblin));
+        (sim, player, goblin)
+    }
+
+    #[test]
+    fn save_load_round_trip_preserves_state_and_continues_identically() {
+        let hooks = roundtrip_hooks();
+        let (mut sim, _player, _goblin) = populated_sim(3);
+
+        // Play a deterministic prefix: a couple of player moves (some wall
+        // blocked, one handled) and waits.
+        for a in [
+            PlayerAction::Move { dx: 1, dy: 0 },
+            PlayerAction::Move { dx: 1, dy: 0 },
+            PlayerAction::Wait,
+            PlayerAction::Move { dx: -1, dy: 0 }, // wall-blocked
+        ] {
+            sim.submit_action(a).unwrap();
+        }
+        let before = sim.save(&hooks).expect("save");
+        let log_len_at_save = sim.log().len();
+
+        // Build an identical-controls world and run it the same way, from the
+        // same fresh state, and confirm the pre-save logs match (so the two
+        // worlds are deterministically comparable before we continue).
+        let (mut reference, _, _) = populated_sim(3);
+        for a in [
+            PlayerAction::Move { dx: 1, dy: 0 },
+            PlayerAction::Move { dx: 1, dy: 0 },
+            PlayerAction::Wait,
+            PlayerAction::Move { dx: -1, dy: 0 },
+        ] {
+            reference.submit_action(a).unwrap();
+        }
+        assert_eq!(
+            reference.log(),
+            sim.log(),
+            "two same-built worlds match pre-save"
+        );
+
+        // Load the save into a fresh sim.
+        let zone = demo_zone(20, 10);
+        let mut loaded = Sim::load(before, zone, &hooks, None).expect("load");
+
+        // State restored: same entity ids in same (deterministic) order.
+        let orig_ids: Vec<u64> = sim
+            .ctx
+            .broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .entities()
+            .into_iter()
+            .map(|e| e.to_bits().get())
+            .collect();
+        let loaded_ids: Vec<u64> = loaded
+            .ctx
+            .broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .entities()
+            .into_iter()
+            .map(|e| e.to_bits().get())
+            .collect();
+        assert_eq!(loaded_ids, orig_ids, "entity ids restored in exact order");
+        assert_eq!(
+            loaded.position(),
+            sim.position(),
+            "player position restored"
+        );
+        assert_eq!(
+            loaded.player_turns_public(),
+            sim.player_turns_public(),
+            "player turn clock restored"
+        );
+
+        // Continue both worlds with the same script; the loaded world's fresh
+        // log must exactly equal the original's post-save continuation.
+        let continue_script = [
+            PlayerAction::Move { dx: 0, dy: 1 },
+            PlayerAction::Wait,
+            PlayerAction::Move { dx: 1, dy: -1 },
+            PlayerAction::Wait,
+            PlayerAction::Move { dx: 0, dy: 1 },
+        ];
+        for a in continue_script {
+            reference.submit_action(a).unwrap();
+            loaded.submit_action(a).unwrap();
+        }
+        assert_eq!(
+            &reference.log()[log_len_at_save..],
+            loaded.log(),
+            "loaded world continues with an identical event log"
+        );
+    }
+
+    #[test]
+    fn zone_mismatch_is_rejected() {
+        let hooks = roundtrip_hooks();
+        let (mut sim, _p, _g) = populated_sim(3);
+        for a in [PlayerAction::Wait, PlayerAction::Move { dx: 1, dy: 0 }] {
+            sim.submit_action(a).unwrap();
+        }
+        let data = sim.save(&hooks).expect("save");
+        // Wrong zone id: the save belongs to "test" but we load into "other".
+        let other = Zone::from_cells("other", 20, 10, Point::new(1, 1), {
+            let mut cells = vec!["terrain.floor".to_string(); 20 * 10];
+            for y in 0..10 {
+                for x in 0..20 {
+                    if x == 0 || y == 0 || x == 19 || y == 9 {
+                        cells[y * 20 + x] = "terrain.wall".to_string();
+                    }
+                }
+            }
+            cells
+        });
+        match Sim::load(data, other, &hooks, None) {
+            Err(SaveError::ZoneMismatch { saved, current }) => {
+                assert_eq!(saved, "test");
+                assert_eq!(current, "other");
+            }
+            Ok(_) => panic!("expected ZoneMismatch, but load succeeded"),
+            Err(e) => panic!("expected ZoneMismatch, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn save_fails_closed_on_unknown_part() {
+        use tessera_core::ecs::Part;
+        let hooks = roundtrip_hooks();
+        let mut broker = EntityBroker::new();
+        let player = broker.spawn();
+        broker
+            .insert_part(player, PART_ENERGY, Box::new(ActorEnergy::new(100)))
+            .unwrap();
+        broker
+            .insert_part(
+                player,
+                PART_POSITION,
+                Box::new(Position { x: 1, y: 1 }) as Box<dyn Part>,
+            )
+            .unwrap();
+        // A part outside the whitelist: the snapshot must fail closed.
+        broker
+            .insert_part(player, "NotWhitelisted", Box::new(1u32))
+            .unwrap();
+        let sim = Sim::new(broker, demo_zone(20, 10), player);
+        match sim.save(&hooks) {
+            Err(SaveError::UnserializablePart { name }) => assert_eq!(name, "NotWhitelisted"),
+            other => panic!("expected UnserializablePart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rng_state_round_trips_after_save() {
+        let hooks = roundtrip_hooks();
+        let (mut sim, _p, _g) = populated_sim(5);
+        for a in [
+            PlayerAction::Wait,
+            PlayerAction::Wait,
+            PlayerAction::Move { dx: 1, dy: 0 },
+        ] {
+            sim.submit_action(a).unwrap();
+        }
+        let before = sim.save(&hooks).expect("save");
+        let loaded = Sim::load(before.clone(), demo_zone(20, 10), &hooks, None).expect("load");
+        // The ChaCha8 stream state round-trips through the save: post-load draws
+        // match the pre-save continuation.
+        let mut orig = before.rng.clone();
+        let mut rel = loaded.ctx.rng.clone();
+        for _ in 0..8 {
+            assert_eq!(
+                orig.next_u32(),
+                rel.next_u32(),
+                "RNG stream continues identically"
+            );
+        }
     }
 }
