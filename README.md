@@ -17,7 +17,7 @@ and demo) complete. M5 (mod loader) is next, with field of view planned as M8 af
 cargo run -p tessera            # arrows / WASD / hjklyubn / numpad to move, `.`/Space/numpad 5 to wait, `e` zap, Esc to quit
 cargo run -p tessera -- --headless 12   # run 12 scripted actions, print final map + event log, exit 0
 cargo run -p tessera -- --help
-cargo run -p tessera --features devtools      # windowed devtools: backtick = console panel, F3 = inspector hook
+cargo run -p tessera --features devtools      # windowed devtools: backtick = console panel, F3 = entity inspector
 ```
 
 Movement goes through the sim's typed event bus and energy scheduler: arrows,
@@ -80,8 +80,14 @@ out of the dependency graph entirely):
   echoed, executed between turns, and the outcome joins the transcript. While the
   console has focus, its keys go to egui, not the game (typing `s` in the console
   does not move the player).
-- **F3** toggles the reserved entity-inspector window (contents land in a later
-  card).
+- **F3** toggles the **entity inspector** — a **read-only** window listing live
+  entities as `#<id> <blueprint> (x, y) hp=<n>` in deterministic entity-id order,
+  with a per-frame snapshot taken under the broker's read lock and dropped before
+  egui draws (the renderer is a strict reader). Selecting a row shows that
+  entity's native part names and their `Debug` output. The inspector never
+  mutates broker state; the console (`sethp`/`tp`) remains the only mutation
+  path. Script-owned state (e.g. goblin AI internals) is deliberately **not**
+  exposed in M7 — a scripted `describe()` hook is the eventual path.
 - `--features devtools` also honors the same `--exec / --save-dir / --load`
   startup flags; the headless parser + executor above cover the grammar without
   any window.

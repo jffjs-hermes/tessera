@@ -9,10 +9,10 @@
 //!   reports whether egui *consumed* it. The caller (main.rs) suppresses the
 //!   game's own input handling when it returns `true`, so typing `s` into the
 //!   console does not move the player. Backtick toggles the console panel and
-//!   F3 toggles the (reserved) inspector window — both intercepted here so they
-//!   never reach egui or the game.
+//!   F3 toggles the (read-only) entity inspector — both intercepted here so
+//!   they never reach egui or the game.
 //! - [`Devtools::paint`] runs the egui frame (console transcript/input panel +
-//!   reserved inspector) and renders it *after* the cell renderer into the same
+//!   entity inspector) and renders it *after* the cell renderer into the same
 //!   surface frame via [`Renderer::render_with`]'s overlay hook. The console
 //!   panel renders the transcript/input through the ungated
 //!   [`console::ConsolePanel`] state.
@@ -23,6 +23,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::Window;
 
 use super::console::{self, ConsoleContext};
+use super::inspector;
 use crate::sim::Sim;
 
 // egui-wgpu re-exports the wgpu version it compiles against (the same one the
@@ -36,7 +37,7 @@ use egui_wgpu::wgpu;
 pub enum Toggle {
     /// Backtick: the console panel.
     Console,
-    /// F3: the reserved inspector window.
+    /// F3: the read-only entity inspector window.
     Inspector,
 }
 
@@ -89,6 +90,8 @@ pub struct Devtools {
     panel: console::ConsolePanel,
     /// Inspector window visibility (F3 toggles).
     inspector_visible: bool,
+    /// Selected entity id in the inspector (None = default to first row).
+    inspector_selected: Option<u64>,
     /// Current physical window size (for the egui screen descriptor).
     size_px: [u32; 2],
 }
@@ -123,6 +126,7 @@ impl Devtools {
             renderer,
             panel: console::ConsolePanel::new(),
             inspector_visible: false,
+            inspector_selected: None,
             size_px: [size.width, size.height],
         }
     }
@@ -234,7 +238,7 @@ impl Devtools {
     }
 
     /// Build the egui UI for this frame: the console panel (when toggled open)
-    /// and the reserved inspector window (F3).
+    /// and the read-only entity inspector (F3).
     fn ui(&mut self, ctx: &egui::Context, sim: &mut Sim, cc: &ConsoleContext<'_>) {
         if self.panel.visible {
             egui::Window::new("Console")
@@ -265,13 +269,12 @@ impl Devtools {
                 });
         }
         if self.inspector_visible {
-            // The inspector is a reserved F3 hook; its contents are a later
-            // change.
-            egui::Window::new("Inspector")
-                .default_size([360.0, 240.0])
-                .show(ctx, |ui| {
-                    ui.label("Entity inspector — reserved.");
-                });
+            // Build a read-only snapshot under the broker read lock, then drop
+            // the lock before egui draws: egui only touches the owned snapshot
+            // (the renderer stays a strict reader — no broker handles cross
+            // into the draw).
+            let snap = inspector::snapshot(sim, cc.world, cc.save_hooks);
+            inspector::show_window(ctx, &snap, &mut self.inspector_selected);
         }
     }
 }
