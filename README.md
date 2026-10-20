@@ -17,6 +17,7 @@ and demo) complete. M5 (mod loader) is next, with field of view planned as M8 af
 cargo run -p tessera            # arrows / WASD / hjklyubn / numpad to move, `.`/Space/numpad 5 to wait, `e` zap, Esc to quit
 cargo run -p tessera -- --headless 12   # run 12 scripted actions, print final map + event log, exit 0
 cargo run -p tessera -- --help
+cargo run -p tessera --features devtools      # windowed devtools: backtick = console panel, F3 = inspector hook
 ```
 
 Movement goes through the sim's typed event bus and energy scheduler: arrows,
@@ -70,10 +71,20 @@ prints a usage error, never panics):
 | `load <name>` | replace live state from a save |
 | `clear` | clear the transcript |
 
-The windowed egui console panel and entity inspector are planned for M7's
-windowed devtools (`--features devtools`); the headless parser + executor above
-already cover the same grammar without a window.
+The same grammar drives the **windowed** devtools build (`--features devtools`),
+which is compiled only with that non-default feature (a default build keeps egui
+out of the dependency graph entirely):
 
+- **`` ` `` (backtick)** toggles the console panel — a windowed transcript with an
+  input line at the bottom. Type a Card D command and press Enter: the line is
+  echoed, executed between turns, and the outcome joins the transcript. While the
+  console has focus, its keys go to egui, not the game (typing `s` in the console
+  does not move the player).
+- **F3** toggles the reserved entity-inspector window (contents land in a later
+  card).
+- `--features devtools` also honors the same `--exec / --save-dir / --load`
+  startup flags; the headless parser + executor above cover the grammar without
+  any window.
 
 ## The demo cave
 

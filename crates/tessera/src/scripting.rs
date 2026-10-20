@@ -418,12 +418,10 @@ impl WorldAccess for SimWorldAccess {
             if let Some(ae) = b.typed_part::<tessera_core::turns::ActorEnergy>(
                 entity,
                 &PartTypeId::new(tessera_core::turns::PART_ENERGY),
-            ) {
-                if let Some(sched) = self.shared.scheduler() {
-                    if let Ok(mut s) = sched.lock() {
-                        s.add_actor(entity, ae.clone());
-                    }
-                }
+            ) && let Some(sched) = self.shared.scheduler()
+                && let Ok(mut s) = sched.lock()
+            {
+                s.add_actor(entity, ae.clone());
             }
         }
         Ok(())
@@ -438,10 +436,10 @@ impl WorldAccess for SimWorldAccess {
             .map_err(|er| ScriptError::Internal(format!("despawn: {er}")))?;
         // Keep the scheduler in lockstep: a despawned scheduled actor must not
         // remain on the clock.
-        if let Some(sched) = self.shared.scheduler() {
-            if let Ok(mut s) = sched.lock() {
-                s.remove_actor(e);
-            }
+        if let Some(sched) = self.shared.scheduler()
+            && let Ok(mut s) = sched.lock()
+        {
+            s.remove_actor(e);
         }
         // Drop any script-facing alias for this entity.
         if self.shared.resolve_script_entity(entity).is_some() {

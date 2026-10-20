@@ -159,39 +159,39 @@ fn field_def_to_core(
     {
         def = def.optional();
     }
-    if let Ok(v) = t.get::<Value>("default") {
-        if v != Value::Nil {
-            let pv = lua_to_part_value(&v)?;
-            def = def.default(pv);
-        }
+    if let Ok(v) = t.get::<Value>("default")
+        && v != Value::Nil
+    {
+        let pv = lua_to_part_value(&v)?;
+        def = def.default(pv);
     }
-    if let Ok(v) = t.get::<Value>("min") {
-        if v != Value::Nil {
-            def = def.min(match v {
-                Value::Integer(n) => n,
-                Value::Number(n) => n as i64,
-                _ => {
-                    return Err(ScriptError::Register {
-                        script: String::new(),
-                        msg: format!("define_part('{part}'): field '{field}' min must be an int"),
-                    });
-                }
-            });
-        }
+    if let Ok(v) = t.get::<Value>("min")
+        && v != Value::Nil
+    {
+        def = def.min(match v {
+            Value::Integer(n) => n,
+            Value::Number(n) => n as i64,
+            _ => {
+                return Err(ScriptError::Register {
+                    script: String::new(),
+                    msg: format!("define_part('{part}'): field '{field}' min must be an int"),
+                });
+            }
+        });
     }
-    if let Ok(v) = t.get::<Value>("max") {
-        if v != Value::Nil {
-            def = def.max(match v {
-                Value::Integer(n) => n,
-                Value::Number(n) => n as i64,
-                _ => {
-                    return Err(ScriptError::Register {
-                        script: String::new(),
-                        msg: format!("define_part('{part}'): field '{field}' max must be an int"),
-                    });
-                }
-            });
-        }
+    if let Ok(v) = t.get::<Value>("max")
+        && v != Value::Nil
+    {
+        def = def.max(match v {
+            Value::Integer(n) => n,
+            Value::Number(n) => n as i64,
+            _ => {
+                return Err(ScriptError::Register {
+                    script: String::new(),
+                    msg: format!("define_part('{part}'): field '{field}' max must be an int"),
+                });
+            }
+        });
     }
     Ok(def)
 }
@@ -304,23 +304,23 @@ fn check_scripted_range(
     def: &FieldDef,
     value: i64,
 ) -> Result<(), ScriptError> {
-    if let Some(min) = def.min {
-        if value < min {
-            return Err(scripted_write_err(
-                part,
-                field,
-                &format!("value {value} is below the minimum {min}"),
-            ));
-        }
+    if let Some(min) = def.min
+        && value < min
+    {
+        return Err(scripted_write_err(
+            part,
+            field,
+            &format!("value {value} is below the minimum {min}"),
+        ));
     }
-    if let Some(max) = def.max {
-        if value > max {
-            return Err(scripted_write_err(
-                part,
-                field,
-                &format!("value {value} exceeds the maximum {max}"),
-            ));
-        }
+    if let Some(max) = def.max
+        && value > max
+    {
+        return Err(scripted_write_err(
+            part,
+            field,
+            &format!("value {value} exceeds the maximum {max}"),
+        ));
     }
     Ok(())
 }

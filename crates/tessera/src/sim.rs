@@ -677,15 +677,14 @@ impl Sim {
         } {
             if let Some(pos) =
                 b.typed_part::<tessera_core::events::Position>(entity, &PART_POSITION.into())
+                && pos.x == cell.x
+                && pos.y == cell.y
             {
-                if pos.x == cell.x && pos.y == cell.y {
-                    out.push((entity, Point::new(pos.x, pos.y)));
-                }
+                out.push((entity, Point::new(pos.x, pos.y)));
             }
         }
         out
     }
-
     /// Resolve one actor's scheduled turn, logging the event line, then forward
     /// the scripted event to the host (if a bridge is attached) so `engine.on`
     /// handlers share this dispatch. Used for both the player (in
@@ -772,10 +771,10 @@ impl Sim {
                     return Some(self.step_or_bump(actor, Point::new(*x, *y)));
                 }
                 PendingAction::Attack { attacker, defender } if *attacker == actor_id => {
-                    if let Some(bridge) = &self.bridge {
-                        if let Some(e) = bridge.resolve_script_entity(*defender) {
-                            return Some(TurnAction::Attack(e));
-                        }
+                    if let Some(bridge) = &self.bridge
+                        && let Some(e) = bridge.resolve_script_entity(*defender)
+                    {
+                        return Some(TurnAction::Attack(e));
                     }
                     if let Some(e) = Entity::from_bits(*defender) {
                         return Some(TurnAction::Attack(e));
@@ -1125,10 +1124,10 @@ fn install_base_combat(ctx: &mut SimContext) {
         let mut reduce = false;
         {
             let b = ctx.broker.read().unwrap_or_else(|p| p.into_inner());
-            if let Some(h) = b.typed_part::<Health>(ev.target, &PART_HEALTH.into()) {
-                if h.hp > 0 {
-                    reduce = true;
-                }
+            if let Some(h) = b.typed_part::<Health>(ev.target, &PART_HEALTH.into())
+                && h.hp > 0
+            {
+                reduce = true;
             }
         }
         if reduce {
