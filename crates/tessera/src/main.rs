@@ -462,7 +462,7 @@ struct App {
     sim: Sim,
     frames_drawn: u32,
     atlas_dirty: bool,
-    /// Windowed devtools overlay (console panel + reserved inspector hook).
+    /// Windowed devtools overlay (console panel + entity inspector).
     /// Only compiled with the `devtools` feature; a default build has no egui in
     /// the dependency graph.
     #[cfg(feature = "devtools")]
