@@ -14,6 +14,7 @@
 //! [`SaveError::BadMagic`]; unknown/unsupported version → [`SaveError::UnsupportedVersion`];
 //! zstd frame error or postcard decode error → [`SaveError::Corrupt`]. Never panic on bad input.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -23,7 +24,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ecs::{EntityBroker, Part, PartError, PartRegistry, PartTypeId};
+use crate::events::{Health, PART_HEALTH, PART_POSITION, PART_STATS, Position, Stats};
 use crate::rng::SimRng;
+use crate::script_part::{PartValue, ScriptPart};
+use crate::turns::{ActorEnergy, PART_ENERGY};
 
 /// Current save format version. Public so callers and the console can name it.
 pub const SAVE_FORMAT_VERSION: u32 = 1;
@@ -59,6 +64,12 @@ pub enum SaveError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("part '{name}' is unknown or not whitelisted for saving")]
+    UnserializablePart { name: String },
+    #[error("save belongs to zone '{saved}', but the loaded world is zone '{current}'")]
+    ZoneMismatch { saved: String, current: String },
+    #[error("part '{name}' failed to deserialize from the save: {msg}")]
+    PartRestore { name: String, msg: String },
 }
 
 /// A serialized snapshot of simulation state.
@@ -96,6 +107,334 @@ pub struct SavedEntity {
     pub bits: u64,
     /// `(part type name, toml::Value as canonical TOML text)`.
     pub parts: Vec<(String, String)>,
+}
+
+/// How one whitelisted part is snapshotted into and restored from a `toml::Value`.
+pub struct SaveHook {
+    pub snapshot: fn(&dyn Part) -> Result<toml::Value, PartError>,
+    pub restore: fn(&toml::Value) -> Result<Box<dyn Part>, PartError>,
+}
+
+/// A snapshot from a live `dyn Part` into its canonical TOML value, or a
+/// restore of that value back into a `Box<dyn Part>`. Parts are snapshotted by
+/// whitelist only — `Box<dyn Part>` is type-erased, so generic serialization is
+/// impossible by design. The engine registers hooks for the parts it knows how
+/// to snapshot; any unknown part fails closed.
+///
+/// Deterministic: keys iterate in sorted (`BTreeMap`) part-name order.
+#[derive(Default)]
+pub struct SaveHooks {
+    hooks: BTreeMap<PartTypeId, SaveHook>,
+}
+
+impl SaveHooks {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register a snapshot/restore hook for a part type.
+    pub fn register(
+        &mut self,
+        id: impl Into<PartTypeId>,
+        snapshot: fn(&dyn Part) -> Result<toml::Value, PartError>,
+        restore: fn(&toml::Value) -> Result<Box<dyn Part>, PartError>,
+    ) {
+        self.hooks.insert(id.into(), SaveHook { snapshot, restore });
+    }
+
+    /// Snapshot a live part into its canonical TOML value. Unknown parts fail
+    /// closed with [`SaveError::UnserializablePart`]; machinery never guesses.
+    pub fn snapshot(&self, id: &PartTypeId, part: &dyn Part) -> Result<toml::Value, SaveError> {
+        let hook = self
+            .hooks
+            .get(id)
+            .ok_or_else(|| SaveError::UnserializablePart {
+                name: id.as_str().to_string(),
+            })?;
+        (hook.snapshot)(part).map_err(|e| SaveError::PartRestore {
+            name: id.as_str().to_string(),
+            msg: e.to_string(),
+        })
+    }
+
+    /// Restore a part from its canonical TOML value. An unknown name (a save
+    /// from a build with more parts than this loader) fails closed — never
+    /// silently truncated.
+    pub fn restore(
+        &self,
+        id: &PartTypeId,
+        value: &toml::Value,
+    ) -> Result<Box<dyn Part>, SaveError> {
+        let hook = self
+            .hooks
+            .get(id)
+            .ok_or_else(|| SaveError::UnserializablePart {
+                name: id.as_str().to_string(),
+            })?;
+        (hook.restore)(value).map_err(|e| SaveError::PartRestore {
+            name: id.as_str().to_string(),
+            msg: e.to_string(),
+        })
+    }
+}
+
+/// Build the whitelist hook registry used by the demo: the engine-native parts
+/// `Position`, `Health`, `ActorEnergy`, `Stats`, plus every script part
+/// registered in `registry`. Returns `(hooks, script_names)`.
+pub fn build_save_hooks(registry: &PartRegistry) -> (SaveHooks, BTreeSet<String>) {
+    let mut hooks = SaveHooks::new();
+    let mut script_names = BTreeSet::new();
+
+    hooks.register(
+        PART_POSITION,
+        |part| {
+            let p = part
+                .as_any()
+                .downcast_ref::<Position>()
+                .ok_or_else(|| not_a(PART_POSITION, "Position"))?;
+            Ok(toml::Value::Table(toml::map::Map::from_iter([
+                ("x".into(), toml::Value::Integer(p.x as i64)),
+                ("y".into(), toml::Value::Integer(p.y as i64)),
+            ])))
+        },
+        |v| {
+            let (x, y) = table_coords(v)?;
+            Ok(Box::new(Position { x, y }))
+        },
+    );
+
+    hooks.register(
+        PART_HEALTH,
+        |part| {
+            let p = part
+                .as_any()
+                .downcast_ref::<Health>()
+                .ok_or_else(|| not_a(PART_HEALTH, "Health"))?;
+            Ok(toml::Value::Table(toml::map::Map::from_iter([(
+                "hp".into(),
+                toml::Value::Integer(p.hp as i64),
+            )])))
+        },
+        |v| {
+            Ok(Box::new(Health {
+                hp: table_i32(v, "hp")?,
+            }))
+        },
+    );
+
+    hooks.register(
+        PART_ENERGY,
+        |part| {
+            let p = part
+                .as_any()
+                .downcast_ref::<ActorEnergy>()
+                .ok_or_else(|| not_a(PART_ENERGY, "ActorEnergy"))?;
+            Ok(toml::Value::Table(toml::map::Map::from_iter([
+                ("speed".into(), toml::Value::Integer(p.speed as i64)),
+                ("energy".into(), toml::Value::Integer(p.energy)),
+            ])))
+        },
+        |v| {
+            Ok(Box::new(ActorEnergy {
+                speed: table_u32(v, "speed")?,
+                energy: table_i64(v, "energy")?,
+            }))
+        },
+    );
+
+    hooks.register(
+        PART_STATS,
+        |part| {
+            let p = part
+                .as_any()
+                .downcast_ref::<Stats>()
+                .ok_or_else(|| not_a(PART_STATS, "Stats"))?;
+            Ok(toml::Value::Table(toml::map::Map::from_iter([(
+                "strength".into(),
+                toml::Value::Integer(p.strength as i64),
+            )])))
+        },
+        |v| {
+            Ok(Box::new(Stats {
+                strength: table_i32(v, "strength")?,
+            }))
+        },
+    );
+
+    // Script parts: snapshot generically through the closed PartValue map, and
+    // restore by name so an unknown script name on load fails closed.
+    for name in registry.iter_storage() {
+        if registry.script_schema(name.0).is_some() {
+            hooks.register(name.0.clone(), script_snapshot, script_restore);
+            script_names.insert(name.0.as_str().to_string());
+        }
+    }
+
+    (hooks, script_names)
+}
+
+fn not_a(part: &str, ty: &str) -> PartError {
+    PartError::BuildFailed {
+        name: part.to_string(),
+        msg: format!("snapshot expected a {ty}, found another part type"),
+    }
+}
+
+/// Snapshot any `ScriptPart` into a TOML table of its closed `PartValue` fields.
+fn script_snapshot(part: &dyn Part) -> Result<toml::Value, PartError> {
+    let sp = part
+        .as_any()
+        .downcast_ref::<ScriptPart>()
+        .ok_or_else(|| not_a("ScriptPart", "ScriptPart"))?;
+    let fields =
+        sp.0.iter()
+            .map(|(k, v)| (k.clone(), part_value_to_toml(v)))
+            .collect();
+    Ok(toml::Value::Table(fields))
+}
+
+/// Restore a `ScriptPart` from a TOML table of field values.
+fn script_restore(v: &toml::Value) -> Result<Box<dyn Part>, PartError> {
+    let table = v.as_table().ok_or_else(|| PartError::BuildFailed {
+        name: "ScriptPart".into(),
+        msg: "expected a TOML table".into(),
+    })?;
+    let mut fields = BTreeMap::new();
+    for (k, val) in table {
+        fields.insert(k.clone(), toml_to_part_value(val)?);
+    }
+    Ok(Box::new(ScriptPart(fields)))
+}
+
+fn part_value_to_toml(v: &PartValue) -> toml::Value {
+    match v {
+        PartValue::Int(n) => toml::Value::Integer(*n),
+        PartValue::Bool(b) => toml::Value::Boolean(*b),
+        PartValue::Str(s) => toml::Value::String(s.clone()),
+        PartValue::List(items) => {
+            toml::Value::Array(items.iter().map(part_value_to_toml).collect())
+        }
+    }
+}
+
+fn toml_to_part_value(v: &toml::Value) -> Result<PartValue, PartError> {
+    let bad = || PartError::BuildFailed {
+        name: "ScriptPart".into(),
+        msg: format!("unsupported value kind in script part snapshot: {v}"),
+    };
+    match v {
+        toml::Value::Integer(n) => Ok(PartValue::Int(*n)),
+        toml::Value::Boolean(b) => Ok(PartValue::Bool(*b)),
+        toml::Value::String(s) => Ok(PartValue::Str(s.clone())),
+        toml::Value::Array(items) => {
+            let out: Result<Vec<_>, _> = items.iter().map(toml_to_part_value).collect();
+            Ok(PartValue::List(out?))
+        }
+        _ => Err(bad()),
+    }
+}
+
+fn table_i32(v: &toml::Value, field: &str) -> Result<i32, PartError> {
+    table_i64(v, field).map(|n| n as i32)
+}
+
+fn table_i64(v: &toml::Value, field: &str) -> Result<i64, PartError> {
+    let table = v.as_table().ok_or_else(|| table_err(field, "a table"))?;
+    table
+        .get(field)
+        .and_then(|f| f.as_integer())
+        .ok_or_else(|| table_err(field, "an integer"))
+}
+
+fn table_u32(v: &toml::Value, field: &str) -> Result<u32, PartError> {
+    table_i64(v, field).map(|n| n as u32)
+}
+
+fn table_coords(v: &toml::Value) -> Result<(i32, i32), PartError> {
+    Ok((table_i32(v, "x")?, table_i32(v, "y")?))
+}
+
+fn table_err(field: &str, expected: &str) -> PartError {
+    PartError::BuildFailed {
+        name: "SaveHooks".into(),
+        msg: format!("field '{field}' must be {expected}"),
+    }
+}
+
+/// The deterministic entity snapshot of a broker: every live entity's id and
+/// whitelisted parts, in entity-id then part-name order.
+pub struct Snapshot {
+    /// hecs entity bits, in deterministic (entity-id) order.
+    pub next_entity_bits: Vec<u64>,
+    pub entities: Vec<SavedEntity>,
+}
+
+/// Snapshot every live entity in `broker` into [`SavedEntity`]s via `hooks`,
+/// in deterministic entity-id order. Any part not whitelisted fails closed
+/// with [`SaveError::UnserializablePart`] (the name so the gap is obvious).
+pub fn snapshot_entities(broker: &EntityBroker, hooks: &SaveHooks) -> Result<Snapshot, SaveError> {
+    let mut next_entity_bits = Vec::new();
+    let mut entities = Vec::new();
+    for entity in broker.entities() {
+        let bits = entity.to_bits().get();
+        next_entity_bits.push(bits);
+        let Some(map) = broker.part_map(entity) else {
+            continue;
+        };
+        let mut parts = Vec::new();
+        for (id, part) in map.iter() {
+            let value = hooks.snapshot(id, part)?;
+            parts.push((id.as_str().to_string(), toml_value_to_text(&value)?));
+        }
+        entities.push(SavedEntity { bits, parts });
+    }
+    Ok(Snapshot {
+        next_entity_bits,
+        entities,
+    })
+}
+
+/// Build a fresh broker whose entities are restored at their exact saved ids
+/// (via `spawn_at`, preserving deterministic entity-id ordering) with every
+/// saved part restored through `hooks`. Fail-closed: any unknown part name
+/// returns [`SaveError::UnserializablePart`] rather than truncating silently.
+pub fn restore_broker(data: &SaveData, hooks: &SaveHooks) -> Result<EntityBroker, SaveError> {
+    let mut broker = EntityBroker::new();
+    for saved in &data.entities {
+        let entity = broker.spawn_at(saved.bits);
+        for (name, text) in &saved.parts {
+            let value =
+                toml::from_str::<toml::Value>(text).map_err(|e| SaveError::PartRestore {
+                    name: name.clone(),
+                    msg: format!("invalid TOML snapshot: {e}"),
+                })?;
+            let part = hooks.restore(&PartTypeId::new(name.clone()), &value)?;
+            broker
+                .insert_part(entity, name.clone(), part)
+                .map_err(|e| SaveError::PartRestore {
+                    name: name.clone(),
+                    msg: e.to_string(),
+                })?;
+        }
+    }
+    Ok(broker)
+}
+
+/// Serialize a `toml::Value` to the canonical TOML text stored in a save's
+/// `(name, text)` part list. Values must be tables (part snapshots are config
+/// style, matching the blueprint-load-time shape); non-table roots are not
+/// valid TOML documents.
+fn toml_value_to_text(value: &toml::Value) -> Result<String, SaveError> {
+    if !value.is_table() {
+        return Err(SaveError::PartRestore {
+            name: "<part>".into(),
+            msg: "part snapshot must be a TOML table (config-style)".into(),
+        });
+    }
+    toml::to_string(value).map_err(|e| SaveError::PartRestore {
+        name: "<part>".into(),
+        msg: format!("toml serialization failed: {e}"),
+    })
 }
 
 /// Encode a [`SaveData`] into the full save byte string (header + zstd frame).
@@ -485,5 +824,247 @@ mod tests {
             save_to_bytes(&data),
             Err(SaveError::UnsupportedVersion { .. })
         ));
+    }
+
+    // ---- snapshot hooks + broker snapshot/restore ----------------------
+
+    /// A PartRegistry with the engine-native parts plus a script part schema,
+    /// mirroring the shipped demo (Position/Health/ActorEnergy/Stats native;
+    /// `Charge` a script part).
+    fn demo_registry() -> PartRegistry {
+        use crate::ecs::StorageClass;
+        use crate::script_part::{PartValue, ScriptPartType};
+        fn build<T>(v: &toml::Value) -> Result<Box<dyn Part>, PartError>
+        where
+            T: serde::de::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
+        {
+            let t: T =
+                v.clone()
+                    .try_into()
+                    .map_err(|e: toml::de::Error| PartError::BuildFailed {
+                        name: std::any::type_name::<T>().to_string(),
+                        msg: e.to_string(),
+                    })?;
+            Ok(Box::new(t))
+        }
+        let mut reg = PartRegistry::new();
+        reg.register(PART_POSITION, StorageClass::Dynamic, build::<Position>)
+            .unwrap();
+        reg.register(PART_HEALTH, StorageClass::Dynamic, build::<Health>)
+            .unwrap();
+        reg.register(PART_ENERGY, StorageClass::Dynamic, build::<ActorEnergy>)
+            .unwrap();
+        reg.register(PART_STATS, StorageClass::Dynamic, build::<Stats>)
+            .unwrap();
+        let mut schema = BTreeMap::new();
+        schema.insert(
+            "charges".to_string(),
+            crate::script_part::FieldDef::int()
+                .default(PartValue::Int(1))
+                .min(0)
+                .max(99),
+        );
+        reg.register_script_part(ScriptPartType::new("Charge", schema))
+            .unwrap();
+        reg
+    }
+
+    fn demo_hooks() -> SaveHooks {
+        build_save_hooks(&demo_registry()).0
+    }
+
+    #[test]
+    fn whitelist_hooks_round_trip_native_parts() {
+        let hooks = demo_hooks();
+        let id_pos = PartTypeId::new(PART_POSITION);
+        let pos: Box<dyn Part> = Box::new(Position { x: 10, y: 4 });
+        let v = hooks.snapshot(&id_pos, pos.as_ref()).unwrap();
+        let restored = hooks.restore(&id_pos, &v).unwrap();
+        assert_eq!(
+            restored.as_ref().as_any().downcast_ref::<Position>(),
+            Some(&Position { x: 10, y: 4 })
+        );
+
+        let id_hp = PartTypeId::new(PART_HEALTH);
+        let hp: Box<dyn Part> = Box::new(Health { hp: 7 });
+        let v = hooks.snapshot(&id_hp, hp.as_ref()).unwrap();
+        let restored = hooks.restore(&id_hp, &v).unwrap();
+        assert_eq!(
+            restored.as_ref().as_any().downcast_ref::<Health>(),
+            Some(&Health { hp: 7 })
+        );
+
+        let id_energy = PartTypeId::new(PART_ENERGY);
+        let e: Box<dyn Part> = Box::new(ActorEnergy {
+            speed: 100,
+            energy: -500,
+        });
+        let v = hooks.snapshot(&id_energy, e.as_ref()).unwrap();
+        let restored = hooks.restore(&id_energy, &v).unwrap();
+        assert_eq!(
+            restored.as_ref().as_any().downcast_ref::<ActorEnergy>(),
+            Some(&ActorEnergy {
+                speed: 100,
+                energy: -500
+            })
+        );
+    }
+
+    #[test]
+    fn script_part_hook_round_trips_closed_fields() {
+        let hooks = demo_hooks();
+        let id = PartTypeId::new("Charge");
+        let mut sp = ScriptPart::default();
+        sp.insert("charges".into(), PartValue::Int(3));
+        let boxed: Box<dyn Part> = Box::new(sp);
+        let v = hooks.snapshot(&id, boxed.as_ref()).unwrap();
+        let restored = hooks.restore(&id, &v).unwrap();
+        let back = restored
+            .as_ref()
+            .as_any()
+            .downcast_ref::<ScriptPart>()
+            .unwrap();
+        assert_eq!(back.get("charges"), Some(&PartValue::Int(3)));
+        // Restore is by whitelisted name: an unregistered script name fails closed.
+        let stale = PartTypeId::new("GoneScript");
+        assert!(matches!(
+            hooks.restore(&stale, &v),
+            Err(SaveError::UnserializablePart { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_part_fails_closed_on_snapshot() {
+        let hooks = demo_hooks();
+        // A part type with no registered hook: the whitelist has no entry.
+        // (Any `'static + Send + Sync` type is a `Part` via the blanket impl.)
+        let unwhitelisted: Box<dyn Part> = Box::new(37u32);
+        let id = PartTypeId::new("Unwhitelisted");
+        match hooks.snapshot(&id, unwhitelisted.as_ref()) {
+            Err(SaveError::UnserializablePart { name }) => assert_eq!(name, "Unwhitelisted"),
+            other => panic!("expected UnserializablePart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn snapshot_and_restore_broker_preserves_ids_and_parts() {
+        let hooks = demo_hooks();
+        let mut broker = EntityBroker::new();
+        let player = broker.spawn();
+        broker
+            .insert_part(
+                player,
+                PART_POSITION,
+                Box::new(Position { x: 2, y: 1 }) as Box<dyn Part>,
+            )
+            .unwrap();
+        broker
+            .insert_part(
+                player,
+                PART_HEALTH,
+                Box::new(Health { hp: 5 }) as Box<dyn Part>,
+            )
+            .unwrap();
+        let goblin = broker.spawn();
+        broker
+            .insert_part(
+                goblin,
+                PART_POSITION,
+                Box::new(Position { x: 5, y: 5 }) as Box<dyn Part>,
+            )
+            .unwrap();
+        let mut sp = ScriptPart::default();
+        sp.insert("charges".into(), PartValue::Int(2));
+        broker.insert_part(goblin, "Charge", Box::new(sp)).unwrap();
+
+        // Snapshot and rebuild a fresh broker from the snapshot.
+        let snapshot = snapshot_entities(&broker, &hooks).unwrap();
+        assert_eq!(snapshot.entities.len(), 2, "both live entities captured");
+        assert_eq!(
+            snapshot.next_entity_bits,
+            vec![player.to_bits().get(), goblin.to_bits().get()],
+            "entity ids captured in deterministic order"
+        );
+
+        let data = SaveData {
+            version: SAVE_FORMAT_VERSION,
+            zone_id: "test".into(),
+            next_entity_bits: snapshot.next_entity_bits.clone(),
+            entities: snapshot.entities,
+            player: Some(player.to_bits().get()),
+            clock: 100,
+            actors: vec![(player.to_bits().get(), 5, 100)],
+            rng: SimRng::from_seed(1),
+            player_turns: 0,
+            facing: (1, 0),
+        };
+        let restored = restore_broker(&data, &hooks).unwrap();
+
+        // Deterministic entity-id ordering preserved: same ids in same order.
+        let ids: Vec<u64> = restored
+            .entities()
+            .into_iter()
+            .map(|e| e.to_bits().get())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![player.to_bits().get(), goblin.to_bits().get()],
+            "ids restored at exact saved bits, in saved order"
+        );
+        // Parts restored exactly.
+        assert_eq!(
+            restored
+                .typed_part::<Position>(restored.entities()[0], &PartTypeId::new(PART_POSITION)),
+            Some(&Position { x: 2, y: 1 })
+        );
+        assert_eq!(
+            restored.typed_part::<Health>(restored.entities()[0], &PartTypeId::new(PART_HEALTH)),
+            Some(&Health { hp: 5 })
+        );
+        let sp = restored
+            .typed_part::<ScriptPart>(restored.entities()[1], &PartTypeId::new("Charge"))
+            .unwrap();
+        assert_eq!(sp.get("charges"), Some(&PartValue::Int(2)));
+    }
+
+    #[test]
+    fn restore_broker_unknown_part_fails_closed() {
+        let hooks = demo_hooks();
+        let mut broker = EntityBroker::new();
+        let e = broker.spawn();
+        broker
+            .insert_part(e, PART_POSITION, Box::new(Position { x: 0, y: 0 }))
+            .unwrap();
+        let snapshot = snapshot_entities(&broker, &hooks).unwrap();
+
+        // Simulate a save written by a build with an extra, unknown part.
+        let mut data = SaveData {
+            version: SAVE_FORMAT_VERSION,
+            zone_id: "test".into(),
+            next_entity_bits: snapshot.next_entity_bits.clone(),
+            entities: snapshot.entities,
+            player: Some(e.to_bits().get()),
+            clock: 0,
+            actors: Vec::new(),
+            rng: SimRng::from_seed(1),
+            player_turns: 0,
+            facing: (1, 0),
+        };
+        data.entities[0].parts.push((
+            "FuturePart".to_string(),
+            toml::to_string(&toml::Value::Table(toml::map::Map::from_iter([(
+                "value".into(),
+                toml::Value::Integer(1),
+            )])))
+            .unwrap(),
+        ));
+        match restore_broker(&data, &hooks) {
+            Err(SaveError::UnserializablePart { name }) => assert_eq!(name, "FuturePart"),
+            Ok(b) => panic!(
+                "expected UnserializablePart, got Ok with {} entity(s)",
+                b.entities().len()
+            ),
+            Err(other) => panic!("expected UnserializablePart, got {other:?}"),
+        }
     }
 }

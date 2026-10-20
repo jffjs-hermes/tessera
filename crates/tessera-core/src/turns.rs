@@ -244,6 +244,18 @@ impl Scheduler {
         }
     }
 
+    /// Reconstruct a scheduler from a saved snapshot: the exact clock plus the
+    /// `(entity, energy, speed)` actor set. Energy/speed are the state of
+    /// record, so a loaded world resumes exactly where the saved one stopped.
+    pub fn restore(clock: u64, actors: Vec<(Entity, ActorEnergy)>) -> Self {
+        let mut s = Self::new();
+        s.clock = clock;
+        for (e, energy) in actors {
+            s.actors.insert(e, energy);
+        }
+        s
+    }
+
     /// Total ticks elapsed since the scheduler was created. A scheduler
     /// replaying the same actions reaches the same tick count.
     pub fn ticks(&self) -> u64 {

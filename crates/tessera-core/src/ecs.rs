@@ -353,6 +353,29 @@ impl EntityBroker {
         entity
     }
 
+    /// All live entities in the broker, in deterministic (entity-id) order —
+    /// the `BTreeMap<Entity, _>` iteration order. Iterating the part store
+    /// (which every spawn enters) is reproducible; never iterates a
+    /// `HashMap`. Used by the save snapshot and by deterministic enumerations.
+    pub fn entities(&self) -> Vec<Entity> {
+        self.part_maps.keys().copied().collect()
+    }
+
+    /// Spawn an empty entity at an exact entity id/bits, restoring the broker
+    /// to a previously saved allocation. Mirrors [`Self::spawn`] but pins the
+    /// handle to `bits` (a `Entity::to_bits` value from a prior world, or any
+    /// other caller-chosen handle). Returns the restored handle.
+    ///
+    /// This is how a save/load round-trips deterministic entity-id ordering:
+    /// entities come back at the identical ids, so spawn order and id-sorted
+    /// iteration are unchanged after a reload.
+    pub fn spawn_at(&mut self, bits: u64) -> Entity {
+        let entity = Entity::from_bits(bits).expect("valid entity bits");
+        self.world.spawn_at(entity, ());
+        self.part_maps.insert(entity, PartMap::new());
+        entity
+    }
+
     /// Remove the entity from both the `hecs` world and the part store.
     pub fn despawn(&mut self, entity: Entity) -> Result<(), PartError> {
         self.world
