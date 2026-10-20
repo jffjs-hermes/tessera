@@ -182,7 +182,7 @@ fn rename_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
         loop {
             match fs::rename(from, to) {
                 Ok(()) => return Ok(()),
-                Err(e) if attempt + 1 < ATTEMPTS => {
+                Err(_e) if attempt + 1 < ATTEMPTS => {
                     attempt += 1;
                     std::thread::sleep(PAUSE);
                 }
