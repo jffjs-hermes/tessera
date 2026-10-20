@@ -12,6 +12,7 @@
 //! path. The renderer stays a pure reader: it never dispatches events or
 //! mutates sim state; the redraw on hot reload is unchanged.
 
+mod devtools;
 mod scripting;
 mod sim;
 
@@ -19,10 +20,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
+use devtools::console::{self, ConsoleContext, ConsoleOutcome};
 use notify::{RecursiveMode, Watcher};
 use sim::{PlayerAction, Sim};
 use tessera_core::ecs::{EntityBroker, Part};
 use tessera_core::events::{Health, PART_HEALTH, PART_POSITION, Position};
+use tessera_core::save::sweep_stale_tmp;
 use tessera_core::tiles::TileRegistry;
 use tessera_core::turns::ActorEnergy;
 use tessera_core::vfs::{DirVfs, Vfs};
@@ -61,6 +64,14 @@ struct Args {
     frames: Option<u32>,
     /// Run this many scripted actions headlessly, print final map + log, exit 0.
     headless: Option<u32>,
+    /// Save directory for `save`/`load` console commands and `--load`
+    /// (`--save-dir <dir>`, default `./saves`).
+    save_dir: PathBuf,
+    /// Load a named save at startup (`--load <name>`), replacing live state.
+    load: Option<String>,
+    /// Console command lines to run at startup before scripted actions
+    /// (`--exec <line>`, repeatable).
+    exec: Vec<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -69,6 +80,9 @@ fn parse_args() -> Result<Args> {
     let mut zone = None;
     let mut frames = None;
     let mut headless = None;
+    let mut save_dir = PathBuf::from("saves");
+    let mut load = None;
+    let mut exec = Vec::new();
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -76,6 +90,13 @@ fn parse_args() -> Result<Args> {
             "--mods" => mods = it.next().context("--mods needs a path")?.into(),
             "--zone" => zone = Some(it.next().context("--zone needs an id")?.to_string()),
             "--frames" => frames = Some(it.next().context("--frames needs a number")?.parse()?),
+            "--save-dir" => save_dir = it.next().context("--save-dir needs a path")?.into(),
+            "--load" => load = Some(it.next().context("--load needs a name")?.to_string()),
+            "--exec" => exec.push(
+                it.next()
+                    .context("--exec needs a command line")?
+                    .to_string(),
+            ),
             "--headless" => {
                 headless = Some(it.next().context("--headless needs a number")?.parse()?)
             }
@@ -89,7 +110,13 @@ fn parse_args() -> Result<Args> {
                      `--headless <n>`: run n scripted actions with no window, print final map + event log, exit 0.\n\
                      `--zone <id>`: load the named zone (defaults to the single zone in the pack).\n\
                      `--mods <dir>`: discover local directory / zip mods (default data/mods);\n\
-                     base data loads first, then each mod in deterministic load order."
+                     base data loads first, then each mod in deterministic load order.\n\
+                     `--save-dir <dir>`: save directory for save/load and --load (default ./saves).\n\
+                     `--load <name>`: load the named save at startup, replacing live state.\n\
+                     `--exec <line>`: run a console command at startup (repeatable), before scripted\n\
+                     actions in --headless; results print to stdout.\n\
+                     Console commands: help list entities spawn <bp> [x y] kill <id> | kill all <bp>\n\
+                     print <id> sethp <id> <n> tp <id> <x> <y> save [name] load <name> clear"
                 );
                 std::process::exit(0);
             }
@@ -102,6 +129,9 @@ fn parse_args() -> Result<Args> {
         zone,
         frames,
         headless,
+        save_dir,
+        load,
+        exec,
     })
 }
 
@@ -117,6 +147,10 @@ struct Content {
     /// Deterministic load order of the loaded mods (empty for a base-only
     /// pack). Kept so the headless demo can report what a mod run exercised.
     mod_ids: Vec<String>,
+    /// Whitelist save hooks for this world (native + script parts), built once
+    /// after content load. Used by the console `save`/`load` commands AND the
+    /// `--load` startup flag, so both share the exact same whitelist registry.
+    save_hooks: tessera_core::save::SaveHooks,
 }
 
 /// Build the world: register the engine's known part types and the dynamic
@@ -214,6 +248,7 @@ fn load_content(data: &std::path::Path, mods: &std::path::Path) -> Result<Conten
     // resolve and stamp blueprints at runtime. The world is cheaply shared as
     // an `Arc` (its library is itself `Arc<RwLock<..>>`).
     let world = Arc::new(world);
+    let save_hooks = world.save_hooks();
     bridge.set_world(world.clone());
     // Deterministic mod ids in load order (base excluded), for demo reporting.
     let mod_ids: Vec<String> = registry
@@ -229,6 +264,7 @@ fn load_content(data: &std::path::Path, mods: &std::path::Path) -> Result<Conten
         broker,
         bridge,
         mod_ids,
+        save_hooks,
     })
 }
 
@@ -552,6 +588,47 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
+/// Run the startup console hooks shared by the headless and windowed paths:
+/// first `--load <name>` (replaces live state from a save), then each
+/// `--exec <line>` in order. Results are printed to stdout (headless contract;
+/// the windowed transcript is a separate later change). Also sweeps stale
+/// `*.tmp` save fragments once per startup (saves are written atomically via a
+/// same-directory temp file; see the save module docs).
+fn startup_console(sim: &mut Sim, content: &Content, args: &Args) {
+    if let Err(e) = sweep_stale_tmp(&args.save_dir) {
+        tracing::warn!("save dir temp sweep failed: {e}");
+    }
+    let ctx = ConsoleContext {
+        world: &content.world,
+        save_hooks: &content.save_hooks,
+        save_dir: &args.save_dir,
+    };
+    // "--load" first so it becomes the base state the --exec lines act on.
+    if let Some(name) = &args.load {
+        let path = args.save_dir.join(format!("{name}.tess"));
+        match tessera_core::save::load(&path) {
+            Ok(data) => match sim.restore_from_save(data, ctx.save_hooks) {
+                Ok(()) => println!("[console] loaded {name} from {}", path.display()),
+                Err(e) => println!("[console] error: load {name}: {e}"),
+            },
+            Err(e) => println!("[console] error: load {name}: {e}"),
+        }
+    }
+    for line in &args.exec {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match console::parse(line) {
+            Ok(cmd) => match console::execute(sim, &ctx, cmd) {
+                ConsoleOutcome::Ok(text) => println!("[console] {text}"),
+                ConsoleOutcome::Err(e) => println!("[console] error: {e}"),
+                ConsoleOutcome::ReloadWorld => println!("[console] world reloaded from save"),
+            },
+            Err(e) => println!("[console] error: {e}"),
+        }
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -583,6 +660,11 @@ fn main() -> Result<()> {
     // Headless path: no window, no event loop, no winit. Deterministic output.
     if let Some(n) = args.headless {
         let mut sim = build_sim(&content, zone)?;
+        // Startup --load first (replaces live state from a save), then each
+        // --exec line runs BEFORE the scripted actions and prints to stdout —
+        // the headless console run contract.
+        startup_console(&mut sim, &content, &args);
+
         let map_text = sim.run_headless(&content.tiles, n);
         print!("{map_text}");
         for line in sim.log() {
@@ -615,7 +697,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let sim = build_sim(&content, zone)?;
+    let mut sim = build_sim(&content, zone)?;
+    // Apply --load / --exec at windowed startup too (the run contract is
+    // identical; only the transcript rendering differs and comes later).
+    startup_console(&mut sim, &content, &args);
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);

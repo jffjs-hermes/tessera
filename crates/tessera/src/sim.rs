@@ -25,7 +25,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use hecs::Entity;
 use tessera_core::ecs::EntityBroker;
 use tessera_core::events::{
-    EARLY, HandlerAction, LATE, Move, NORMAL, Point, SimContext, TakeDamage, TileEntry,
+    EARLY, HandlerAction, Health, LATE, Move, NORMAL, PART_HEALTH, PART_POSITION, Point, Position,
+    SimContext, TakeDamage, TileEntry,
 };
 use tessera_core::rng::SimRng;
 use tessera_core::save::SAVE_FORMAT_VERSION;
@@ -34,7 +35,7 @@ use tessera_core::tiles::{Rgb, Tile, TileRegistry, TileVisual};
 use tessera_core::turns::{
     ActorEnergy, BASE_SPEED, PART_ENERGY, Scheduler, TurnAction, TurnReport,
 };
-use tessera_core::world::RenderTile;
+use tessera_core::world::{RenderTile, World};
 use tessera_core::zone::Zone;
 use tessera_render::Cell;
 use tessera_render::atlas::Atlas;
@@ -94,6 +95,160 @@ pub struct Sim {
 }
 
 impl Sim {
+    // ---- console/devtools support -------------------------------------
+    //
+    // Small public surfaces the headless console (`devtools/console.rs`)
+    // executes against, added to satisfy the debug console contract without
+    // leaking the whole broker/scheduler. Each returns a deterministic,
+    // human-readable line the executor turns into a `CMD ...` event-log line.
+
+    /// Read-only shared handle to the live broker (console reads: `print`,
+    /// `entities`). The executor holds the read lock only for the duration of
+    /// one command — it never spans turns or event dispatch.
+    pub fn broker(&self) -> &Arc<RwLock<EntityBroker>> {
+        &self.ctx.broker
+    }
+
+    /// The scheduler's current tick count (for `CMD ... tick=..` lines).
+    pub fn ticks(&self) -> u64 {
+        self.scheduler
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .ticks()
+    }
+
+    /// Append one deterministic event-log line (a `CMD ...` console line).
+    pub fn log_push(&mut self, line: String) {
+        self.log.push(line);
+    }
+
+    /// Spawn a blueprint into the live world at `at` (default: the zone start
+    /// tile), stamp a `Position`, and schedule it as an actor if it carries an
+    /// `ActorEnergy` part (console `spawn`). Fail-closed: unknown blueprint or
+    /// a build error despawns the husk and returns the diagnostic, never a
+    /// partial entity.
+    pub fn spawn_blueprint_console(
+        &mut self,
+        world: &World,
+        bp: &str,
+        at: Option<(i32, i32)>,
+    ) -> Result<hecs::Entity, String> {
+        let (x, y) = at.unwrap_or((self.ctx.map.start.x, self.ctx.map.start.y));
+        let entity = {
+            let mut broker = self
+                .ctx
+                .broker
+                .write()
+                .map_err(|_| "broker poisoned".to_string())?;
+            let e = world
+                .spawn_blueprint(bp, &mut broker)
+                .map_err(|e| e.to_string())?;
+            broker
+                .insert_part(
+                    e,
+                    PART_POSITION,
+                    Box::new(Position::from_point(Point::new(x, y)))
+                        as Box<dyn tessera_core::ecs::Part>,
+                )
+                .map_err(|e| e.to_string())?;
+            e
+        };
+        let speed = self
+            .ctx
+            .broker
+            .read()
+            .map_err(|_| "broker poisoned".to_string())?
+            .typed_part::<ActorEnergy>(entity, &PART_ENERGY.into())
+            .map(|a| a.speed)
+            .unwrap_or(BASE_SPEED);
+        self.scheduler
+            .lock()
+            .map_err(|_| "scheduler poisoned".to_string())?
+            .add_actor(entity, ActorEnergy::at_threshold(speed));
+        Ok(entity)
+    }
+
+    /// Resolve a console entity id (the `CMD ...`/`entities` decimal `u64`
+    /// bits) to a live broker entity, if any.
+    pub fn entity_from_id(&self, id: u64) -> Option<hecs::Entity> {
+        let e = hecs::Entity::from_bits(id)?;
+        self.ctx
+            .broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_alive(e)
+            .then_some(e)
+    }
+
+    /// Despawn a live entity and unregister it from the scheduler (console
+    /// `kill`). A gone id is an error.
+    pub fn despawn_entity(&mut self, entity: hecs::Entity) -> Result<(), String> {
+        {
+            let mut broker = self
+                .ctx
+                .broker
+                .write()
+                .map_err(|_| "broker poisoned".to_string())?;
+            broker.despawn(entity).map_err(|e| e.to_string())?;
+        }
+        self.scheduler
+            .lock()
+            .map_err(|_| "scheduler poisoned".to_string())?
+            .remove_actor(entity);
+        Ok(())
+    }
+
+    /// Write the `Health.hp` part directly (console `sethp`; a debug mutation,
+    /// executed between turns, never during dispatch). No event is emitted —
+    /// the `CMD` log line is the record.
+    pub fn set_entity_hp(&mut self, entity: hecs::Entity, hp: i32) -> Result<(), String> {
+        let mut broker = self
+            .ctx
+            .broker
+            .write()
+            .map_err(|_| "broker poisoned".to_string())?;
+        let h = broker
+            .typed_part_mut::<Health>(entity, &PART_HEALTH.into())
+            .ok_or_else(|| format!("no Health part on {}", entity_to_id(entity)))?;
+        h.hp = hp;
+        Ok(())
+    }
+
+    /// Write the `Position` part directly (console `tp`; debug mutation,
+    /// between turns). No event is emitted — same rule as `sethp`.
+    pub fn set_entity_position(
+        &mut self,
+        entity: hecs::Entity,
+        x: i32,
+        y: i32,
+    ) -> Result<(), String> {
+        let mut broker = self
+            .ctx
+            .broker
+            .write()
+            .map_err(|_| "broker poisoned".to_string())?;
+        let pos = broker
+            .typed_part_mut::<Position>(entity, &PART_POSITION.into())
+            .ok_or_else(|| format!("no Position part on {}", entity_to_id(entity)))?;
+        pos.x = x;
+        pos.y = y;
+        Ok(())
+    }
+
+    /// Replace this sim's live state from a saved snapshot (console `load` and
+    /// the `--load` startup flag). Preserves the current zone (which must match
+    /// the save's, else [`SaveError::ZoneMismatch`]) and the script bridge.
+    pub fn restore_from_save(
+        &mut self,
+        data: SaveData,
+        hooks: &SaveHooks,
+    ) -> Result<(), SaveError> {
+        let zone = self.ctx.map.clone();
+        let bridge = self.bridge.clone();
+        *self = Self::load(data, zone, hooks, bridge)?;
+        Ok(())
+    }
+
     /// Build the harness around an already-spawned `player` whose broker
     /// carries a `Position` part (no script host / no enemy).
     #[cfg_attr(not(test), allow(dead_code))] // used by the sim test fixture
