@@ -7,7 +7,10 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/jffjs-hermes/tessera"
-rust-version = "1.85"
+# M7 Card E (B1 resolved): egui 0.37 / egui-wgpu 0.37 / egui-winit 0.37 all
+# declare rust_version = "1.95" (spec §4.2). The stable toolchain is well past
+# 1.95, so this is not a practical constraint.
+rust-version = "1.95"
 
 [profile.dev]
 opt-level = 1

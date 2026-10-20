@@ -226,6 +226,23 @@ impl Renderer {
         )
     }
 
+    /// The wgpu device the renderer drives. Exposed so the devtools egui layer
+    /// can share the same device/queue/surface instead of creating its own.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// The wgpu queue the renderer submits on.
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    /// The surface color format the cells render into; egui must use the same
+    /// format when it paints on top of the same frame.
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.config.format
+    }
+
     pub fn upload_atlas(&self, atlas: &Atlas) {
         self.queue.write_texture(
             self.atlas_tex.as_image_copy(),
@@ -272,6 +289,27 @@ impl Renderer {
     }
 
     pub fn render(&mut self, cells: &[Cell]) {
+        self.render_with(cells, |_, _, _, _| Vec::new());
+    }
+
+    /// Render the cell grid, then let `overlay` draw into the same surface
+    /// frame before it is presented. `overlay` receives the device, queue, the
+    /// current frame's texture view, and the shared command encoder, and may
+    /// append its own work (e.g. the egui devtools pass) to the encoder; any
+    /// command buffers it returns (e.g. egui's per-frame user buffers) are
+    /// submitted before the encoded frame. The cells always clear the frame
+    /// first; an overlay that wants to composite on top must use
+    /// `LoadOp::Load` for its own pass.
+    pub fn render_with(
+        &mut self,
+        cells: &[Cell],
+        overlay: impl FnOnce(
+            &wgpu::Device,
+            &wgpu::Queue,
+            &wgpu::TextureView,
+            &mut wgpu::CommandEncoder,
+        ) -> Vec<wgpu::CommandBuffer>,
+    ) {
         let cells = &cells[..cells.len().min(self.inst_capacity)];
         self.queue
             .write_buffer(&self.inst_buf, 0, bytemuck::cast_slice(cells));
@@ -310,7 +348,9 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.inst_buf.slice(..));
             pass.draw(0..6, 0..cells.len() as u32);
         }
-        self.queue.submit([enc.finish()]);
+        let extra = overlay(&self.device, &self.queue, &view, &mut enc);
+        let encoded = enc.finish();
+        self.queue.submit(extra.into_iter().chain([encoded]));
         self.queue.present(frame);
     }
 }

@@ -255,14 +255,14 @@ pub fn parse_manifest(path: &str, text: &str) -> Result<ModManifest, ManifestErr
         None => None,
         Some(v) => Some(as_str(path, &id_str, "title", v)?.to_string()),
     };
-    if let Some(t) = &title {
-        if t.chars().count() > 80 {
-            return Err(invalid(
-                path,
-                &id_str,
-                format!("`title` is {} chars, the maximum is 80", t.chars().count()),
-            ));
-        }
+    if let Some(t) = &title
+        && t.chars().count() > 80
+    {
+        return Err(invalid(
+            path,
+            &id_str,
+            format!("`title` is {} chars, the maximum is 80", t.chars().count()),
+        ));
     }
 
     let authors = match table.get("authors") {

@@ -25,3 +25,25 @@ jobs:
       # Record the vendored Luau version linked by tessera-script (spec §2.2,
       # §8.2) so luau0-src drift between cache misses is visible in build output.
       - run: cargo run -p tessera-script --example print_luau_version
+
+  # M7 Card E: prove the feature-gated egui devtools build cannot rot (spec §4.3).
+  # A default build asserts the opposite — that egui is absent from the lock
+  # graph — in the `verify` job above (its test/check run without --features).
+  devtools:
+    name: devtools feature (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # Build + test the binary with the `devtools` feature (egui console panel
+      # + inspector hook). egui/egui-winit/egui-wgpu 0.37 need rust-version 1.95.
+      - run: cargo build -p tessera --features devtools
+      - run: cargo test -p tessera --features devtools
+      - run: cargo clippy -p tessera --features devtools --all-targets -- -D warnings

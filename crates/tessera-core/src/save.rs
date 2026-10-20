@@ -546,13 +546,12 @@ fn sync_parent_dir(path: &Path) {
     if parent.as_os_str().is_empty() {
         return;
     }
-    if let Ok(dir) = File::open(parent) {
-        if let Err(e) = dir.sync_all() {
-            tracing::warn!(path = %parent.display(), error = %e, "could not fsync save directory");
-        }
+    if let Ok(dir) = File::open(parent)
+        && let Err(e) = dir.sync_all()
+    {
+        tracing::warn!(path = %parent.display(), error = %e, "could not fsync save directory");
     }
 }
-
 /// Write `data` to `path` crash-safely: a process kill at any instant leaves
 /// either the previous save or the new save intact and loadable, never a
 /// half-written file.
@@ -599,14 +598,14 @@ pub fn write_atomic(path: &Path, data: &SaveData) -> Result<(), SaveError> {
     }
 
     // 2. Best-effort rotation of the previous save to `.bak`.
-    if path.exists() {
-        if let Err(e) = rename_replacing(path, &bak) {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "could not rotate previous save to .bak; the save itself is still atomic"
-            );
-        }
+    if path.exists()
+        && let Err(e) = rename_replacing(path, &bak)
+    {
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "could not rotate previous save to .bak; the save itself is still atomic"
+        );
     }
 
     // 3. Atomic tmp → final rename. If this fails after retries, the previous

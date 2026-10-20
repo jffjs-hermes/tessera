@@ -136,15 +136,14 @@ impl ScriptPartType {
     /// schema is rejected at registration, before content can depend on it.
     pub fn validate_schema(&self) -> Result<(), PartError> {
         for (field, def) in &self.schema {
-            if let Some(min) = def.min {
-                if let Some(max) = def.max {
-                    if min > max {
-                        return Err(schema_err(
-                            &self.name,
-                            &format!("field '{field}': min ({min}) must not exceed max ({max})"),
-                        ));
-                    }
-                }
+            if let Some(min) = def.min
+                && let Some(max) = def.max
+                && min > max
+            {
+                return Err(schema_err(
+                    &self.name,
+                    &format!("field '{field}': min ({min}) must not exceed max ({max})"),
+                ));
             }
             if let Some(default) = &def.default {
                 self.check_default(field, def, default)?;
@@ -246,21 +245,21 @@ impl ScriptPartType {
     }
 
     fn check_range(&self, field: &str, def: &FieldDef, value: i64) -> Result<(), PartError> {
-        if let Some(min) = def.min {
-            if value < min {
-                return Err(schema_err(
-                    &self.name,
-                    &format!("field '{field}': value {value} is below the minimum {min}"),
-                ));
-            }
+        if let Some(min) = def.min
+            && value < min
+        {
+            return Err(schema_err(
+                &self.name,
+                &format!("field '{field}': value {value} is below the minimum {min}"),
+            ));
         }
-        if let Some(max) = def.max {
-            if value > max {
-                return Err(schema_err(
-                    &self.name,
-                    &format!("field '{field}': value {value} exceeds the maximum {max}"),
-                ));
-            }
+        if let Some(max) = def.max
+            && value > max
+        {
+            return Err(schema_err(
+                &self.name,
+                &format!("field '{field}': value {value} exceeds the maximum {max}"),
+            ));
         }
         Ok(())
     }

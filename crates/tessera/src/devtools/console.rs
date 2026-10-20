@@ -471,16 +471,14 @@ fn blueprint_of(world: &World, b: &EntityBroker, e: Entity) -> String {
     };
     let lib = world.library().read().unwrap_or_else(|p| p.into_inner());
     for id in lib.ids() {
-        if let Some(bp) = lib.get(id) {
-            if let Some(t) = bp
+        if let Some(bp) = lib.get(id)
+            && let Some(t) = bp
                 .part("Render")
                 .and_then(|v| v.get("tile"))
                 .and_then(|v| v.as_str())
-            {
-                if t == rt.tile {
-                    return id.clone();
-                }
-            }
+            && t == rt.tile
+        {
+            return id.clone();
         }
     }
     rt.tile.clone()
@@ -499,6 +497,63 @@ fn save_named(sim: &Sim, ctx: &ConsoleContext<'_>, name: &str) -> Result<PathBuf
     }
     write_atomic(&path, &data)?;
     Ok(path)
+}
+
+/// The windowed console panel's client-side state: the rendered transcript, the
+/// line being typed, and whether the panel is visible (backtick toggles).
+///
+/// This is deliberately ungated (no egui dependency): the transcript/command
+/// logic — including the invariant that *console commands never move the
+/// player* — is unit-testable under a plain `cargo test`, and the feature-gated
+/// egui module is only a thin renderer over this state.
+///
+/// In a default (non-`devtools`) binary build the struct has no non-test
+/// callers, so suppress the dead-code lint there (it is constructed by the
+/// feature-gated UI and by tests).
+#[cfg_attr(not(feature = "devtools"), allow(dead_code))]
+#[derive(Debug, Default)]
+pub struct ConsolePanel {
+    /// Rendered transcript lines, oldest first.
+    pub transcript: Vec<String>,
+    /// The line currently being typed in the input field.
+    pub input: String,
+    /// Whether the panel is currently shown (backtick toggles).
+    pub visible: bool,
+}
+
+#[cfg_attr(not(feature = "devtools"), allow(dead_code))]
+impl ConsolePanel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Submit the current input line: echo it, parse + execute it, and append
+    /// the outcome to the transcript. `clear` wipes the transcript. Never
+    /// panics on malformed input (parse errors render as an `error:` line).
+    pub fn submit(&mut self, sim: &mut Sim, ctx: &ConsoleContext<'_>) {
+        let line = std::mem::take(&mut self.input);
+        let line = line.trim();
+        if line.is_empty() {
+            return;
+        }
+        self.transcript.push(format!("> {line}"));
+        match parse(line) {
+            Ok(ConsoleCommand::Clear) => self.transcript.clear(),
+            Ok(cmd) => match execute(sim, ctx, cmd) {
+                ConsoleOutcome::Ok(text) => self.transcript.extend(text.lines().map(str::to_owned)),
+                ConsoleOutcome::Err(e) => self.transcript.push(format!("error: {e}")),
+                ConsoleOutcome::ReloadWorld => {
+                    self.transcript.push("(world reloaded from save)".into())
+                }
+            },
+            Err(e) => self.transcript.push(format!("error: {e}")),
+        }
+        // Bound the transcript so a long session does not grow unbounded.
+        if self.transcript.len() > 200 {
+            let drop = self.transcript.len() - 200;
+            self.transcript.drain(..drop);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1012,5 +1067,96 @@ parts.Charge = { charges = 2 }
             sim.log()
         );
         let _ = sim;
+    }
+
+    // ---- ConsolePanel (windowed transcript state) --------------------------
+
+    #[test]
+    fn console_panel_typing_does_not_move_the_player() {
+        let world = test_world();
+        let hooks = world.save_hooks();
+        let dir = temp_dir();
+        let (mut sim, player) = test_sim();
+        let player_id = player.to_bits().get();
+        let ctx = ConsoleContext {
+            world: &world,
+            save_hooks: &hooks,
+            save_dir: &dir,
+        };
+        let before = sim.position();
+
+        // "Typing" a line into the panel (the same path the egui TextEdit
+        // drives on Enter) must never move the player — the console is the
+        // mutation path *beside* the game, not a movement input.
+        let mut panel = ConsolePanel::new();
+        panel.input = "spawn Goblin 5 5".to_string();
+        panel.submit(&mut sim, &ctx);
+        panel.input = format!("sethp {player_id} 30");
+        panel.submit(&mut sim, &ctx);
+        panel.input = "entities".to_string();
+        panel.submit(&mut sim, &ctx);
+
+        // Player position is byte-for-byte unchanged by all three commands.
+        assert_eq!(sim.position(), before);
+        // The transcript echoes the input and shows the outcomes.
+        assert!(
+            panel.transcript.iter().any(|l| l == "> spawn Goblin 5 5"),
+            "{:?}",
+            panel.transcript
+        );
+        assert!(
+            panel
+                .transcript
+                .iter()
+                .any(|l| l.contains("spawned Goblin")),
+            "{:?}",
+            panel.transcript
+        );
+        assert!(
+            panel.transcript.iter().any(|l| l.contains("hp set to 30")),
+            "{:?}",
+            panel.transcript
+        );
+        // Input buffer was consumed.
+        assert!(panel.input.is_empty());
+    }
+
+    #[test]
+    fn console_panel_clear_wipes_transcript_and_input_never_panics() {
+        let world = test_world();
+        let hooks = world.save_hooks();
+        let dir = temp_dir();
+        let (mut sim, player) = test_sim();
+        let player_id = player.to_bits().get();
+        let ctx = ConsoleContext {
+            world: &world,
+            save_hooks: &hooks,
+            save_dir: &dir,
+        };
+        let mut panel = ConsolePanel::new();
+        panel.input = "spawn Goblin 1 1".to_string();
+        panel.submit(&mut sim, &ctx);
+        assert!(!panel.transcript.is_empty());
+
+        // `clear` empties the transcript.
+        panel.input = "clear".to_string();
+        panel.submit(&mut sim, &ctx);
+        assert!(panel.transcript.is_empty());
+
+        // Malformed input renders as an error line, never panics.
+        panel.input = "spawn".to_string();
+        panel.submit(&mut sim, &ctx);
+        assert!(
+            panel.transcript.iter().any(|l| l.contains("error:")),
+            "{:?}",
+            panel.transcript
+        );
+
+        // Blank input is a no-op.
+        let before = panel.transcript.len();
+        panel.input = "   ".to_string();
+        panel.submit(&mut sim, &ctx);
+        assert_eq!(panel.transcript.len(), before);
+        let _ = (sim, player_id);
     }
 }

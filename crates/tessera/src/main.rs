@@ -462,6 +462,11 @@ struct App {
     sim: Sim,
     frames_drawn: u32,
     atlas_dirty: bool,
+    /// Windowed devtools overlay (console panel + reserved inspector hook).
+    /// Only compiled with the `devtools` feature; a default build has no egui in
+    /// the dependency graph.
+    #[cfg(feature = "devtools")]
+    devtools: Option<devtools::Devtools>,
 }
 
 impl App {
@@ -516,6 +521,14 @@ impl ApplicationHandler<UserEvent> for App {
         let renderer =
             Renderer::new(el, window.clone(), (GRID_W, GRID_H), 2).expect("init renderer");
         self.atlas_dirty = true;
+        // Windowed devtools overlay: shares the renderer's Device/Queue/surface
+        // format (no eframe, no second surface).
+        #[cfg(feature = "devtools")]
+        {
+            let devtools =
+                devtools::Devtools::new(&window, renderer.device(), renderer.surface_format());
+            self.devtools = Some(devtools);
+        }
         window.request_redraw();
         self.window = Some(window);
         self.renderer = Some(renderer);
@@ -533,6 +546,18 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _: WindowId, ev: WindowEvent) {
+        // Devtools input hook: feed the event through egui State first. When
+        // egui consumes the event (e.g. typing into the console TextEdit),
+        // game keys are suppressed — so typing `s` in the console does not move
+        // the player. The backtick/F3 panel toggles are also handled inside
+        // on_window_event and never reach the game.
+        #[cfg(feature = "devtools")]
+        let egui_consumed =
+            if let (Some(d), Some(w)) = (self.devtools.as_mut(), self.window.as_deref()) {
+                d.on_window_event(w, &ev)
+            } else {
+                false
+            };
         match ev {
             WindowEvent::CloseRequested => el.exit(),
             WindowEvent::Resized(s) => {
@@ -541,6 +566,15 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                // If egui consumed this key, it belongs to the devtools UI —
+                // do not route it to the game at all.
+                #[cfg(feature = "devtools")]
+                if egui_consumed {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
                 // Arrows / WASD / hjklyubn and the numpad (all eight directions,
                 // physical codes so NumLock state doesn't matter) map to a Move;
                 // `.` / Space / numpad 5 map to Wait; `e` is Zap. The action is
@@ -572,6 +606,25 @@ impl ApplicationHandler<UserEvent> for App {
                         r.upload_atlas(&self.content.atlas);
                         self.atlas_dirty = false;
                     }
+                    #[cfg(feature = "devtools")]
+                    {
+                        if let Some(d) = &mut self.devtools {
+                            let window = self.window.clone().expect("window exists");
+                            let cc = console::ConsoleContext {
+                                world: &self.content.world,
+                                save_hooks: &self.content.save_hooks,
+                                save_dir: &self.args.save_dir,
+                            };
+                            r.render_with(&cells, |device, queue, view, enc| {
+                                let mut scene =
+                                    devtools::SceneCtx::new(&window, device, queue, view, enc);
+                                d.paint(&mut scene, &mut self.sim, &cc)
+                            });
+                        } else {
+                            r.render(&cells);
+                        }
+                    }
+                    #[cfg(not(feature = "devtools"))]
                     r.render(&cells);
                 }
                 self.frames_drawn += 1;
@@ -713,10 +766,10 @@ fn main() -> Result<()> {
     let watcher = {
         let p = proxy.clone();
         let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(ev) = res {
-                if !ev.kind.is_access() {
-                    let _ = p.send_event(UserEvent::ContentChanged);
-                }
+            if let Ok(ev) = res
+                && !ev.kind.is_access()
+            {
+                let _ = p.send_event(UserEvent::ContentChanged);
             }
         })?;
         let base_ok = w.watch(&args.data, RecursiveMode::Recursive).is_ok();
@@ -738,6 +791,8 @@ fn main() -> Result<()> {
         sim,
         frames_drawn: 0,
         atlas_dirty: true,
+        #[cfg(feature = "devtools")]
+        devtools: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
