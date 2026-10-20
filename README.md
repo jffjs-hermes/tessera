@@ -32,6 +32,49 @@ mods (default `data/mods`); the shipped `sample-mod` adds a Bogling creature,
 patches the base Goblin's tile and strength, and registers an Attack handler
 that appears in the event log.
 
+### Saves and the debug console (headless)
+
+Saves use the M7 versioned, compressed (`postcard` + `zstd`) format with atomic
+writes and a `.bak` rotation — see `docs/specs/m7-saves-tooling.md`. They are
+pack-specific: a save can only load into the same zone that wrote it
+(unknown-version files from a newer build are rejected loudly).
+
+```sh
+# Save target directory (default ./saves), and load a named save at startup:
+cargo run -p tessera -- --headless 2 --save-dir saves --exec "save demo"
+cargo run -p tessera -- --headless 2 --save-dir saves --load demo --exec "entities"
+
+# The typed console runs headlessly too, before the scripted actions:
+cargo run -p tessera -- --headless 0 --exec "spawn Goblin 5 5" --exec "entities"
+```
+
+`--exec "<line>"` is repeatable; each line runs **between** turns, before the
+scripted `--headless` actions, and prints its outcome to stdout. Every executed
+command appends a deterministic `CMD <verb> ... tick=..` line to the event log,
+so a headless run is a complete record of how its final state was reached.
+
+Console grammar (whitespace-tokenized; `#` starts a comment; malformed input
+prints a usage error, never panics):
+
+| Command | Effect |
+|---|---|
+| `help` | list commands |
+| `list` | list blueprint ids in the loaded library |
+| `entities` | list live entities: `<id> <blueprint> <pos> <hp>` |
+| `spawn <blueprint> [x y]` | spawn (default = zone start tile) |
+| `kill <entity-id>` / `kill all <blueprint>` | despawn one / all matching |
+| `print <entity-id>` | dump an entity's parts |
+| `sethp <entity-id> <n>` | write the `Health` part |
+| `tp <entity-id> <x> <y>` | teleport (writes `Position`) |
+| `save [name]` | write a save (default name `quicksave`) |
+| `load <name>` | replace live state from a save |
+| `clear` | clear the transcript |
+
+The windowed egui console panel and entity inspector are planned for M7's
+windowed devtools (`--features devtools`); the headless parser + executor above
+already cover the same grammar without a window.
+
+
 ## The demo cave
 
 The default demo loads a cave generated from `data/base/zones/start.toml`
