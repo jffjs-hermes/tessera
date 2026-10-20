@@ -13,7 +13,7 @@ Scripting: Luau via mlua. Desktop only.
 - [ ] **M5** Mod loader: manifests, load order, patch ops (zip-able folders via VFS)
 - [x] **M6** Zones/chunks, cave worldgen, pathfinding, basic AI
   - M6 includes the playable demo: a goblin that wanders, chases within 10 tiles, and respawns; the player respawns at the start tile.
-- [ ] **M7** Versioned saves, debug console, entity inspector
+- [x] **M7** Versioned saves, debug console, entity inspector
 - [ ] **M8** Field of view: recursive shadowcasting line of sight, player and AI visibility, FOV-based detection (replaces straight-line distance for detection)
 
 Execution order: M4, M6 (world slice and demo), M5 (mod loader), M7, M8.

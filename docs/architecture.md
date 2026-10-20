@@ -161,7 +161,7 @@ Run as small batches with human review between each.
   4. When the player dies, the player respawns at the start tile. If that tile is occupied, use the nearest free walkable tile.
   5. When the goblin dies, a new goblin spawns after 5 PLAYER turns, at a random walkable empty tile.
   Execution order: M4, M6 (world slice and demo), M5 (mod loader), M7, M8.
-- [ ] **M7 Saves and tooling:** versioned saves, debug console, egui entity inspector.
+- [x] **M7 Saves and tooling:** versioned saves, debug console, egui entity inspector.
 - [ ] **M8 Field of view:** recursive shadowcasting line of sight, visibility for the player and AI detection. Deferred from M6 by owner decision; detection was straight-line distance until then.
 
 After M7: inventory, stats, mutations, factions, quests, and layered worldgen.
