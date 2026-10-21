@@ -29,6 +29,7 @@ use crate::events::{Health, PART_HEALTH, PART_POSITION, PART_STATS, Position, St
 use crate::rng::SimRng;
 use crate::script_part::{PartValue, ScriptPart};
 use crate::turns::{ActorEnergy, PART_ENERGY};
+use crate::world::RenderTile;
 
 /// Current save format version. Public so callers and the console can name it.
 pub const SAVE_FORMAT_VERSION: u32 = 1;
@@ -105,6 +106,9 @@ pub struct SaveData {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SavedEntity {
     pub bits: u64,
+    /// Optional engine-owned render identity (not a packageable PartMap part).
+    #[serde(default)]
+    pub render: Option<String>,
     /// `(part type name, toml::Value as canonical TOML text)`.
     pub parts: Vec<(String, String)>,
 }
@@ -386,7 +390,16 @@ pub fn snapshot_entities(broker: &EntityBroker, hooks: &SaveHooks) -> Result<Sna
             let value = hooks.snapshot(id, part)?;
             parts.push((id.as_str().to_string(), toml_value_to_text(&value)?));
         }
-        entities.push(SavedEntity { bits, parts });
+        let render = broker
+            .world()
+            .get::<&RenderTile>(entity)
+            .ok()
+            .map(|tile| tile.tile.clone());
+        entities.push(SavedEntity {
+            bits,
+            render,
+            parts,
+        });
     }
     Ok(Snapshot {
         next_entity_bits,
@@ -402,6 +415,15 @@ pub fn restore_broker(data: &SaveData, hooks: &SaveHooks) -> Result<EntityBroker
     let mut broker = EntityBroker::new();
     for saved in &data.entities {
         let entity = broker.spawn_at(saved.bits);
+        if let Some(tile) = &saved.render {
+            broker
+                .world_mut()
+                .insert_one(entity, RenderTile { tile: tile.clone() })
+                .map_err(|e| SaveError::PartRestore {
+                    name: "Render".into(),
+                    msg: format!("failed to restore render tile: {e}"),
+                })?;
+        }
         for (name, text) in &saved.parts {
             let value =
                 toml::from_str::<toml::Value>(text).map_err(|e| SaveError::PartRestore {
@@ -690,6 +712,7 @@ mod tests {
             entities: vec![
                 SavedEntity {
                     bits: 1,
+                    render: None,
                     parts: vec![
                         part(
                             "Position",
@@ -709,6 +732,7 @@ mod tests {
                 },
                 SavedEntity {
                     bits: 2,
+                    render: None,
                     parts: vec![part("ActorEnergy", toml::Value::Integer(100))],
                 },
             ],
