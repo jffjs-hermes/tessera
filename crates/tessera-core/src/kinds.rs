@@ -237,7 +237,7 @@ pub fn register_all(registry: &mut PartRegistry) -> Result<(), PartError> {
 }
 
 /// A `PartFactory` deserializing the raw `toml::Value` payload into `T`.
-fn build<T>(value: &toml::Value) -> Result<Box<dyn Part>, PartError>
+pub(crate) fn build<T>(value: &toml::Value) -> Result<Box<dyn Part>, PartError>
 where
     T: serde::de::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
 {
@@ -251,7 +251,9 @@ where
     Ok(Box::new(t))
 }
 
-fn register<T>(registry: &mut PartRegistry, name: &str) -> Result<(), PartError>
+/// Register `T` as a `Dynamic` part under `name` (shared by the kind parts
+/// and the effect/status parts).
+pub(crate) fn register<T>(registry: &mut PartRegistry, name: &str) -> Result<(), PartError>
 where
     T: serde::de::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
 {
