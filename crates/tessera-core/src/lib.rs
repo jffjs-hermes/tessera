@@ -7,6 +7,7 @@
 pub mod blueprints;
 pub mod ecs;
 pub mod events;
+pub mod kinds;
 pub mod path;
 pub mod rng;
 pub mod save;
