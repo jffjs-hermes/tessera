@@ -244,28 +244,7 @@ impl Devtools {
             egui::Window::new("Console")
                 .default_size([560.0, 320.0])
                 .show(ctx, |ui| {
-                    // Transcript, auto-scrolled to the newest line.
-                    egui::ScrollArea::vertical()
-                        .stick_to_bottom(true)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            for line in &self.panel.transcript {
-                                ui.monospace(line);
-                            }
-                        });
-                    // Input line at the bottom; Enter submits.
-                    let resp = ui.add(
-                        egui::TextEdit::singleline(&mut self.panel.input)
-                            .hint_text("> type a command")
-                            .desired_width(f32::INFINITY)
-                            .font(egui::TextStyle::Monospace),
-                    );
-                    let enter =
-                        resp.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter));
-                    if enter {
-                        self.panel.submit(sim, cc);
-                        resp.request_focus();
-                    }
+                    console_window_body(ui, &mut self.panel, |panel| panel.submit(sim, cc));
                 });
         }
         if self.inspector_visible {
@@ -277,6 +256,56 @@ impl Devtools {
             inspector::show_window(ctx, &snap, &mut self.inspector_selected);
         }
     }
+}
+
+/// Build the console window's content: the transcript scroll area on top, and
+/// the single-line input row pinned to the *bottom edge* of the window.
+///
+/// The input must stay fully inside the window: a bottom [`Panel`] claims a
+/// strip at the bottom of the available rect (sized to the field's natural
+/// row height + frame) and clips its contents, so the field can never draw or
+/// claim focus past the window's bottom edge. A plain vertical `ScrollArea`
+/// above it would claim the *whole* remaining height (its enabled axis fills
+/// available space — see `auto_shrink(false)` semantics), which is what pushed
+/// the input off the bottom edge before (regression pinned by
+/// `console_input_stays_inside_window`).
+///
+/// `on_enter` runs when the user presses Enter in the field; in the windowed
+/// demo it submits the line through the sim, and in tests it's a no-op so the
+/// layout can be exercised headlessly (a full `Devtools` needs a live window
+/// + GPU). Enter still re-focuses the field after submission.
+fn console_window_body(
+    ui: &mut egui::Ui,
+    panel: &mut console::ConsolePanel,
+    mut on_enter: impl FnMut(&mut console::ConsolePanel),
+) -> egui::Response {
+    let resp = egui::Panel::bottom("console_input")
+        .show(ui, |ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut panel.input)
+                    .hint_text("> type a command")
+                    .desired_width(f32::INFINITY)
+                    .font(egui::TextStyle::Monospace),
+            );
+            let enter = resp.lost_focus() && ui.ctx().input(|i| i.key_pressed(egui::Key::Enter));
+            if enter {
+                on_enter(panel);
+                resp.request_focus();
+            }
+            resp
+        })
+        .inner;
+    // Transcript, auto-scrolled to the newest line; fills the window above
+    // the input row.
+    egui::ScrollArea::vertical()
+        .stick_to_bottom(true)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for line in &panel.transcript {
+                ui.monospace(line);
+            }
+        });
+    resp
 }
 
 #[cfg(all(test, feature = "devtools"))]
@@ -300,5 +329,65 @@ mod tests {
         assert_eq!(toggle_for_key(&Key::Character("s".into())), None);
         assert_eq!(toggle_for_key(&Key::Named(NamedKey::ArrowUp)), None);
         assert_eq!(toggle_for_key(&Key::Character("1".into())), None);
+    }
+
+    /// The console input row is laid out inside the window's bottom edge.
+    ///
+    /// Regression test for "egui console text input extends below window
+    /// bottom edge": the pre-fix layout added the input *after* the full
+    /// transcript `ScrollArea`, and a vertical scroll area claims the whole
+    /// remaining height, so the field landed below the window's inner rect.
+    /// The bottom `Panel` anchors the field to the window's bottom edge and
+    /// clips it there. The layout is exercised headlessly through a real egui
+    /// pass (a full `Devtools` needs a window + GPU, but the panel layout is
+    /// plain egui and runs without one).
+    #[test]
+    fn console_input_stays_inside_window() {
+        let ctx = egui::Context::default();
+        let mut panel = console::ConsolePanel::new();
+        panel.transcript.push("> type a command".into());
+
+        let mut input_bottom = None;
+        let mut content_bottom = None;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+
+        // Window + panel sizes are persisted across passes in the Context
+        // (the panel stores its rect, the window its fade), so run a few
+        // frames and read the settled geometry — same as egui's own tests.
+        for _ in 0..3 {
+            let raw = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(raw, |ui| {
+                egui::Window::new("Console")
+                    .id(egui::Id::unique("console_test"))
+                    .default_size([560.0, 320.0])
+                    .show(ui.ctx(), |ui| {
+                        content_bottom = Some(ui.available_rect_before_wrap().bottom());
+                        let input = console_window_body(ui, &mut panel, |_| {});
+                        input_bottom = Some(input.rect.bottom());
+                    });
+            });
+            output.drop_without_applying_deltas();
+        }
+
+        let content_bottom = content_bottom.expect("the console window should have been shown");
+        let input_bottom = input_bottom.expect("the console input should have been laid out");
+
+        // The input row's bottom edge must sit at or above the window
+        // content's bottom edge (a small tolerance for rounding).
+        assert!(
+            input_bottom <= content_bottom + 0.5,
+            "console input bottom ({input_bottom}) must not extend below the window content \
+             bottom ({content_bottom})"
+        );
+        // And it must actually sit in the bottom strip of the window (the
+        // panel pushes it to the bottom edge) rather than floating mid-window.
+        assert!(
+            input_bottom > content_bottom - 80.0,
+            "console input bottom ({input_bottom}) should be near the window content bottom \
+             ({content_bottom})"
+        );
     }
 }
