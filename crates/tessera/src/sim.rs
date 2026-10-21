@@ -493,8 +493,14 @@ impl Sim {
                 current: zone.id,
             });
         }
-        // Restore the broker at exact saved entity ids with all parts.
-        let broker = Arc::new(RwLock::new(restore_broker(&data, hooks)?));
+        // Restore the broker at exact saved entity ids with all parts. Keep a
+        // bridge's existing Arc and replace its contents in place: all of the
+        // host's WorldAccess clones then observe the same broker as the sim.
+        let restored_broker = restore_broker(&data, hooks)?;
+        let broker = bridge
+            .as_ref()
+            .map(ScriptBridge::broker)
+            .unwrap_or_else(|| Arc::new(RwLock::new(EntityBroker::new())));
 
         // Restore the scheduler state of record: clock + (entity, energy,
         // speed). Fail closed on an entity id that no longer resolves.
@@ -522,6 +528,12 @@ impl Sim {
                     name: "Player".into(),
                     msg: "save has no valid player entity".into(),
                 })?;
+
+        if let Some(b) = &bridge {
+            b.replace_broker(restored_broker);
+        } else {
+            *broker.write().unwrap_or_else(|p| p.into_inner()) = restored_broker;
+        }
 
         // Live context over the restored broker, re-registering the default
         // handlers (never saved — wiring is re-created at zone start).

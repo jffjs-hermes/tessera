@@ -106,6 +106,16 @@ fn spawn_actor(world: &World, broker: &mut EntityBroker, bp: &str, x: i32, y: i3
 /// shipped scripts (minus the leaf names in `skip`) loaded and a world-state
 /// singleton installed (respawn anchor). Returns the sim and shared broker.
 fn build_sim_skipping(gbx: i32, gby: i32, skip: &[&str]) -> (Sim, Arc<RwLock<EntityBroker>>) {
+    let (sim, broker, _world) = build_sim_with_world(gbx, gby, skip);
+    (sim, broker)
+}
+
+/// Build a scripted sim and retain its blueprint world for save hooks.
+fn build_sim_with_world(
+    gbx: i32,
+    gby: i32,
+    skip: &[&str],
+) -> (Sim, Arc<RwLock<EntityBroker>>, Arc<World>) {
     let vfs = DirVfs::new(PathBuf::from(DATA));
     let broker: Arc<RwLock<EntityBroker>> = Arc::new(RwLock::new(EntityBroker::new()));
     let bridge = ScriptBridge::new(broker.clone());
@@ -130,10 +140,8 @@ fn build_sim_skipping(gbx: i32, gby: i32, skip: &[&str]) -> (Sim, Arc<RwLock<Ent
         player,
         Some(goblin),
     );
-    (sim, broker)
+    (sim, broker, world)
 }
-
-/// Build the sim with every shipped script loaded.
 fn build_sim(gbx: i32, gby: i32) -> (Sim, Arc<RwLock<EntityBroker>>) {
     build_sim_skipping(gbx, gby, &[])
 }
@@ -380,6 +388,51 @@ fn goblin_respawns_after_exactly_five_player_turns() {
         "goblin must respawn on exactly the 5th player turn after death (turn {} after)",
         sim.player_turns_public() - dead_turn
     );
+}
+
+/// Save/load must preserve the single broker shared by the sim and scripts.
+/// The respawned goblin must both render and take a turn after the reload.
+#[test]
+fn loaded_sim_scripted_goblin_respawn_uses_live_broker() {
+    let (mut sim, broker, world) = build_sim_with_world(3, 1, &[]);
+    let hooks = world.save_hooks();
+    let save = sim.save(&hooks).expect("save scripted sim");
+    sim.restore_from_save(save, &hooks)
+        .expect("restore scripted sim");
+
+    let before = sim.renderables();
+    assert!(!before.is_empty(), "loaded actors must remain renderable");
+
+    let mut guard = 0;
+    while creature_count(&broker) > 1 && guard < 60 {
+        sim.submit_action(PlayerAction::Move { dx: 1, dy: 0 })
+            .expect("loaded sim should accept movement");
+        guard += 1;
+        if goblin_adjacent(&broker) {
+            let mut zaps = 0;
+            while creature_count(&broker) > 1 && zaps < 10 {
+                sim.submit_action(PlayerAction::Zap)
+                    .expect("loaded sim should accept attack");
+                zaps += 1;
+            }
+            break;
+        }
+    }
+    assert_eq!(creature_count(&broker), 1, "goblin must die after reload");
+
+    for _ in 0..5 {
+        sim.submit_action(PlayerAction::Wait)
+            .expect("loaded sim should accept respawn wait");
+    }
+    assert_eq!(
+        creature_count(&broker),
+        2,
+        "goblin must respawn after reload"
+    );
+    let after = sim.renderables();
+    assert!(after.len() >= before.len(), "respawned goblin must render");
+    sim.submit_action(PlayerAction::Wait)
+        .expect("respawned goblin turn must dispatch after reload");
 }
 
 /// Full map (no walkable-empty tile): the respawn stays pending and the sim
