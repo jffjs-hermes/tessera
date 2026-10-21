@@ -1,0 +1,18 @@
+# Tessera campaign mod: the Shield Bash vertical slice content.
+#
+# Adds the S0 content-schema proof set — the `Ability_ShieldBash` ability
+# (fully declarative: `Damage` + `Effect` parts, no ability script),
+# the `Status_Staggered` status (skip-turns control modifier), and a
+# `Tuning_Combat` table the headless assertion script reads through
+# `engine.tuning()`. It also patches the base `Player` (grants the ability)
+# and the base `Goblin` (raises HP so a bash demonstrably drops HP without
+# killing the target) in memory; base files on disk are never touched.
+#
+# `id` and `version` are required; `api` must equal the engine's api version.
+# Base is the implicit first mod and is *not* declared as a dependency (naming
+# `base` as a dependency is illegal — it is always present and always first).
+id      = "tessera-campaign"
+version = "0.1.0"
+api     = 1
+title   = "Tessera Campaign"
+authors = ["jeff"]

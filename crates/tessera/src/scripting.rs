@@ -241,8 +241,10 @@ impl SimWorldAccess {
     /// Serialize a part's visible fields into the plain `PartValue` form the
     /// host snapshot and `engine.get_part` consume. A scripted `ScriptPart`
     /// returns its closed field map; the demo's writable native part
-    /// (`Health`) returns its `hp` field. Other native parts read as `None`
-    /// (invisible to scripts in v1).
+    /// (`Health`) returns its `hp` field; the S0 effect runtime's native
+    /// parts expose read-only snapshots: `Charges` (max/recharge/charges)
+    /// and `StatusEffects` (status id → skip-turn credit owed). Other native
+    /// parts read as `None` (invisible to scripts in v1).
     fn serialize(part: &dyn Part) -> Option<BTreeMap<String, PartValue>> {
         if let Some(sp) = part.as_any().downcast_ref::<ScriptPart>() {
             return Some(sp.0.clone());
@@ -252,6 +254,27 @@ impl SimWorldAccess {
                 "hp".to_string(),
                 PartValue::Int(h.hp as i64),
             )]));
+        }
+        if let Some(c) = part
+            .as_any()
+            .downcast_ref::<tessera_core::effects::Charges>()
+        {
+            return Some(BTreeMap::from([
+                ("max".to_string(), PartValue::Int(c.max)),
+                ("recharge".to_string(), PartValue::Int(c.recharge)),
+                ("charges".to_string(), PartValue::Int(c.charges)),
+            ]));
+        }
+        if let Some(st) = part
+            .as_any()
+            .downcast_ref::<tessera_core::effects::StatusEffects>()
+        {
+            return Some(
+                st.skip_turn_map()
+                    .into_iter()
+                    .map(|(k, v)| (k, PartValue::Int(v)))
+                    .collect(),
+            );
         }
         None
     }
@@ -621,6 +644,13 @@ impl ScriptBridge {
     /// Install the blueprint `World` (once loaded) for `engine.spawn_at`.
     pub fn set_world(&self, world: Arc<World>) {
         self.shared.set_world(world);
+    }
+
+    /// The currently installed blueprint `World` (hot-reloadable; the native
+    /// effect runtime resolves through its library, so reloads swap the
+    /// definitions new applications see).
+    pub fn world(&self) -> Option<Arc<World>> {
+        self.shared.read_world()
     }
 
     /// Bump the shared player-turn clock (once per submitted player action).

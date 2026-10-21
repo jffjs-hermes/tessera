@@ -44,7 +44,11 @@ use hecs::Entity;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::events::{ActorTurnStart, Attack, EventError, EventOutcome, Move, Point, SimContext};
+use crate::ecs::PartTypeId;
+use crate::effects::{Abilities, PART_ABILITIES, consume_skip_turn};
+use crate::events::{
+    ActorTurnStart, Attack, EventError, EventOutcome, Move, Point, SimContext, UseAbility,
+};
 
 // ---------------------------------------------------------------------------
 // Constants and the part
@@ -174,6 +178,11 @@ pub enum TurnAction {
     MoveTo(Point),
     /// Attack `defender`, dispatching an [`Attack`] (cost 1×).
     Attack(Entity),
+    /// Use the actor's first granted ability (its `Abilities.list` entry, in
+    /// declared order) on `target`, dispatching [`UseAbility`] (cost 1×). The
+    /// declarative resolution is native (`tessera-core` effect runtime); an
+    /// actor with no granted ability cancels the turn without charge.
+    UseAbility { target: Entity },
     /// A caller-defined action with an explicit integer cost multiple (e.g. 2
     /// for a slow weapon). No event is dispatched; used for debt-boundary
     /// tests and future cost-carrying content.
@@ -186,6 +195,7 @@ impl TurnAction {
     pub fn cost(&self) -> u32 {
         match self {
             TurnAction::Wait | TurnAction::MoveTo(_) | TurnAction::Attack(_) => 1,
+            TurnAction::UseAbility { .. } => 1,
             TurnAction::Costed { cost } => *cost,
         }
     }
@@ -372,6 +382,12 @@ impl Scheduler {
     /// `from` for a [`TurnAction::MoveTo`] is read from the actor's `Position`
     /// part. A cancelled action leaves energy untouched and the actor becomes
     /// ready again next window.
+    ///
+    /// A staggered actor (any live status carrying skip-turn credits) wastes
+    /// its upcoming action: the first credit is consumed between the turn
+    /// hook and the action dispatch, and the action becomes a [`TurnAction::Wait`]
+    /// (deterministic first-match order). This is the scheduler seam the
+    /// skip-turns control modifier is observed through.
     pub fn take_turn(
         &mut self,
         ctx: &mut SimContext,
@@ -384,6 +400,13 @@ impl Scheduler {
 
         // Hook point: observers/AI see the turn start regardless of outcome.
         ctx.dispatch(ActorTurnStart { actor })?;
+
+        // A staggered actor's next scheduled action is consumed by the
+        // stagger: replace it with a Wait (the actor wastes the turn).
+        let mut action = action;
+        if consume_skip_turn(ctx, actor) {
+            action = TurnAction::Wait;
+        }
 
         // Dispatch the actor's action event; a cancelled action charges nothing.
         let cancelled = match action {
@@ -406,6 +429,28 @@ impl Scheduler {
                     })?,
                     EventOutcome::Cancelled { .. }
                 )
+            }
+            TurnAction::UseAbility { target } => {
+                // The ability id is the actor's first granted one (declared
+                // order); with no granted ability there is nothing to use and
+                // the turn cancels without charge.
+                let ability = {
+                    let broker = ctx.broker.read().unwrap_or_else(|p| p.into_inner());
+                    broker
+                        .typed_part::<Abilities>(actor, &PartTypeId::new(PART_ABILITIES))
+                        .and_then(|a| a.list.first().cloned())
+                };
+                match ability {
+                    Some(id) => matches!(
+                        ctx.dispatch(UseAbility {
+                            user: actor,
+                            ability: id,
+                            target,
+                        })?,
+                        EventOutcome::Cancelled { .. }
+                    ),
+                    None => true,
+                }
             }
             TurnAction::Costed { .. } => false,
         };
@@ -691,6 +736,228 @@ mod tests {
         assert_eq!(ctx.position(e), Some(Position { x: 1, y: 1 }));
         // Actor remains ready and acts again next window without new energy.
         assert_eq!(s.ready(), [e]);
+    }
+
+    // ---- staggered skip (the scheduler seam) -------------------------
+
+    fn skip_modifiers() -> crate::effects::Modifiers {
+        let anchored = "payload = { skip_turns = 1 }";
+        let v: toml::Value = toml::from_str(anchored).expect("anchored");
+        v.get("payload")
+            .expect("payload key")
+            .clone()
+            .try_into()
+            .expect("modifiers")
+    }
+
+    #[test]
+    fn staggered_actor_skips_its_next_scheduled_action() {
+        use crate::ecs::PartTypeId;
+        use crate::effects::{PART_STATUS_EFFECTS, StatusEffects};
+        let (mut ctx, ents) = ctx_and_entities(&[100]);
+        let e = ents[0];
+        // Stamp a status store owing one skip credit (what a stagger
+        // application leaves behind).
+        let mut store = StatusEffects::new();
+        store.apply(
+            "Status_Staggered",
+            100,
+            crate::kinds::Stacking::Refresh,
+            &[],
+            skip_modifiers(),
+        );
+        ctx.broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert_part(e, PART_STATUS_EFFECTS, Box::new(store))
+            .unwrap();
+
+        let mut s = Scheduler::new();
+        s.add_actor(e, ActorEnergy::at_threshold(100));
+        s.advance_until_ready().unwrap();
+
+        // The actor would attack, but the stagger consumes the scheduled
+        // action: the resolved action is a Wait and a full turn is charged.
+        let rep = s
+            .take_turn(&mut ctx, e, TurnAction::Attack(e))
+            .expect("turn");
+        assert_eq!(rep.action, TurnAction::Wait, "stagger replaces the action");
+        assert!(rep.charged);
+        assert_eq!(rep.energy_after, 0, "the wasted turn costs normal energy");
+
+        // The credit is spent: the next turn acts normally again.
+        let store = ctx
+            .broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .typed_part::<StatusEffects>(e, &PartTypeId::new(PART_STATUS_EFFECTS))
+            .expect("store")
+            .clone();
+        assert_eq!(store.skip_turns("Status_Staggered"), 0, "credit consumed");
+        s.take_turn(&mut ctx, e, TurnAction::Attack(e))
+            .expect("turn");
+        assert_eq!(
+            s.energy(e),
+            Some(-TURN_THRESHOLD),
+            "a normal attack was charged"
+        );
+    }
+
+    #[test]
+    fn staggered_skip_is_inert_without_statuses() {
+        let (mut s, mut ctx, ents) = setup(&[100]);
+        let e = ents[0];
+        s.advance_until_ready().unwrap();
+        let rep = s
+            .take_turn(&mut ctx, e, TurnAction::Attack(e))
+            .expect("turn");
+        assert_eq!(
+            rep.action,
+            TurnAction::Attack(e),
+            "no store -> action stands"
+        );
+        assert!(rep.charged);
+    }
+
+    // ---- the UseAbility turn action -----------------------------------
+
+    /// A library with a charged, damaging Shield Bash (the S0 fixture shape
+    /// shared with the effect runtime tests).
+    fn ability_library() -> std::sync::Arc<std::sync::RwLock<crate::blueprints::BlueprintLibrary>> {
+        use crate::blueprints::BlueprintLibrary;
+        use crate::ecs::PartRegistry;
+        use crate::vfs::MemVfs;
+        let mut r = PartRegistry::new();
+        crate::kinds::register_all(&mut r).unwrap();
+        crate::effects::register_all(&mut r).unwrap();
+        let vfs = MemVfs::new().with(
+            "blueprints/fx.toml",
+            r##"
+[Ability_ShieldBash]
+parts.Ability = { name = "Shield Bash", kind = "active", target = "adjacent" }
+parts.Charges = { max = 3, recharge = 1200 }
+parts.Damage  = { lo = 3, hi = 6, dtype = "blunt", stat = "might", acc_bonus = 3 }
+parts.Effect  = { applies = ["Status_Staggered"], push = 1, script = "" }
+
+[Status_Staggered]
+parts.Status    = { name = "Staggered", duration = 100, stacking = "refresh" }
+parts.Modifiers = { skip_turns = 1 }
+"##,
+        );
+        let lib = BlueprintLibrary::load(&vfs, &r).expect("fixture library");
+        std::sync::Arc::new(std::sync::RwLock::new(lib))
+    }
+
+    #[test]
+    fn use_ability_turn_spends_one_charge_and_resolves_declaratively() {
+        use crate::effects::{Charges, PART_CHARGES, install_native_effects};
+        use crate::rng::SimRng;
+        let lib = ability_library();
+
+        let mut broker = EntityBroker::new();
+        let user = broker.spawn();
+        broker
+            .insert_part(user, PART_POSITION, Box::new(Position { x: 5, y: 5 }))
+            .unwrap();
+        let target = broker.spawn();
+        broker
+            .insert_part(target, PART_POSITION, Box::new(Position { x: 6, y: 5 }))
+            .unwrap();
+        broker
+            .insert_part(
+                user,
+                crate::effects::PART_ABILITIES,
+                Box::new(crate::effects::Abilities {
+                    list: vec!["Ability_ShieldBash".to_string()],
+                }),
+            )
+            .unwrap();
+        crate::effects::grant_ability_resources(
+            &mut broker,
+            &lib.read().unwrap_or_else(|p| p.into_inner()),
+            user,
+            "Ability_ShieldBash",
+        )
+        .expect("grant");
+
+        let mut ctx = SimContext::new(
+            broker,
+            crate::zone::tests::demo_zone(20, 10),
+            SimRng::from_seed(42),
+        );
+        install_native_effects(&mut ctx, lib);
+
+        let mut s = Scheduler::new();
+        s.add_actor(user, ActorEnergy::at_threshold(100));
+        s.advance_until_ready().unwrap();
+
+        let rep = s
+            .take_turn(&mut ctx, user, TurnAction::UseAbility { target })
+            .expect("turn");
+        assert!(rep.charged, "a resolved ability use charges the turn");
+        assert_eq!(rep.action, TurnAction::UseAbility { target });
+
+        // The native resource path decremented the pool 3 -> 2.
+        let pool = ctx
+            .broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .typed_part::<Charges>(user, &PartTypeId::new(PART_CHARGES))
+            .expect("pool")
+            .clone();
+        assert_eq!(pool.charges, 2);
+
+        // The declarative seam resolved: the target was pushed one tile away
+        // and carries the applied status (stagger skip owed).
+        assert_eq!(ctx.position(target), Some(Position { x: 7, y: 5 }));
+        let store = ctx
+            .broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .typed_part::<crate::effects::StatusEffects>(
+                target,
+                &PartTypeId::new(crate::effects::PART_STATUS_EFFECTS),
+            )
+            .expect("status store")
+            .clone();
+        assert!(store.has("Status_Staggered"));
+        assert_eq!(store.skip_turns("Status_Staggered"), 1);
+    }
+
+    #[test]
+    fn use_ability_turn_cancels_without_a_granted_ability() {
+        use crate::effects::{Charges, PART_CHARGES, install_native_effects};
+        use crate::rng::SimRng;
+        let lib = ability_library();
+        let mut broker = EntityBroker::new();
+        let user = broker.spawn();
+        let target = broker.spawn();
+
+        let mut ctx = SimContext::new(
+            broker,
+            crate::zone::tests::demo_zone(20, 10),
+            SimRng::from_seed(42),
+        );
+        install_native_effects(&mut ctx, lib);
+
+        let mut s = Scheduler::new();
+        s.add_actor(user, ActorEnergy::at_threshold(100));
+        s.advance_until_ready().unwrap();
+
+        // No Abilities part -> nothing to use: the turn cancels without
+        // charge, and no pool is ever created.
+        let rep = s
+            .take_turn(&mut ctx, user, TurnAction::UseAbility { target })
+            .expect("turn");
+        assert!(!rep.charged, "no granted ability -> cancelled, no charge");
+        assert_eq!(rep.energy_after, TURN_THRESHOLD);
+        assert!(
+            ctx.broker
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .typed_part::<Charges>(user, &PartTypeId::new(PART_CHARGES))
+                .is_none()
+        );
     }
 
     // ---- Mid-window speed change takes effect next tick -------------
