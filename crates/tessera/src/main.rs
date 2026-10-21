@@ -106,8 +106,11 @@ fn parse_args() -> Result<Args> {
                      \n\
                      Interactive: arrow keys / WASD / hjklyubn or numpad to move (all 8\n\
                      directions, numpad 5 = wait), `.` / Space = wait,\n\
-                     E = Zap (Attack toward the last faced direction), Esc to quit.\n\
+                     E = Zap (Attack toward the last faced direction), X = Bash (use the first\n\
+                     granted ability on the reference enemy), Esc to quit.\n\
                      `--headless <n>`: run n scripted actions with no window, print final map + event log, exit 0.\n\
+                     The headless script includes one Bash step, so the event log shows the\n\
+                     declarative ability path in order: UseAbility -> TakeDamage(blunt) -> ApplyStatus.\n\
                      `--zone <id>`: load the named zone (defaults to the single zone in the pack).\n\
                      `--mods <dir>`: discover local directory / zip mods (default data/mods);\n\
                      base data loads first, then each mod in deterministic load order.\n\
@@ -446,6 +449,7 @@ fn key_to_action(physical: PhysicalKey, logical: &Key) -> Option<PlayerAction> {
             "b" => Some(PlayerAction::Move { dx: -1, dy: 1 }),
             "n" => Some(PlayerAction::Move { dx: 1, dy: 1 }),
             "e" => Some(PlayerAction::Zap),
+            "x" => Some(PlayerAction::Bash),
             "." | " " => Some(PlayerAction::Wait),
             _ => None,
         },
@@ -746,6 +750,12 @@ fn main() -> Result<()> {
                     "mod demo: Bogling spawned with sample-mod Charge; Goblin tile+strength patched"
                 );
             }
+            if lib.contains("Ability_ShieldBash") {
+                println!(
+                    "campaign demo: Ability_ShieldBash armed from tessera-campaign (3 charges); \
+                     the Bash step's event log shows UseAbility -> TakeDamage(blunt) -> ApplyStatus(Status_Staggered)"
+                );
+            }
         }
         return Ok(());
     }
@@ -951,6 +961,16 @@ mod tests {
         assert_eq!(
             key_to_action(other(), &Key::Character("e".into())),
             Some(PlayerAction::Zap)
+        );
+    }
+
+    #[test]
+    fn bash_key_maps_to_the_ability_action() {
+        // X = Bash: use the first granted ability on the reference enemy
+        // (the S0 declarative Shield Bash path).
+        assert_eq!(
+            key_to_action(other(), &Key::Character("x".into())),
+            Some(PlayerAction::Bash)
         );
     }
 

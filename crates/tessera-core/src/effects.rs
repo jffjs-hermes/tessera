@@ -229,6 +229,21 @@ impl Modifiers {
         self.stats.get(CONTROL_SKIP_TURNS).map_or(0, |m| m.add)
     }
 
+    /// Consume one skip-turn credit: decrement the control field's `add` by
+    /// one (never below zero) and report whether a credit was available.
+    /// This is the native decrement behind the scheduler's stagger seam —
+    /// each consumed credit wastes one scheduled action.
+    pub fn consume_skip_turn(&mut self) -> bool {
+        let Some(m) = self.stats.get_mut(CONTROL_SKIP_TURNS) else {
+            return false;
+        };
+        if m.add <= 0 {
+            return false;
+        }
+        m.add -= 1;
+        true
+    }
+
     /// Sorted stat entries — deterministic iteration for aggregation.
     pub fn entries(&self) -> impl Iterator<Item = (&String, AddPct)> + '_ {
         self.stats.iter().map(|(k, v)| (k, *v))
@@ -413,13 +428,45 @@ impl StatusEffects {
     }
 
     /// The total skip-turn control value across this entity's instances
-    /// (sum over instances; how the scheduler consumes it is later work —
-    /// S0's contract is that the value exists and is deterministic).
+    /// (sum over instances; the scheduler consumes one credit per skipped
+    /// action via [`Self::consume_skip_turn`]).
     pub fn skip_turns(&self, status: &str) -> i64 {
         self.instances(status)
             .iter()
             .map(|i| i.modifiers.skip_turns())
             .sum()
+    }
+
+    /// Consume one skip-turn credit from the first instance (in
+    /// deterministic order: status id sorted, then application order) that
+    /// still owes one. Returns whether a credit was consumed — this is the
+    /// scheduler seam through which a staggered actor wastes its next
+    /// scheduled action.
+    pub fn consume_skip_turn(&mut self) -> bool {
+        for instances in self.applied.values_mut() {
+            for inst in instances {
+                if inst.modifiers.consume_skip_turn() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// The script-visible snapshot of the store: status id → total
+    /// skip-turn credit owed (sorted). Whitelisted script reads use this to
+    /// assert presence and the stagger effect without seeing internal
+    /// instance bookkeeping (duration counts are native-only).
+    pub fn skip_turn_map(&self) -> BTreeMap<String, i64> {
+        self.applied
+            .iter()
+            .map(|(status, instances)| {
+                (
+                    status.clone(),
+                    instances.iter().map(|i| i.modifiers.skip_turns()).sum(),
+                )
+            })
+            .collect()
     }
 
     /// Decrement every instance by `dt` game-time units; remove and return
@@ -762,6 +809,19 @@ pub fn elapse_statuses(ctx: &mut SimContext, entity: Entity, dt: i64) -> Vec<Str
     }
     expired
 }
+
+/// The scheduler's stagger seam: consume one skip-turn credit from `entity`'s
+/// status store (deterministic first-match order) and report whether the
+/// entity's next scheduled action is skipped. The energy-clock scheduler
+/// calls this between the turn hook and the action dispatch — a staggered
+/// actor wastes its upcoming action rather than performing it.
+pub fn consume_skip_turn(ctx: &mut SimContext, entity: Entity) -> bool {
+    let mut broker = ctx.broker.write().unwrap_or_else(|p| p.into_inner());
+    match broker.typed_part_mut::<StatusEffects>(entity, &PartTypeId::new(PART_STATUS_EFFECTS)) {
+        Some(store) => store.consume_skip_turn(),
+        None => false,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1026,6 +1086,96 @@ parts.Modifiers = { skip_turns = 1 }
                 .statuses()
                 .next()
                 .is_none()
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // skip-turn consumption (the scheduler's stagger seam)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn consume_skip_turn_spends_one_credit_per_call() {
+        let mut store = StatusEffects::new();
+        store.apply(
+            "Status_Staggered",
+            100,
+            Stacking::Refresh,
+            &[],
+            toml_parse(r#"{ skip_turns = 1 }"#),
+        );
+        assert_eq!(store.skip_turns("Status_Staggered"), 1);
+
+        // The first consume reports the credit and zeroes the count.
+        assert!(store.consume_skip_turn());
+        assert_eq!(store.skip_turns("Status_Staggered"), 0);
+        // No credit left: further consumes report false and change nothing.
+        assert!(!store.consume_skip_turn());
+        assert_eq!(store.skip_turns("Status_Staggered"), 0);
+        // The status instance itself survives (only the control credit
+        // decrements) — expiry still bookkeeps normally.
+        assert!(store.has("Status_Staggered"));
+    }
+
+    #[test]
+    fn consume_skip_turn_is_deterministic_first_match() {
+        // Two statuses both owing one skip: consumption is (status id
+        // sorted, then application order) — Status_AAA before Status_BBB.
+        let mut store = StatusEffects::new();
+        store.apply(
+            "Status_BBB",
+            100,
+            Stacking::Refresh,
+            &[],
+            toml_parse(r#"{ skip_turns = 1 }"#),
+        );
+        store.apply(
+            "Status_AAA",
+            100,
+            Stacking::Refresh,
+            &[],
+            toml_parse(r#"{ skip_turns = 1 }"#),
+        );
+        assert!(store.consume_skip_turn());
+        assert_eq!(store.skip_turns("Status_AAA"), 0);
+        assert_eq!(
+            store.skip_turns("Status_BBB"),
+            1,
+            "sorted order consumes AAA first"
+        );
+        assert!(store.consume_skip_turn());
+        assert!(
+            !store.consume_skip_turn(),
+            "no credits left with no statuses"
+        );
+    }
+
+    #[test]
+    fn skip_turn_map_is_the_script_visible_snapshot() {
+        let mut store = StatusEffects::new();
+        store.apply(
+            "Status_Staggered",
+            100,
+            Stacking::Refresh,
+            &[],
+            toml_parse(r#"{ skip_turns = 1 }"#),
+        );
+        store.apply("Status_Haste", 50, Stacking::Independent, &[], mods());
+        let map = store.skip_turn_map();
+        assert_eq!(map.get("Status_Staggered"), Some(&1));
+        assert_eq!(map.get("Status_Haste"), Some(&0));
+        // Consuming the credit updates the snapshot (what a script reads on
+        // the next turn).
+        assert!(store.consume_skip_turn());
+        assert_eq!(store.skip_turn_map().get("Status_Staggered"), Some(&0));
+    }
+
+    #[test]
+    fn scheduler_seam_consume_reports_false_without_a_store() {
+        let mut ctx = effects_context();
+        let e = spawn(&mut ctx);
+        assert!(
+            !consume_skip_turn(&mut ctx, e),
+            "no status store -> nothing to skip"
         );
     }
 

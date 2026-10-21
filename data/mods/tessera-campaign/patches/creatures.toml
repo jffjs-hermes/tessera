@@ -1,0 +1,14 @@
+# Campaign patches: wire the Shield Bash proof into the base creatures, in
+# memory only (base files on disk are never touched).
+#
+# - Player: grant the Shield Bash ability. The native grant seam stamps the
+#   ability's `parts.Charges` pool onto the entity at spawn (`Abilities.list`),
+#   so `Ability_ShieldBash`'s declarative numbers drive the whole path.
+# - Goblin: raise HP 3 -> 20 so the headless demo shows a 3..6 blunt HP drop
+#   without killing the target (the bash must land, apply `Status_Staggered`
+#   and push — a dead target proves none of that).
+["Player"]
+merge = { "parts.Abilities" = { list = ["Ability_ShieldBash"] } }
+
+["Goblin"]
+merge = { "parts.Health.hp" = 20 }
