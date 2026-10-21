@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use mlua::Value;
 use tessera_core::events::Point;
+use tessera_core::kinds::{Percent, TuningValue};
 use tessera_core::script_part::PartValue;
 use tessera_core::zone::Zone;
 use tessera_script::{HostRng, PendingAction, ScriptError, ScriptHost, WorldAccess, WorldRead};
@@ -39,6 +40,8 @@ struct NavWorld {
     zone: Zone,
     player: u64,
     player_turns: Arc<Mutex<u64>>,
+    /// Tuning tables exposed to `engine.tuning` (merged values per table).
+    tuning: BTreeMap<String, BTreeMap<String, TuningValue>>,
 }
 
 impl NavWorld {
@@ -69,7 +72,29 @@ impl NavWorld {
             zone: small_zone(),
             player: 1,
             player_turns: Arc::new(Mutex::new(0)),
+            tuning: BTreeMap::new(),
         }
+    }
+
+    /// A nav world carrying one tuning table with all three value shapes
+    /// (integer, percent-of-integer, integer-list).
+    fn with_tuning() -> Self {
+        let mut w = Self::new();
+        w.tuning.insert(
+            "Tuning_Combat".to_string(),
+            BTreeMap::from([
+                ("base_hit".to_string(), TuningValue::Int(50)),
+                (
+                    "crit_percent".to_string(),
+                    TuningValue::Percent(Percent { pct: 150 }),
+                ),
+                (
+                    "speed_table".to_string(),
+                    TuningValue::IntList(vec![50, 90, 140]),
+                ),
+            ]),
+        );
+        w
     }
 
     fn snapshot(&self) -> PartStore {
@@ -232,6 +257,9 @@ impl WorldRead for NavWorld {
     }
     fn world_state(&self) -> Option<u64> {
         None
+    }
+    fn tuning_table(&self, table: &str) -> Option<BTreeMap<String, TuningValue>> {
+        self.tuning.get(table).cloned()
     }
 }
 
@@ -458,4 +486,121 @@ fn death_and_actor_turn_start_are_registrable() {
     let log = h.drain_log();
     assert!(log.iter().any(|l| l == "turn 1"), "{log:?}");
     let _ = nav;
+}
+
+/// `engine.tuning` reads a named table with all three typed shapes: integers,
+/// percent-of-integer tables and integer-list arrays. The read is a snapshot:
+/// the same call site sees authored values until a native override lands.
+#[test]
+fn tuning_binding_reads_int_pct_and_list() {
+    let nav = Arc::new(NavWorld::with_tuning());
+    let reader: Arc<dyn WorldRead> = nav.clone();
+    let mut h = ScriptHost::with_reader(Box::new((*nav).clone()), reader);
+    h.load_script(
+        "tuning-read",
+        "Bp",
+        r#"-- tessera-api: 1
+           engine.on("Move", engine.NORMAL, function(ev)
+             local t = engine.tuning("Tuning_Combat")
+             assert(t.base_hit == 50, "int value")
+             assert(t.crit_percent.pct == 150, "percent value")
+             assert(t.speed_table[1] == 50 and t.speed_table[3] == 140, "list values")
+             engine.log("tuning-ok")
+             return true
+           end)"#,
+    )
+    .expect("loads");
+    let res = h.dispatch("Move", 1, &[]);
+    assert_eq!(res.error_count(), 0, "{res:?}");
+    let log = h.drain_log();
+    assert!(log.contains(&"tuning-ok".to_string()), "{log:?}");
+}
+
+/// `engine.tuning` fails closed on a missing table and on a missing key
+/// (fail-closed reads: the error names the table and key).
+#[test]
+fn tuning_binding_missing_table_and_key_raise_script_errors() {
+    // A missing key raises inside the handler, naming the key and table.
+    let nav = Arc::new(NavWorld::with_tuning());
+    let reader: Arc<dyn WorldRead> = nav.clone();
+    let mut h = ScriptHost::with_reader(Box::new((*nav).clone()), reader);
+    h.load_script(
+        "tuning-missing-key",
+        "Bp",
+        r#"-- tessera-api: 1
+           engine.on("Move", engine.NORMAL, function(ev)
+             local t = engine.tuning("Tuning_Combat")
+             local _ = t.missing_key
+             return true
+           end)"#,
+    )
+    .expect("loads");
+    let res = h.dispatch("Move", 1, &[]);
+    assert_eq!(res.error_count(), 1, "{res:?}");
+    let msg_has_key = res.outcomes.iter().any(|o| {
+        matches!(
+            o,
+            tessera_script::HandlerOutcome::Errored {
+                error: ScriptError::Handler { msg, .. },
+            } if msg.contains("missing_key") && msg.contains("Tuning_Combat")
+        )
+    });
+    assert!(msg_has_key, "{res:?}");
+
+    // A missing table raises inside the handler, naming the table.
+    let nav = Arc::new(NavWorld::with_tuning());
+    let reader: Arc<dyn WorldRead> = nav.clone();
+    let mut h2 = ScriptHost::with_reader(Box::new((*nav).clone()), reader);
+    h2.load_script(
+        "tuning-missing-table",
+        "Bp",
+        r#"-- tessera-api: 1
+           engine.on("Move", engine.NORMAL, function(ev)
+             local t = engine.tuning("Tuning_Nope")
+             return true
+           end)"#,
+    )
+    .expect("loads");
+    let res = h2.dispatch("Move", 1, &[]);
+    assert_eq!(res.error_count(), 1, "{res:?}");
+    let msg_has_table = res.outcomes.iter().any(|o| {
+        matches!(
+            o,
+            tessera_script::HandlerOutcome::Errored {
+                error: ScriptError::Handler { msg, .. },
+            } if msg.contains("unknown tuning table 'Tuning_Nope'")
+        )
+    });
+    assert!(msg_has_table, "{res:?}");
+}
+
+/// The tuning binding is read-only: any write attempt raises a script error
+/// (scripts must not mutate authored or overridden tuning).
+#[test]
+fn tuning_binding_rejects_writes() {
+    let nav = Arc::new(NavWorld::with_tuning());
+    let reader: Arc<dyn WorldRead> = nav.clone();
+    let mut h = ScriptHost::with_reader(Box::new((*nav).clone()), reader);
+    h.load_script(
+        "tuning-write",
+        "Bp",
+        r#"-- tessera-api: 1
+           engine.on("Move", engine.NORMAL, function(ev)
+             local t = engine.tuning("Tuning_Combat")
+             t.base_hit = 60
+             return true
+           end)"#,
+    )
+    .expect("loads");
+    let res = h.dispatch("Move", 1, &[]);
+    assert_eq!(res.error_count(), 1, "{res:?}");
+    let msg_readonly = res.outcomes.iter().any(|o| {
+        matches!(
+            o,
+            tessera_script::HandlerOutcome::Errored {
+                error: ScriptError::Handler { msg, .. },
+            } if msg.contains("read-only")
+        )
+    });
+    assert!(msg_readonly, "{res:?}");
 }

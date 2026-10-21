@@ -90,6 +90,11 @@ pub struct World {
     /// names declared [`StorageClass::Component`] in [`Self::registry`]; kept
     /// here because the spawner's `SpawnError` lives in this module.
     spawners: BTreeMap<String, ComponentSpawner>,
+    /// Post-load tuning tables plus the validated override overlay. Rebuilt
+    /// from scratch on every [`Self::load`] (overrides are per-run policy, not
+    /// content, so a failed reload keeps the previous store with its previous
+    /// library).
+    tuning: RwLock<crate::tuning::TuningStore>,
 }
 
 impl Default for World {
@@ -129,6 +134,7 @@ impl World {
             library: Arc::new(RwLock::new(BlueprintLibrary::new())),
             registry,
             spawners: BTreeMap::new(),
+            tuning: RwLock::new(crate::tuning::TuningStore::default()),
         }
     }
 
@@ -201,10 +207,17 @@ impl World {
     /// [`crate::blueprints::LoadFail`] diagnostics (`file + id`) and leaves the
     /// previous library untouched — content can never break what's live.
     ///
-    /// Content-only by construction: this touches only the shared library, never
-    /// `SimRng` or existing entities.
+    /// The post-load tuning store is rebuilt from the fresh library *before*
+    /// the swap: a `parts.Tuning` payload that fails typed deserialization is
+    /// a load error too (fail-closed, so a reload rejects the batch and keeps
+    /// the previous library *and* the previous store together).
+    ///
+    /// Content-only by construction: this touches only the shared library and
+    /// the tuning store, never `SimRng` or existing entities.
     pub fn load(&self, vfs: &dyn Vfs) -> Result<(), crate::blueprints::LoadFail> {
         let fresh = BlueprintLibrary::load(vfs, &self.registry)?;
+        let fresh_tuning = crate::tuning::TuningStore::from_library(&fresh, &self.registry)
+            .map_err(crate::blueprints::LoadFail::single)?;
         let mut guard = self.library.write().map_err(|_| {
             crate::blueprints::LoadFail::single(crate::blueprints::BlueprintError::Io {
                 path: "blueprints".into(),
@@ -212,12 +225,55 @@ impl World {
             })
         })?;
         *guard = fresh;
+        drop(guard);
+        *self.tuning.write().map_err(|_| {
+            crate::blueprints::LoadFail::single(crate::blueprints::BlueprintError::Io {
+                path: "blueprints".into(),
+                source: std::io::Error::other("tuning store lock poisoned"),
+            })
+        })? = fresh_tuning;
         Ok(())
     }
 
     /// Shared handle to the current library (for read access / inspection).
     pub fn library(&self) -> &Arc<RwLock<BlueprintLibrary>> {
         &self.library
+    }
+
+    /// Merged values of one tuning table (authored + applied overrides),
+    /// sorted by key, or `None` when no such table is loaded.
+    pub fn tuning_values(
+        &self,
+        table: &str,
+    ) -> Option<BTreeMap<String, crate::kinds::TuningValue>> {
+        self.tuning
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .values(table)
+    }
+
+    /// The applied overrides in application order (run-output record).
+    pub fn tuning_applied(&self) -> Vec<crate::tuning::TuningOverride> {
+        self.tuning
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .applied_overrides()
+            .to_vec()
+    }
+
+    /// Apply one validated override triple to the post-load tuning overlay.
+    /// Unknown table/key and wrong-value-type all fail closed; authored
+    /// content is never mutated. The override is recorded for run output.
+    pub fn apply_tuning_override(
+        &self,
+        table: &str,
+        key: &str,
+        value: &toml::Value,
+    ) -> Result<(), crate::tuning::TuningError> {
+        self.tuning
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .apply_override(table, key, value)
     }
 
     /// The whitelist [`SaveHooks`] built from this world's registry: the

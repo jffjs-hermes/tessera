@@ -13,6 +13,7 @@ pub mod rng;
 pub mod save;
 pub mod script_part;
 pub mod tiles;
+pub mod tuning;
 pub mod turns;
 pub mod vfs;
 pub mod world;
