@@ -34,6 +34,7 @@ use anyhow::Result;
 use hecs::Entity;
 use tessera_core::ecs::{EntityBroker, Part, PartTypeId};
 use tessera_core::events::Health;
+use tessera_core::kinds::TuningValue;
 use tessera_core::script_part::{PartValue, ScriptPart};
 use tessera_core::turns::Scheduler;
 use tessera_core::world::World;
@@ -539,6 +540,11 @@ impl WorldRead for SimWorldAccess {
 
     fn world_state(&self) -> Option<u64> {
         self.shared.world_state()
+    }
+
+    fn tuning_table(&self, table: &str) -> Option<BTreeMap<String, TuningValue>> {
+        let world = self.shared.read_world()?;
+        world.tuning_values(table)
     }
 }
 

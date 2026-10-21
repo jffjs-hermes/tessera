@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mlua::{Function, Lua, MultiValue, Table, Value};
+use tessera_core::kinds::TuningValue;
 use tessera_core::script_part::PartValue;
 
 use crate::error::ScriptError;
@@ -305,6 +306,11 @@ pub trait WorldRead: Send + Sync + 'static {
     /// installed (the respawn-scheduling anchor for script policies). `None`
     /// when the load wiring has not created one.
     fn world_state(&self) -> Option<u64>;
+    /// Read-only tuning: the merged (authored + applied-override) values of
+    /// one tuning table, sorted by key, or `None` when no such table is
+    /// loaded. Fail-closed: scripts may not mutate tuning — the host wraps
+    /// the returned values in a read-only binding.
+    fn tuning_table(&self, table: &str) -> Option<BTreeMap<String, TuningValue>>;
 }
 
 /// A default [`WorldRead`] used when a host is built without a reader (tests /
@@ -351,6 +357,9 @@ impl WorldRead for DefaultWorldRead {
         None
     }
     fn world_state(&self) -> Option<u64> {
+        None
+    }
+    fn tuning_table(&self, _table: &str) -> Option<BTreeMap<String, TuningValue>> {
         None
     }
 }
@@ -842,6 +851,70 @@ impl ScriptHost {
         t.set(
             "world_state",
             lua.create_function(move |_, ()| Ok(world_read.world_state().map(|e| e as i64)))?,
+        )?;
+
+        // tuning -> read-only view of one typed tuning table. Returns a Lua
+        // proxy table; a missing table or missing key raises a script error
+        // (fail-closed, matching how the rest of the API treats absent
+        // keys). The proxy is deliberately empty: values live in a hidden
+        // source table captured by the metatable, so `__index` reads through
+        // to it (raising on unknown keys) and `__newindex` raises for every
+        // write — scripts can read tuning but never mutate it.
+        let world_read = shared.world_read.clone();
+        t.set(
+            "tuning",
+            lua.create_function(move |lua2, table: String| {
+                let values = world_read.tuning_table(&table).ok_or_else(|| {
+                    mlua::Error::RuntimeError(format!("unknown tuning table '{table}'"))
+                })?;
+                let src = lua2.create_table()?;
+                for (k, v) in values {
+                    let lv = match v {
+                        TuningValue::Int(n) => Value::Integer(n),
+                        TuningValue::Percent(p) => {
+                            let pct = lua2.create_table()?;
+                            pct.set("pct", p.pct)?;
+                            Value::Table(pct)
+                        }
+                        TuningValue::IntList(items) => {
+                            let list = lua2.create_table()?;
+                            for (i, n) in items.iter().enumerate() {
+                                list.set(i + 1, *n)?;
+                            }
+                            Value::Table(list)
+                        }
+                    };
+                    src.set(k, lv)?;
+                }
+                let proxy = lua2.create_table()?;
+                let meta = lua2.create_table()?;
+                let err_table = table.clone();
+                let src_meta = src.clone();
+                meta.set(
+                    "__index",
+                    lua2.create_function(move |_lua3, (proxy, k): (Table, String)| {
+                        let _ = proxy;
+                        match src_meta.get::<Value>(k.as_str()) {
+                            Ok(v) if v != Value::Nil => Ok(v),
+                            _ => Err(mlua::Error::RuntimeError(format!(
+                                "unknown tuning key '{k}' in tuning table '{err_table}'"
+                            ))),
+                        }
+                    })?,
+                )?;
+                let err_table = table.clone();
+                meta.set(
+                    "__newindex",
+                    lua2.create_function(move |_, (_t, k, _v): (Table, String, Value)| {
+                        Err::<(), _>(mlua::Error::RuntimeError(format!(
+                            "tuning table '{err_table}.{k}' is read-only \
+                             (apply overrides natively)"
+                        )))
+                    })?,
+                )?;
+                proxy.set_metatable(Some(meta))?;
+                Ok(proxy)
+            })?,
         )?;
 
         // Actions queue a pending turn action / spawn-at; the sim resolves

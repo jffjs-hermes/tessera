@@ -38,4 +38,6 @@ egui-winit = { version = "0.37", optional = true, default-features = false, feat
 egui-wgpu = { version = "0.37", optional = true, default-features = false, features = ["winit"] }
 
 [dev-dependencies]
+tempfile = "3.27.0"
+toml = "1.1.8"
 zip = { version = "6", default-features = false, features = ["deflate"] }
