@@ -16,7 +16,7 @@ Scripting: Luau via mlua. Desktop only. Native code owns primitives, invariants,
 - [x] **M6** Zones/chunks, cave worldgen, pathfinding, basic AI
   - M6 includes the playable demo: a goblin that wanders, chases within 10 tiles, and respawns; the player respawns at the start tile.
 - [x] **M7** Versioned saves, debug console, entity inspector
-- [ ] **M8** Field of view: recursive shadowcasting line of sight, player and AI visibility, FOV-based detection (replaces straight-line distance for detection)
+- [ ] **M8** Field of view: recursive shadowcasting line of sight, player and AI visibility, FOV-based detection (replaces straight-line distance for detection); render the visible-tile set for the player, not detection logic alone.
 
 Execution order: M4, M6 (world slice and demo), M5 (mod loader), M7, M8. M8 may run in parallel with S1–S6; the slice starts after M8 in dependency order, while S1–S6 do not require waiting for FOV except where noted.
 
@@ -43,6 +43,7 @@ Execution order: M4, M6 (world slice and demo), M5 (mod loader), M7, M8. M8 may 
 - **Subsystems and boundary:** `tessera-core` event bus, scheduler, parts and save hooks; `tessera-script` combat rules and tuning; console/inspector for equipment. Native owns legal targeting, occupancy, roll ordering, integer damage, and invariant-safe health changes. Scripts own hit formulas, resistance policy, and item tuning.
 - **Dependencies and missing capability:** follows S1; equipment/inventory, typed hit-resolution events, damage types, tier/quality, and save serialization do not exist. Add named combat RNG fork without changing unrelated streams and plan a save version bump.
 - **Harness and acceptance:** headless scenarios, build data, naive/expert bots, seeded repeated runs, and doorway/open bands form phase 1; Knight versus three goblins must be reproducible and inside approved bands.
+- **Human UI acceptance:** equipment is viewable and wieldable in the running build, not only inspector-visible.
 - **Decomposition hint:** event pipeline, equipment/item parts and save support, then Knight content plus scenario runner/bots/tests.
 
 ### S3 — Abilities and statuses (Knight skills)
@@ -51,6 +52,7 @@ Execution order: M4, M6 (world slice and demo), M5 (mod loader), M7, M8. M8 may 
 - **Subsystems and boundary:** extend events and energy scheduler for wind-up timing; add target queries and cell-property hooks in world; extend Luau bindings for declarative effects and special scripts. Native owns target legality, timing, status lifecycle, and deterministic ordering; scripts own ability rules, scaling, and policy.
 - **Dependencies and missing capability:** S0 schema and S2 combat are required. The current engine cannot represent statuses, pending actions, area targets, terrain tags, charges, or interrupts. Save active statuses and pending wind-ups with a version bump; use a status RNG stream where rolls exist.
 - **Harness and acceptance:** phase 2 adds status/ability metrics, Knight bands, and seeded wind-up cancellation tests.
+- **Human UI acceptance:** ability targeting and status display are visible in the running build; headless band checks remain required.
 - **Decomposition hint:** scheduler/wind-up seam, status model/events, then target/effect API and Knight ability content with tests.
 
 ### S4 — Skills and progression
@@ -60,6 +62,14 @@ Execution order: M4, M6 (world slice and demo), M5 (mod loader), M7, M8. M8 may 
 - **Dependencies and missing capability:** follows S3; current engine has no progression, character build, teacher, or XP state. Save schema must preserve learned ranks and XP, and replay output must include build decisions.
 - **Harness and acceptance:** create a Knight, reach level 5, learn ranks II/III through a teacher stub, and verify deterministic budget totals; extend build fixtures for later classes.
 - **Decomposition hint:** progression parts/rules, build/teacher console path, then save/replay and headless progression tests.
+
+### S4b — Game UI shell (parallel with M8)
+
+- **Gap and surface:** the slice needs a human-playable view and control layer, not only debug visibility. Add a HUD for HP, statuses, charges/cooldowns, and a message log; an ability bar with adjacent/line/area targeting mode; equipment/inventory screens; a real character-creation screen for S4's Knight/class/race flow; and new-game/continue menus over the M7 save system.
+- **Subsystems and boundary:** native egui presentation and input plumbing over the same event bus used by the headless sim. The game UI is a view/control layer over that event bus: it never owns simulation state, feeds the RNG, or decides invariants; player input enters as plain events. Native owns widget/layout primitives and event translation; the sim and scripts retain state, rules, policy, and tuning.
+- **Dependencies and missing capability:** runs in the M8 parallel band and consumes the event, ability, equipment, progression, and save capabilities as they land. The current console/inspector path is not a human entry point, and no usable HUD, menus, inventory surface, character creation, targeting mode, or action log exists.
+- **Harness and acceptance:** exercise every surface in a desktop build: start or continue a game, create a Knight, inspect and wield gear, select an ability and target adjacent/line/area cells, observe HP/status/charge changes and messages, and save/continue without changing seeded simulation outcomes. Keep headless UI-independent scenarios and event assertions.
+- **Decomposition hint:** 2–3 builder cards, each 300–500 changed lines: (1) HUD, message log, and input plumbing; (2) menus, character creation, and equipment/inventory screens; (3) targeting mode and ability bar.
 
 ### S5 — Cleric
 
@@ -114,7 +124,7 @@ Execution order: M4, M6 (world slice and demo), M5 (mod loader), M7, M8. M8 may 
 - **Gap and surface:** wire the campaign mod, four classes, village through graveyard/cave/ruins, teachers, combat, stealth, loot, quests, saves, and the final story piece into one playable path. This is integration and tuning, not a new general-purpose subsystem.
 - **Subsystems and boundary:** all crates and VFS/mod loading; final UI/readability and save/replay checks. Keep native/script ownership from earlier entries; resolve only integration seams, missing invariants, and content wiring.
 - **Dependencies and missing capability:** all prior slice work is required. Explicitly audit that capabilities are shipped data and used by the running build (not merely tested in isolation), and that saves restore visible render tiles and gameplay state.
-- **Harness and acceptance:** run one full seeded playthrough per class, phase-5 gauntlets/sweeps and band checks, then record known issues; use deterministic replay and draw-cell assertions for visibility.
+- **Harness and acceptance:** complete an explicit full HUMAN playthrough per class, plus phase-5 gauntlets/sweeps and band checks, then record known issues; use deterministic replay and draw-cell assertions for visibility.
 - **Decomposition hint:** campaign wiring, cross-system playthrough/regression fixes, then balance sweep and release-readiness documentation.
 
 ## Order, parallelism, and open questions

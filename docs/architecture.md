@@ -164,7 +164,7 @@ Run as small batches with human review between each.
 - [x] **M7 Saves and tooling:** versioned saves, debug console, egui entity inspector.
 - [ ] **M8 Field of view:** recursive shadowcasting line of sight, visibility for the player and AI detection. Deferred from M6 by owner decision; detection was straight-line distance until then.
 
-After M8, the slice is planned as S0–S11 in `docs/roadmap.md`: schema spike; stats; melee/gear/Knight and the first sim harness phase; abilities/statuses; progression; Cleric; Wizard; Rogue/stealth; creatures/AI/loot; sites/worldgen; quests/NPCs/shops; and final integration. M8 can run alongside S1–S6, while S0 gates S3. The slice plan keeps the native/script boundary explicit: core owns primitives, invariants, timing, deterministic RNG, map queries and serialization; Luau owns rules, policy and tuning.
+After M8, the slice is planned as S0–S11 plus the S4b game-UI shell in `docs/roadmap.md`: schema spike; stats; melee/gear/Knight and the first sim harness phase; abilities/statuses; progression; the parallel game-UI shell; Cleric; Wizard; Rogue/stealth; creatures/AI/loot; sites/worldgen; quests/NPCs/shops; and final integration. M8 can run alongside S1–S6 and the S4b shell, while S0 gates S3. The slice plan keeps the native/script boundary explicit: core owns primitives, invariants, timing, deterministic RNG, map queries and serialization; Luau owns rules, policy and tuning.
 
 Open planning questions are recorded in `docs/roadmap.md` rather than silently decided: whether to retain S labels after M8, blueprint versus new loader kinds, declarative versus script-only effects, stat modifier and derived-value strategies, bot-policy/scenario formats, and the CI band subset.
 
