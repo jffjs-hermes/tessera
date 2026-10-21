@@ -116,10 +116,18 @@ where
 impl World {
     /// An empty world (empty library + empty registry). Call [`Self::load`]
     /// after registering engine components and parts to populate content.
+    ///
+    /// The S0 content kinds (`Ability`, `Skill`, `Status`, `Item`, `Quest`,
+    /// `Tuning` — see [`crate::kinds`]) are always registered so blueprint
+    /// content may use them everywhere; their names are fixed and cannot
+    /// collide with engine parts.
     pub fn new() -> Self {
+        let mut registry = PartRegistry::new();
+        crate::kinds::register_all(&mut registry)
+            .expect("S0 kind part names are fixed and never collide");
         Self {
             library: Arc::new(RwLock::new(BlueprintLibrary::new())),
-            registry: PartRegistry::new(),
+            registry,
             spawners: BTreeMap::new(),
         }
     }
@@ -428,8 +436,9 @@ parts.Stats  = { strength = 18, agility = 6 }
         let vfs = creatures();
         let w = world(&vfs);
         // The same single registry the loader validates against must declare a
-        // storage class for every part name it accepts.
-        assert_eq!(w.registry.len(), 2);
+        // storage class for every part name it accepts: the two engine parts
+        // below plus the six always-registered S0 kind parts.
+        assert_eq!(w.registry.len(), 8);
         for (id, storage) in w.registry.iter_storage() {
             assert!(
                 matches!(storage, StorageClass::Component | StorageClass::Dynamic),
@@ -465,8 +474,8 @@ parts.Stats  = { strength = 18, agility = 6 }
         // Same name re-registered with a different storage class -> error.
         let err = w.register_part::<Stats>("Render").unwrap_err();
         assert!(matches!(err, PartError::DuplicatePartType(id) if id.as_str() == "Render"));
-        // The original entry is intact.
-        assert_eq!(w.registry.len(), 1);
+        // The original entry is intact (6 S0 kind parts are always registered).
+        assert_eq!(w.registry.len(), 7);
         assert_eq!(
             w.registry.storage(&PartTypeId::new("Render")),
             Some(StorageClass::Component)

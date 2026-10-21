@@ -16,6 +16,7 @@ use std::collections::BTreeSet;
 use toml::Value;
 
 use crate::ecs::{Part, PartRegistry, PartTypeId};
+use crate::kinds::KIND_PARTS;
 use crate::vfs::Vfs;
 
 mod error;
@@ -261,9 +262,66 @@ impl BlueprintLibrary {
             return Err(LoadFail::new(diags));
         }
 
+        // Naming lint: a blueprint that
+        // carries a kind part whose id prefix does not match it is a load
+        // error. Runs on the fully resolved set so *inherited* kind parts
+        // count toward the check, and errors only on contradiction — never on
+        // style (a kind-prefixed blueprint without `inherits` from the
+        // abstract root is allowed; the abstract roots themselves are exempt).
+        Self::lint_kind_naming(&resolved, &mut diags);
+        if !diags.is_empty() {
+            return Err(LoadFail::new(diags));
+        }
+
         Ok(BlueprintLibrary {
             blueprints: resolved,
         })
+    }
+
+    /// Validate the S0 kind-prefix / kind-part pairing of every resolved
+    /// blueprint, in sorted id order (deterministic diagnostics). Two rules,
+    /// both fail-closed:
+    ///
+    /// 1. An id with a kind prefix (`Ability_`, `Skill_`, …) must carry the
+    ///    matching kind part (`parts.Ability`, …) — either its own payload or
+    ///    inherited.
+    /// 2. A blueprint carrying a kind part must have the matching id prefix —
+    ///    unless its id is the kind's bare abstract root (`[Ability]`, …),
+    ///    which is where base ships the kind's full defaults.
+    ///
+    /// The lint never looks at payload contents and never touches inheritance
+    /// or patch behavior; it only rejects contradictory id/part names.
+    fn lint_kind_naming(resolved: &BTreeMap<String, Blueprint>, diags: &mut Vec<BlueprintError>) {
+        for bp in resolved.values() {
+            for (prefix, part) in KIND_PARTS {
+                // Rule 1: prefix present, kind part missing.
+                if bp.id.starts_with(prefix) && !bp.parts.contains_key(*part) {
+                    diags.push(BlueprintError::Invalid {
+                        path: bp.file.clone(),
+                        id: bp.id.clone(),
+                        msg: format!(
+                            "id uses the '{prefix}' kind prefix, so it must carry \
+                             parts.{part}; add `parts.{part} = {{ ... }}` (it may be \
+                             inherited) or rename the id"
+                        ),
+                    });
+                }
+                // Rule 2: kind part present, id prefix missing (abstract root
+                // ids — `[Ability]` etc. — are the deliberate exception).
+                if bp.parts.contains_key(*part) && bp.id != *part && !bp.id.starts_with(prefix) {
+                    diags.push(BlueprintError::Invalid {
+                        path: bp.file.clone(),
+                        id: bp.id.clone(),
+                        msg: format!(
+                            "carries parts.{part}, which requires an id with the \
+                             '{prefix}' prefix (got '{}'); rename the id or remove \
+                             the kind part",
+                            bp.id
+                        ),
+                    });
+                }
+            }
+        }
     }
 
     /// Depth-first resolution of one id. `on_stack` tracks the current chain for
@@ -756,5 +814,386 @@ parts.Render = { tile = "child" }
             vec!["scripts/shared.luau".to_string()],
             "child inherits parent's set when it declares none"
         );
+    }
+
+    // --- S0 kind parts: registration through the loader and naming lint ---
+
+    /// A registry carrying just the six S0 kind parts (kinds::register_all).
+    fn kind_registry() -> PartRegistry {
+        let mut r = PartRegistry::new();
+        crate::kinds::register_all(&mut r).unwrap();
+        r
+    }
+
+    /// The smallest data-only blueprint set exercising all six kinds, with
+    /// ids that satisfy the naming lint (no scripts, no combat).
+    fn content() -> MemVfs {
+        MemVfs::new().with(
+            "blueprints/kinds.toml",
+            r##"
+[Ability_ShieldBash]
+parts.Ability = { name = "Shield Bash", kind = "active", target = "adjacent",
+                  tags = ["melee", "stagger"] }
+
+[Item_Rock]
+parts.Item = { name = "Rock", slot = "misc", weight = 1, price = 0 }
+
+[Quest_FirstBlood]
+parts.Quest = { name = "First Blood", stages = [ { trigger = "on_kill" } ] }
+
+[Skill_Blade]
+parts.Skill = { name = "Blade", family = "weapon" }
+
+[Status_Staggered]
+parts.Status = { name = "Staggered", duration = 100, stacking = "refresh",
+                 tags = ["harmful"] }
+
+[Tuning_Combat]
+parts.Tuning = { base_hit = 50, crit_pct = { pct = 150 }, speed_table = [50, 90, 140] }
+"##,
+        )
+    }
+
+    #[test]
+    fn six_kind_parts_load_and_read_back_typed() {
+        use crate::kinds::{
+            Ability, AbilityKind, AbilityTarget, Item, Quest, Skill, Stacking, Status, Tuning,
+            TuningValue,
+        };
+
+        let r = kind_registry();
+        let lib = BlueprintLibrary::load(&content(), &r).unwrap();
+        // Deterministic library ordering: ids sorted across kinds.
+        assert_eq!(
+            lib.ids().cloned().collect::<Vec<_>>(),
+            vec![
+                "Ability_ShieldBash".to_string(),
+                "Item_Rock".to_string(),
+                "Quest_FirstBlood".to_string(),
+                "Skill_Blade".to_string(),
+                "Status_Staggered".to_string(),
+                "Tuning_Combat".to_string(),
+            ]
+        );
+
+        // Each kind part deserializes through the registry into its typed
+        // payload container.
+        let a = lib.part_typed(&r, "Ability_ShieldBash", "Ability").unwrap();
+        assert_eq!(
+            a.as_ref().as_any().downcast_ref::<Ability>(),
+            Some(&Ability {
+                name: "Shield Bash".into(),
+                kind: AbilityKind::Active,
+                target: AbilityTarget::Adjacent,
+                tags: vec!["melee".into(), "stagger".into()],
+            })
+        );
+
+        let i = lib.part_typed(&r, "Item_Rock", "Item").unwrap();
+        assert_eq!(
+            i.as_ref().as_any().downcast_ref::<Item>(),
+            Some(&Item {
+                name: "Rock".into(),
+                slot: "misc".into(),
+                weight: 1,
+                price: 0,
+            })
+        );
+
+        let q = lib.part_typed(&r, "Quest_FirstBlood", "Quest").unwrap();
+        assert_eq!(
+            q.as_ref().as_any().downcast_ref::<Quest>(),
+            Some(&Quest {
+                name: "First Blood".into(),
+                stages: vec![crate::kinds::QuestStage {
+                    trigger: "on_kill".into()
+                }],
+            })
+        );
+
+        let s = lib.part_typed(&r, "Skill_Blade", "Skill").unwrap();
+        assert_eq!(
+            s.as_ref().as_any().downcast_ref::<Skill>(),
+            Some(&Skill {
+                name: "Blade".into(),
+                family: "weapon".into(),
+                hidden: false,
+                rank_cost: vec![],
+                grants: vec![],
+            })
+        );
+
+        let st = lib.part_typed(&r, "Status_Staggered", "Status").unwrap();
+        assert_eq!(
+            st.as_ref().as_any().downcast_ref::<Status>(),
+            Some(&Status {
+                name: "Staggered".into(),
+                duration: 100,
+                stacking: Stacking::Refresh,
+                tags: vec!["harmful".into()],
+            })
+        );
+
+        let t = lib.part_typed(&r, "Tuning_Combat", "Tuning").unwrap();
+        let tuning = t.as_ref().as_any().downcast_ref::<Tuning>().unwrap();
+        assert_eq!(tuning.values.get("base_hit"), Some(&TuningValue::Int(50)));
+        assert_eq!(
+            tuning.values.get("crit_pct"),
+            Some(&TuningValue::Percent(crate::kinds::Percent { pct: 150 }))
+        );
+        assert_eq!(
+            tuning.values.get("speed_table"),
+            Some(&TuningValue::IntList(vec![50, 90, 140]))
+        );
+    }
+
+    #[test]
+    fn kind_part_requires_matching_id_prefix() {
+        let v = MemVfs::new().with(
+            "blueprints/t.toml",
+            r##"
+[Goblin]
+parts.Ability = { name = "X", kind = "active", target = "adjacent" }
+"##,
+        );
+        let err = BlueprintLibrary::load(&v, &kind_registry()).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("parts.Ability"), "{text}");
+        assert!(text.contains("'Ability_'"), "{text}");
+        assert!(text.contains("'Goblin'"), "{text}");
+        assert!(text.contains("blueprints/t.toml"), "{text}");
+    }
+
+    #[test]
+    fn kind_id_prefix_requires_kind_part() {
+        // Load succeeds only with the kind part present: an `Ability_` id with
+        // no parts.Ability (own or inherited) is a load error.
+        let v = MemVfs::new().with(
+            "blueprints/t.toml",
+            r##"
+[Ability_Solo]
+
+[Tuning_Combat]
+parts.Tuning = { base_hit = 1 }
+"##,
+        );
+        let err = BlueprintLibrary::load(&v, &kind_registry()).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("'Ability_'"), "{text}");
+        assert!(text.contains("'Ability_Solo'"), "{text}");
+        assert!(text.contains("parts.Ability"), "{text}");
+        assert!(
+            !text.contains("'Tuning_Combat'"),
+            "Tuning_Combat carries parts.Tuning: {text}"
+        );
+    }
+
+    #[test]
+    fn mismatched_kind_pair_reports_both_contradictions() {
+        // `Ability_` id carrying parts.Skill contradicts the convention in
+        // both directions; both diagnostics are collected in one load pass.
+        let v = MemVfs::new().with(
+            "blueprints/t.toml",
+            r##"
+[Ability_ShieldBash]
+parts.Skill = { name = "Blade", family = "weapon" }
+"##,
+        );
+        let err = BlueprintLibrary::load(&v, &kind_registry()).unwrap_err();
+        assert_eq!(err.diagnostics.len(), 2, "both contradictions: {err}");
+        let text = err.to_string();
+        assert!(text.contains("parts.Ability"), "{text}");
+        assert!(text.contains("parts.Skill"), "{text}");
+        assert!(text.contains("'Ability_ShieldBash'"), "{text}");
+    }
+
+    #[test]
+    fn abstract_root_ids_are_exempt_from_the_lint() {
+        // Base ships the bare abstract roots; they may (or may not) carry
+        // their own kind part with full defaults and must load either way.
+        let v = MemVfs::new().with(
+            "blueprints/roots.toml",
+            r##"
+[Ability]
+parts.Ability = { name = "Ability", kind = "active", target = "user" }
+
+[Item]
+
+[Skill]
+parts.Skill = { name = "Skill", family = "general" }
+
+[Tuning]
+parts.Tuning = { }
+"##,
+        );
+        let lib = BlueprintLibrary::load(&v, &kind_registry()).unwrap();
+        assert_eq!(
+            lib.ids().cloned().collect::<Vec<_>>(),
+            vec![
+                "Ability".to_string(),
+                "Item".to_string(),
+                "Skill".to_string(),
+                "Tuning".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn inherited_kind_part_satisfies_the_lint() {
+        // The lint runs on the resolved set, so a child whose kind part comes
+        // from inheritance passes without restating it...
+        let v = MemVfs::new().with(
+            "blueprints/t.toml",
+            r##"
+[Ability]
+parts.Ability = { name = "Ability", kind = "active", target = "user" }
+
+[Ability_ShieldBash]
+inherits = "Ability"
+"##,
+        );
+        let r = kind_registry();
+        let lib = BlueprintLibrary::load(&v, &r).unwrap();
+        let a = lib.part_typed(&r, "Ability_ShieldBash", "Ability").unwrap();
+        assert_eq!(
+            a.as_ref()
+                .as_any()
+                .downcast_ref::<crate::kinds::Ability>()
+                .unwrap()
+                .name,
+            "Ability",
+            "inherited kind part resolves whole-part from the root"
+        );
+
+        // ...and a child restating the full payload replaces the whole part
+        // (whole-part replacement: no field-level merge leaks parent fields).
+        let v = MemVfs::new().with(
+            "blueprints/t.toml",
+            r##"
+[Ability]
+parts.Ability = { name = "Ability", kind = "active", target = "user", tags = ["base"] }
+
+[Ability_ShieldBash]
+inherits = "Ability"
+parts.Ability = { name = "Shield Bash", kind = "active", target = "adjacent" }
+"##,
+        );
+        let r = kind_registry();
+        let lib = BlueprintLibrary::load(&v, &r).unwrap();
+        let a = lib.part_typed(&r, "Ability_ShieldBash", "Ability").unwrap();
+        let ability = a
+            .as_ref()
+            .as_any()
+            .downcast_ref::<crate::kinds::Ability>()
+            .unwrap();
+        assert_eq!(ability.name, "Shield Bash");
+        assert!(
+            ability.tags.is_empty(),
+            "whole-part replacement: {ability:?}"
+        );
+    }
+
+    #[test]
+    fn kind_payload_errors_report_file_id_and_field() {
+        let r = kind_registry();
+        // Unknown field inside a kind payload.
+        let v = MemVfs::new().with(
+            "blueprints/t.toml",
+            r##"
+[Ability_ShieldBash]
+parts.Ability = { name = "Shield Bash", kind = "active", target = "adjacent", zap = 1 }
+"##,
+        );
+        let lib = BlueprintLibrary::load(&v, &r).unwrap();
+        let err = match lib.part_typed(&r, "Ability_ShieldBash", "Ability") {
+            Ok(_) => panic!("unknown field must fail typed deserialization"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("zap"), "{err}");
+        assert!(err.contains("'Ability_ShieldBash'"), "{err}");
+        assert!(err.contains("blueprints/t.toml"), "{err}");
+
+        // Bad enum value inside a kind payload.
+        let v = MemVfs::new().with(
+            "blueprints/t.toml",
+            r##"
+[Status_Staggered]
+parts.Status = { name = "Staggered", duration = 100, stacking = "expire" }
+"##,
+        );
+        let lib = BlueprintLibrary::load(&v, &r).unwrap();
+        let err = match lib.part_typed(&r, "Status_Staggered", "Status") {
+            Ok(_) => panic!("bad stacking value must fail typed deserialization"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("expire"), "{err}");
+        assert!(err.contains("refresh"), "{err}");
+        assert!(err.contains("'Status_Staggered'"), "{err}");
+    }
+
+    #[test]
+    fn lint_diagnostics_are_deterministic_in_sorted_id_order() {
+        // Both ids violate rule 1; declared in reverse order, the errors must
+        // still surface sorted by id (BTreeMap ids + sorted resolution).
+        let v = MemVfs::new().with(
+            "blueprints/t.toml",
+            r##"
+[Skill_ZZZ]
+
+[Ability_AAA]
+"##,
+        );
+        let err = BlueprintLibrary::load(&v, &kind_registry()).unwrap_err();
+        assert_eq!(err.diagnostics.len(), 2, "{err}");
+        let text = err.to_string();
+        let ability_pos = text
+            .find("'Ability_AAA'")
+            .expect("first diag sorted: {text}");
+        let skill_pos = text
+            .find("'Skill_ZZZ'")
+            .expect("second diag sorted: {text}");
+        assert!(ability_pos < skill_pos, "{text}");
+    }
+
+    #[test]
+    fn kind_parts_patch_with_no_special_cases() {
+        // Patch ops act on raw payloads before typed deserialization, so
+        // kind parts patch exactly like any other part.
+        let r = kind_registry();
+        let mut lib = BlueprintLibrary::load(&content(), &r).unwrap();
+
+        // merge a scalar into a tuning table
+        let pf = PatchFile::parse(
+            "patches/t.toml",
+            r##"
+["Tuning_Combat"]
+merge = { "parts.Tuning.base_hit" = 60 }
+"##,
+        )
+        .unwrap();
+        lib.apply_patch_file(&pf).unwrap();
+        let t = lib.part_typed(&r, "Tuning_Combat", "Tuning").unwrap();
+        assert_eq!(
+            t.as_ref()
+                .as_any()
+                .downcast_ref::<crate::kinds::Tuning>()
+                .unwrap()
+                .values
+                .get("base_hit"),
+            Some(&crate::kinds::TuningValue::Int(60)),
+            "patched value wins; siblings (crit_pct, speed_table) untouched"
+        );
+
+        // remove a whole kind part
+        let pf = PatchFile::parse(
+            "patches/t.toml",
+            r##"
+["Item_Rock"]
+remove = ["parts.Item"]
+"##,
+        )
+        .unwrap();
+        lib.apply_patch_file(&pf).unwrap();
+        assert!(lib.get("Item_Rock").unwrap().part("Item").is_none());
     }
 }
