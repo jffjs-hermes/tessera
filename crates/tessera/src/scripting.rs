@@ -564,6 +564,8 @@ pub struct ScriptBridge {
     /// thread; mlua's `Lua` is not `Send`/`Sync`), so an `Rc` — not `Arc` —
     /// is the correct shared wrapper. Cloning the bridge shares the handle.
     host: Rc<Mutex<ScriptHost>>,
+    /// The broker handle shared by every host world-access view.
+    broker: Arc<RwLock<EntityBroker>>,
     /// The shared simulation snapshot the world access + reader reference.
     shared: Arc<SharedSim>,
 }
@@ -575,13 +577,14 @@ impl ScriptBridge {
     pub fn new(broker: Arc<RwLock<EntityBroker>>) -> ScriptBridge {
         let shared = Arc::new(SharedSim::new());
         let wa = SimWorldAccess {
-            broker,
+            broker: broker.clone(),
             shared: shared.clone(),
         };
         let read: Arc<dyn WorldRead> = Arc::new(wa.clone());
         let host = ScriptHost::with_reader(Box::new(wa), read.clone());
         ScriptBridge {
             host: Rc::new(Mutex::new(host)),
+            broker,
             shared,
         }
     }
@@ -597,6 +600,16 @@ impl ScriptBridge {
         player: Entity,
     ) {
         self.shared.set_world_state(zone, scheduler, player);
+    }
+
+    /// Return the broker handle used by script world access.
+    pub fn broker(&self) -> Arc<RwLock<EntityBroker>> {
+        self.broker.clone()
+    }
+
+    /// Replace broker contents without changing the shared handle.
+    pub fn replace_broker(&self, broker: EntityBroker) {
+        *self.broker.write().unwrap_or_else(|p| p.into_inner()) = broker;
     }
 
     /// Install the blueprint `World` (once loaded) for `engine.spawn_at`.
