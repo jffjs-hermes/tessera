@@ -125,6 +125,10 @@ pub enum TileEntry {
 pub enum DamageSource {
     /// A direct physical attack ([`Attack`]).
     Attack,
+    /// A declarative ability effect ([`UseAbility`] resolution): the ability
+    /// blueprint's `parts.Damage`. Hit resolution itself is later work; the
+    /// source is named now so the pipeline can tell the two apart.
+    Ability,
 }
 
 /// A typed gameplay event. Events are plain structs; handlers mutate the
@@ -476,12 +480,28 @@ impl Event for Attack {
 
 /// Damage applied to `target`. Mutators may modify `amount` (armor,
 /// resistances) before the final mutation phase reads it. Negative `amount`
-/// is rejected at the boundary.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// is rejected at the boundary. `dtype` is the damage-type tag carried from
+/// declarative content (`"blunt"`, ...); S0 only names the field — its
+/// role in hit resolution is later work.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TakeDamage {
     pub target: Entity,
     pub amount: i32,
     pub source: DamageSource,
+    pub dtype: String,
+}
+
+impl TakeDamage {
+    /// A direct attack with the generic damage type (`Attack`-pipeline hits
+    /// that carry no declarative dtype).
+    pub fn generic(target: Entity, amount: i32, source: DamageSource) -> Self {
+        Self {
+            target,
+            amount,
+            source,
+            dtype: "generic".to_string(),
+        }
+    }
 }
 
 impl Event for TakeDamage {
@@ -526,6 +546,75 @@ pub struct Death {
 
 impl Event for Death {
     const NAME: &'static str = "Death";
+
+    fn entity(&self) -> Entity {
+        self.target
+    }
+}
+
+/// S0's minimal ability-use event: `user` spends the resource for the named
+/// ability (a blueprint id) aimed at `target`. The native resource path
+/// (declarative effect resolution) decrements the user's charge pool; the
+/// targeting pipeline that *selects* ability/target is later work.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UseAbility {
+    pub user: Entity,
+    pub ability: String,
+    pub target: Entity,
+}
+
+impl Event for UseAbility {
+    const NAME: &'static str = "UseAbility";
+
+    fn entity(&self) -> Entity {
+        self.user
+    }
+}
+
+/// A request to apply the named status (a blueprint id) to `target`. Native
+/// resolution snapshots the status definition into the target's status store
+/// and fires [`StatusApplied`]; unknown status ids cancel the event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplyStatus {
+    pub target: Entity,
+    pub status: String,
+}
+
+impl Event for ApplyStatus {
+    const NAME: &'static str = "ApplyStatus";
+
+    fn entity(&self) -> Entity {
+        self.target
+    }
+}
+
+/// Fired when `status` is successfully applied to `target` (the named
+/// application seam; payload enrichment is later work).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusApplied {
+    pub target: Entity,
+    pub status: String,
+}
+
+impl Event for StatusApplied {
+    const NAME: &'static str = "StatusApplied";
+
+    fn entity(&self) -> Entity {
+        self.target
+    }
+}
+
+/// Fired when an applied `status` on `target` expires (duration elapses past
+/// zero). The scheduler consumes the seam later; S0 fires it once per
+/// expiration in deterministic order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusExpired {
+    pub target: Entity,
+    pub status: String,
+}
+
+impl Event for StatusExpired {
+    const NAME: &'static str = "StatusExpired";
 
     fn entity(&self) -> Entity {
         self.target
@@ -662,11 +751,7 @@ pub fn install_minimal_combat(ctx: &mut SimContext) {
         } else {
             // Fire the follow-up TakeDamage. This is a nested dispatch of a
             // different event type — re-entrancy control does not reject it.
-            let _ = ctx.dispatch(TakeDamage {
-                target: ev.defender,
-                amount: 1,
-                source: DamageSource::Attack,
-            });
+            let _ = ctx.dispatch(TakeDamage::generic(ev.defender, 1, DamageSource::Attack));
             HandlerAction::Continue
         }
     });
@@ -795,11 +880,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
             .spawn();
         let out = ctx
-            .dispatch(TakeDamage {
-                target: e,
-                amount: 10,
-                source: DamageSource::Attack,
-            })
+            .dispatch(TakeDamage::generic(e, 10, DamageSource::Attack))
             .unwrap();
         match out {
             EventOutcome::Modified(ev) => assert_eq!(ev.amount, 5, "10 - 2 = 8, capped at 5"),
@@ -826,11 +907,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
             .spawn();
         let out = ctx
-            .dispatch(TakeDamage {
-                target: e,
-                amount: 10,
-                source: DamageSource::Attack,
-            })
+            .dispatch(TakeDamage::generic(e, 10, DamageSource::Attack))
             .unwrap();
         match out {
             EventOutcome::Modified(ev) => assert_eq!(ev.amount, 3, "cap first then -2"),
@@ -1084,12 +1161,8 @@ mod tests {
                 defender: e,
             })
             .unwrap();
-            ctx.dispatch(TakeDamage {
-                target: e,
-                amount: 3,
-                source: DamageSource::Attack,
-            })
-            .unwrap();
+            ctx.dispatch(TakeDamage::generic(e, 3, DamageSource::Attack))
+                .unwrap();
             log.borrow().clone()
         };
 
@@ -1139,11 +1212,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
             .spawn();
         let err = ctx
-            .dispatch(TakeDamage {
-                target: e,
-                amount: -1,
-                source: DamageSource::Attack,
-            })
+            .dispatch(TakeDamage::generic(e, -1, DamageSource::Attack))
             .unwrap_err();
         assert!(matches!(err, EventError::InvalidPayload { .. }));
     }
