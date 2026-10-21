@@ -9,8 +9,9 @@ inspired by Caves of Qud. Desktop only (Linux/macOS/Windows; CI builds and tests
 
 **Status:** M0 (scaffold), M1 (tile renderer), M2 (data-driven entities), M3 (typed event
 bus + energy scheduler wired into the demo), M4 (Luau scripting), M5 (mod loader), M6 (world slice
-and demo) and M7 (saves and tooling) complete. M8 (field of view) is next; the S0–S11 slice
-roadmap follows M8, with M8 able to run alongside S1–S6.
+and demo) and M7 (saves and tooling) complete, and S0 (schema spike: typed tuning, native
+effects/status lifecycle, Shield Bash vertical slice) shipped. S1 (stats and derived values) is
+next; the M8 (field of view) milestone can run alongside S1–S6 per the roadmap.
 
 ## Run
 
