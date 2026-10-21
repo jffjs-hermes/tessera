@@ -44,6 +44,8 @@ Content goes in data files, behavior in scripts, and a small native core underne
 | Logging/profiling | `tracing`, Tracy | |
 | Tests | `cargo test`, `insta` snapshots, `criterion` benchmarks, `cargo-nextest` | |
 
+The slice's game UI is native world-rendered overlays over the game world (Qud-style); `egui` remains the dev-tool layer for the console and inspector (M7).
+
 `bracket-lib`/`rltk` are avoided: convenient, but lightly maintained and not built for heavy moddability.
 
 Versions actually in use at M1: wgpu 30, winit 0.30, rand_chacha 0.10, toml 1, serde 1, notify 8,
@@ -69,7 +71,7 @@ crates/
   tessera-mods/     # discovery, manifests, dependency/load order, patching   (M5)
   tessera-world/    # map/zone/chunk model, FOV, pathfinding, worldgen hooks  (M6)
   tessera-render/   # wgpu cell renderer, atlas
-  tessera-ui/       # in-game UI, egui dev tools                      (M7)
+  tessera-ui/       # native in-game UI (world-renderer overlays); egui for dev console/inspector (M7)
   tessera/          # binary: wires everything; base content loads as a "mod"
 data/base/          # shipped content, same format as mods
 docs/
