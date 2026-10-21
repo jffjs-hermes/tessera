@@ -1456,6 +1456,15 @@ mod tests {
                 Box::new(Health { hp: 20 }) as Box<dyn Part>,
             )
             .unwrap();
+        broker
+            .world_mut()
+            .insert_one(
+                player,
+                RenderTile {
+                    tile: "creature.player".into(),
+                },
+            )
+            .unwrap();
         let goblin = broker.spawn();
         broker
             .insert_part(goblin, PART_ENERGY, Box::new(ActorEnergy::new(100)))
@@ -1472,6 +1481,15 @@ mod tests {
                 goblin,
                 PART_HEALTH,
                 Box::new(Health { hp }) as Box<dyn Part>,
+            )
+            .unwrap();
+        broker
+            .world_mut()
+            .insert_one(
+                goblin,
+                RenderTile {
+                    tile: "creature.goblin".into(),
+                },
             )
             .unwrap();
         let mut sp = ScriptPart::default();
@@ -1504,6 +1522,7 @@ mod tests {
         }
         let before = sim.save(&hooks).expect("save");
         let log_len_at_save = sim.log().len();
+        let renderables_before = sim.renderables();
 
         // Build an identical-controls world and run it the same way, from the
         // same fresh state, and confirm the pre-save logs match (so the two
@@ -1526,6 +1545,7 @@ mod tests {
         // Load the save into a fresh sim.
         let zone = demo_zone(20, 10);
         let mut loaded = Sim::load(before, zone, &hooks, None).expect("load");
+        assert_eq!(loaded.renderables(), renderables_before);
 
         // State restored: same entity ids in same (deterministic) order.
         let orig_ids: Vec<u64> = sim
