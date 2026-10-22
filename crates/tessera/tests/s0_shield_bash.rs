@@ -320,12 +320,24 @@ fn shield_bash_seeded_end_to_end_proves_the_four_conditions() {
     );
 
     // Declarative push seam: the goblin was pushed one tile away from the
-    // player (3,2) -> (4,2).
-    assert_eq!(
-        s.goblin_pos,
-        (4, 2),
-        "Effect.push moves the target one tile"
+    // player (3,2) -> (4,2). At goblin speed 106 (Agility 13, the 4.6
+    // acceptance goblin) the goblin also fits an *attended* turn in the
+    // observation window — the stagger consumed its attack (skip_after == 0
+    // below, no player damage), so that turn walks it back to (3,2). The
+    // push itself is asserted deterministically through the scheduler: the
+    // goblin's first attended turn after the bash starts from the pushed
+    // cell `from=(4,2)`.
+    assert!(
+        s.log
+            .iter()
+            .any(|l| l.contains("Move") && l.contains("from=(4,2)")),
+        "the bash must push the goblin to (4,2) before its next attended turn; log: {:#?}",
+        s.log
     );
+    // And the attended return turn (the log line above) leaves it back at
+    // the original cell by observation time — the pushed cell is attested by
+    // the scheduler row, not the final position.
+    assert_eq!(s.goblin_pos, (3, 2), "goblin attendance walks it back");
 
     // The goblin's next scheduled turn was consumed by the stagger (it stood
     // adjacent and would attack): no damage landed on the player (base player

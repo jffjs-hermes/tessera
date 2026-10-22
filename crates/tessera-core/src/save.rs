@@ -25,7 +25,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::ecs::{EntityBroker, Part, PartError, PartRegistry, PartTypeId};
-use crate::effects::PART_DERIVED;
+use crate::effects::{Abilities, Charges, PART_ABILITIES, PART_CHARGES, PART_DERIVED};
 use crate::events::{Health, PART_HEALTH, PART_POSITION, Position};
 use crate::rng::SimRng;
 use crate::script_part::{PartValue, ScriptPart};
@@ -300,6 +300,48 @@ pub fn build_save_hooks(registry: &PartRegistry) -> (SaveHooks, BTreeSet<String>
             ])))
         },
         |v| typed_restore::<Bonuses>(PART_BONUSES, v),
+    );
+
+    // The declarative ability ownership stub and its runtime charge pool:
+    // persistent state (the s0 save contract records charges as
+    // persistent), snapshotted/restored like any native part so the
+    // campaign-patched demo player survives a save/load with its granted
+    // abilities and spent pool intact. Without these hooks every save of a
+    // campaign-loaded demo failed with `UnserializablePart(Abilities)`.
+    hooks.register(
+        PART_ABILITIES,
+        |part| {
+            let p = part
+                .as_any()
+                .downcast_ref::<Abilities>()
+                .ok_or_else(|| not_a(PART_ABILITIES, "Abilities"))?;
+            Ok(toml::Value::Table(toml::map::Map::from_iter([(
+                "list".into(),
+                toml::Value::Array(
+                    p.list
+                        .iter()
+                        .map(|s| toml::Value::String(s.clone()))
+                        .collect(),
+                ),
+            )])))
+        },
+        |v| typed_restore::<Abilities>(PART_ABILITIES, v),
+    );
+
+    hooks.register(
+        PART_CHARGES,
+        |part| {
+            let p = part
+                .as_any()
+                .downcast_ref::<Charges>()
+                .ok_or_else(|| not_a(PART_CHARGES, "Charges"))?;
+            Ok(toml::Value::Table(toml::map::Map::from_iter([
+                ("max".into(), toml::Value::Integer(p.max)),
+                ("recharge".into(), toml::Value::Integer(p.recharge)),
+                ("charges".into(), toml::Value::Integer(p.charges)),
+            ])))
+        },
+        |v| typed_restore::<Charges>(PART_CHARGES, v),
     );
 
     // Script parts: snapshot generically through the closed PartValue map, and

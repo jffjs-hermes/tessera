@@ -88,7 +88,7 @@ pub struct SharedSim {
     stats_armed: AtomicBool,
 }
 
-#[allow(dead_code)] // accessors used by the console/stats path and scheduled recomputation
+#[allow(dead_code)] // exported seams (stats_armed/scheduler accessors)
 impl SharedSim {
     pub fn new() -> Self {
         Self::default()
@@ -947,7 +947,7 @@ impl ScriptBridge {
     }
 
     /// Access the wrapped host.
-    #[allow(dead_code)] // accessor for the host-handle bridge used by script demos
+    #[allow(dead_code)] // documented host-handle accessor (the shared-sim seam)
     pub fn host(&self) -> &Rc<Mutex<ScriptHost>> {
         &self.host
     }

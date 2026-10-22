@@ -111,6 +111,10 @@ fn parse_args() -> Result<Args> {
                      `--headless <n>`: run n scripted actions with no window, print final map + event log, exit 0.\n\
                      The headless script includes one Bash step, so the event log shows the\n\
                      declarative ability path in order: UseAbility -> TakeDamage(blunt) -> ApplyStatus.\n\
+                     The stats pipeline also logs EVENT RecomputeDerived: once per stat-ful entity\n\
+                     after spawn and once after the Bash's Status_Staggered application; the\n\
+                     'entities (draw mapping)' readout then shows the live derived stats for\n\
+                     the player and the goblin (Spd 98 for Agility 9; Spd 106 for Agility 13).\n\
                      `--zone <id>`: load the named zone (defaults to the single zone in the pack).\n\
                      `--mods() <dir>`: discover local directory / zip mods() (default data/mods());\n\
                      base data loads first, then each mod in deterministic load order.\n\
@@ -119,7 +123,7 @@ fn parse_args() -> Result<Args> {
                      `--exec <line>`: run a console command at startup (repeatable), before scripted\n\
                      actions in --headless; results print to stdout.\n\
                      Console commands: help list entities spawn <bp> [x y] kill <id> | kill all <bp>\n\
-                     print <id> sethp <id> <n> tp <id> <x> <y> save [name] load <name> clear"
+                     print <id> stats <id|player> sethp <id> <n> tp <id> <x> <y> save [name] load <name> clear"
                 );
                 std::process::exit(0);
             }
@@ -759,6 +763,15 @@ fn main() -> anyhow::Result<()> {
         for line in &sim.log {
             println!("{line}");
         }
+        // The visible entity/draw mapping: one line per rendered entity —
+        // glyph, draw tile, id, position, and the live derived stats (the
+        // goblin's speed reflects its Agility: Spd 106 for Agility 13). This
+        // names the glyphs the map above shows; the log alone is not the
+        // proof of visibility.
+        println!(
+            "entities (draw mapping):\n{}",
+            sim.demo_entity_lines(&content.tiles)
+        );
         // One-line status readout: hp + player-turn clock (the combat / death
         // / respawn behaviors' observable summary).
         println!(

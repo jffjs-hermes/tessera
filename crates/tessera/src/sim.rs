@@ -114,7 +114,7 @@ pub struct Sim {
     stats_armed: bool,
 }
 
-#[allow(dead_code)] // console/devtools accessors: actor_speed/reload_rules/log
+#[allow(dead_code)] // stats-slice contract seams: actor_speed/reload_rules/log
 impl Sim {
     // ---- console/devtools support -------------------------------------
     //
@@ -305,6 +305,12 @@ impl Sim {
             .unwrap_or_else(|p| p.into_inner())
             .is_alive(e)
             .then_some(e)
+    }
+
+    /// The sim's player entity (the `stats player` console alias and the
+    /// demo readout's anchor).
+    pub fn player_entity(&self) -> hecs::Entity {
+        self.player
     }
 
     /// Despawn a live entity and unregister it from the scheduler (console
@@ -1253,28 +1259,94 @@ impl Sim {
         }
     }
 
-    /// Render the final map as ASCII text (uses the tile registry glyphs; the
-    /// player overlays `@`). A pure reader — no dispatch, no mutation.
+    /// The headless map text: terrain grid with every renderable entity's
+    /// tile glyph drawn on top at its cell (deterministic entity-id order).
+    /// The player keeps `@` (its `creature.player` glyph); the goblin is
+    /// visibly `g` at its position — the demo's draw mapping, not just a log
+    /// entry. A pure reader like [`Self::renderables`].
     pub fn text_map(&self, tiles: &TileRegistry) -> String {
-        let (px, py) = self.position();
         let floor = tile_glyph(tiles, "terrain.floor");
         let wall = tile_glyph(tiles, "terrain.wall");
-        let mut s = String::with_capacity(self.ctx.map.width * self.ctx.map.height);
-        for y in 0..self.ctx.map.height {
-            for x in 0..self.ctx.map.width {
-                if (x as i32, y as i32) == (px, py) {
-                    s.push('@');
-                } else {
-                    s.push(if self.ctx.map.is_walkable(x as i32, y as i32) {
-                        floor
-                    } else {
-                        wall
-                    });
+        let width = self.ctx.map.width;
+        let height = self.ctx.map.height;
+        let mut grid: Vec<char> = vec![floor; width * height];
+        for y in 0..height {
+            for x in 0..width {
+                if !self.ctx.map.is_walkable(x as i32, y as i32) {
+                    grid[y * width + x] = wall;
                 }
             }
+        }
+        for t in self.renderables() {
+            let (x, y) = (t.x as usize, t.y as usize);
+            if x < width && y < height {
+                grid[y * width + x] = tile_glyph(tiles, &t.tile);
+            }
+        }
+        let mut s = String::with_capacity(grid.len() + height);
+        for y in 0..height {
+            s.extend(&grid[y * width..(y + 1) * width]);
             s.push('\n');
         }
         s
+    }
+
+    /// One line per rendered entity for the headless demo readout — the text
+    /// that names the map's glyphs and their live numbers:
+    ///
+    /// `@ creature.player id=3 (2,2) HP 20/36  Acc 0  Dodge 0  Def 0  Spd 98`
+    ///
+    /// Glyph, draw tile, id and position come from the live parts; `HP
+    /// cur/max` plus the five derived stats come from the cached [`Derived`]
+    /// part (absent on legacy entities, which print `HP <hp>` only).
+    /// Read-only: never dispatches, never mutates.
+    pub fn demo_entity_lines(&self, tiles: &TileRegistry) -> String {
+        use tessera_core::effects::{Derived, PART_DERIVED};
+        use tessera_core::events::{Health, PART_HEALTH, PART_POSITION, Position};
+        use tessera_core::world::RenderTile;
+        let b = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
+        let mut rows: Vec<(u64, String)> = b
+            .entities_with_part(PART_POSITION)
+            .into_iter()
+            .filter_map(|e| {
+                let id = e.to_bits().get();
+                let pos = b.typed_part::<Position>(e, &PART_POSITION.into())?;
+                let rt = b.world().get::<&RenderTile>(e).ok()?;
+                let tile = rt.tile.clone();
+                let glyph = match tiles.get(&tile).visual {
+                    tessera_core::tiles::TileVisual::Glyph { ch } => ch,
+                };
+                let hp = b
+                    .typed_part::<Health>(e, &PART_HEALTH.into())
+                    .map(|h| h.hp)
+                    .unwrap_or(0);
+                let line = match b.typed_part::<Derived>(e, &tessera_core::ecs::PartTypeId::new(PART_DERIVED)) {
+                    Some(d) => {
+                        let max = d.values.get("max_hp").copied().unwrap_or(0);
+                        let v = |k: &str| d.values.get(k).copied().unwrap_or(0);
+                        format!(
+                            "{glyph} {tile} id={id} ({},{}) HP {hp}/{max}  Acc {}  Dodge {}  Def {}  Spd {}",
+                            pos.x,
+                            pos.y,
+                            v("accuracy"),
+                            v("dodge"),
+                            v("defense"),
+                            v("speed")
+                        )
+                    }
+                    None => format!("{glyph} {tile} id={id} ({},{}) HP {hp}", pos.x, pos.y),
+                };
+                Some((id, line))
+            })
+            .collect();
+        rows.sort_by_key(|(id, _)| *id);
+        if rows.is_empty() {
+            return "(no renderable entities)".to_string();
+        }
+        rows.into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Run `n` scripted actions headlessly (no window), returning the final

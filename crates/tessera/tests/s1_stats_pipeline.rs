@@ -216,8 +216,8 @@ fn scheduler_acts_on_derived_speed_and_reads_never_call_scripts() {
     );
     assert_eq!(
         sim.actor_speed(goblin).unwrap(),
-        98,
-        "goblin speed from Derived (Agility 9)"
+        106,
+        "goblin speed from Derived (its own Agility 13 -> 106, not the flat ActorEnergy 100)"
     );
 
     // Raise Agility through the console path -> 120; the scheduler row follows
@@ -370,7 +370,10 @@ fn status_application_fires_recompute_in_deterministic_order() {
     );
     // The goblin's cache is rebuilt (fresh values after the dirtying).
     let d = derived_map(&sim, goblin);
-    assert_eq!(d["max_hp"], 36, "Goblin inherits Actor T 13, L 1");
+    assert_eq!(
+        d["max_hp"], 34,
+        "Goblin's own T 9, L 2: 10 + 2*9 + 1*(3 + 9//3)"
+    );
 }
 
 /// A deterministic tuning reload : rebuild the content with a
@@ -427,7 +430,11 @@ fn tuning_reload_rebuilds_caches_from_the_new_table() {
         46,
         "10 + 2*13 with hp_base 20"
     );
-    assert_eq!(derived_map(&sim, goblin)["max_hp"], 46);
+    assert_eq!(
+        derived_map(&sim, goblin)["max_hp"],
+        44,
+        "goblin T 9: 20 + 2*9 + 1*(3 + 9//3) with hp_base 20"
+    );
 }
 
 /// Fail-closed spawn : a stat-ful blueprint without a registered rules
