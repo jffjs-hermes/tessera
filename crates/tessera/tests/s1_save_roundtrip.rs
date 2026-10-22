@@ -188,12 +188,12 @@ fn save_load_round_trip_preserves_stat_parts_and_rebuilds_derived() {
     for saved in &data.entities {
         let names: Vec<&str> = saved.parts.iter().map(|(n, _)| n.as_str()).collect();
         assert!(
-            !names.iter().any(|n| *n == "Derived"),
+            !names.contains(&"Derived"),
             "Derived must be omitted from the snapshot: {names:?}"
         );
         for required in ["Attributes", "Level"] {
             assert!(
-                names.iter().any(|n| *n == required),
+                names.contains(&required),
                 "{required} is whitelisted and persistent: {names:?}"
             );
         }
@@ -256,6 +256,18 @@ fn save_load_round_trip_preserves_stat_parts_and_rebuilds_derived() {
         .typed_part::<Bonuses>(p2, &PartTypeId::new(PART_BONUSES))
         .expect("Bonuses restored");
     assert_eq!(bns.accuracy, 3);
+    // The campaign's granted ability + full charge pool survive too (the
+    // s0 save contract records charges as persistent; without the
+    // Abilities/Charges hooks every save of a campaign-loaded demo failed
+    // with UnserializablePart).
+    let ab = b
+        .typed_part::<tessera_core::effects::Abilities>(p2, &PartTypeId::new("Abilities"))
+        .expect("Abilities restored");
+    assert_eq!(ab.list, vec!["Ability_ShieldBash"]);
+    let pool = b
+        .typed_part::<tessera_core::effects::Charges>(p2, &PartTypeId::new("Charges"))
+        .expect("Charges pool restored");
+    assert_eq!(pool.charges, 3, "no bash was spent pre-save; pool at full");
     drop(b);
 }
 

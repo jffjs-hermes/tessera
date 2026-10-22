@@ -223,9 +223,9 @@ fn inspector_row_summary_shows_live_derived_after_dirtying_events() {
     assert!(player_row.summary.contains("Lv 1"));
     assert!(player_row.summary.contains("Spd 98"), "player A9 -> 98");
 
-    // Dirtying event 1: a live status application (speed_pct = 90) →
-    // the summary must reflect 108 immediately (live cache, not a stale
-    // snapshot).
+    // Dirtying event 1: a live status application (speed_pct = 90) on the
+    // Agility-9 player → 98 * 90 // 100 = 88; the summary must reflect it
+    // immediately (live cache, not a stale snapshot).
     write_status(&sim, player, mods_pct(90));
     sim.recompute_live();
     let snap_mid = snapshot(&sim, &world, &world.save_hooks());
@@ -235,12 +235,13 @@ fn inspector_row_summary_shows_live_derived_after_dirtying_events() {
         .find(|r| r.blueprint == "Player")
         .expect("player row");
     assert!(
-        player_row.summary.contains("Spd 108"),
+        player_row.summary.contains("Spd 88"),
         "inspector summary shows the post-status speed: {}",
         player_row.summary
     );
 
-    // Dirtying event 2: an attribute write (Agility 20) → base 120.
+    // Dirtying event 2: an attribute write (Agility 20) → base 120, and with
+    // the live 90% status still applied → 120 * 90 // 100 = 108.
     sim.set_part_console(
         player,
         PART_ATTRIBUTES,
@@ -296,7 +297,15 @@ fn console_stats_is_read_only_and_shows_live_values_after_status() {
             .expect("goblin id")
     };
 
-    // Dirtying event: a live `speed_pct = 90` status; stats must show 108.
+    // Dirtying event: raise Agility to 20 (base 120), then apply a live
+    // `speed_pct = 90` status; the cache settles at 120 * 90 // 100 = 108
+    // and stats must show the live 108 plus the contributing terms.
+    sim.set_part_console(
+        player,
+        PART_ATTRIBUTES,
+        &BTreeMap::from([("agility".to_string(), 20)]),
+    )
+    .expect("setpart agility");
     write_status(&sim, player, mods_pct(90));
     sim.recompute_live();
     let fp_before = derived_fingerprint(&sim);
@@ -311,17 +320,16 @@ fn console_stats_is_read_only_and_shows_live_values_after_status() {
     };
     // The five live values, the acceptance style, post-status.
     assert!(text_player.contains("Spd 108"), "{text_player}");
-    assert!(text_player.contains("HP 20/36"), "{text_player}");
+    // max_hp 30 = 10 + 2*toughness 10 at level 1 (the setpart rewrite above).
+    assert!(text_player.contains("HP 20/30"), "{text_player}");
     // The contributing terms: attributes, level, bonuses, status modifiers.
+    // (The console setpart path rewrites the whole Attributes part with
+    // unstated fields at the 10 default — hence might=10 here.)
     assert!(
-        text_player.contains("attributes: might=14 agility=9"),
+        text_player.contains("attributes: might=10 agility=20 toughness=10 will=10 intellect=10"),
         "{text_player}"
     );
     assert!(text_player.contains("level=1"), "{text_player}");
-    assert!(
-        text_player.contains("bonuses: accuracy=0 dodge=0 ac=0"),
-        "{text_player}"
-    );
     assert!(
         text_player.contains("status Status_Chilled x1: speed pct=90"),
         "{text_player}"
@@ -344,6 +352,12 @@ fn console_stats_is_read_only_and_shows_live_values_after_status() {
         "{text_goblin}"
     );
     assert!(text_goblin.contains("level=2"), "{text_goblin}");
+    // The goblin's authored `Bonuses.ac = 2` (leather standing in for later
+    // armor) is among the contributing terms — the term that makes Def 12.
+    assert!(
+        text_goblin.contains("bonuses: accuracy=0 dodge=0 ac=2"),
+        "{text_goblin}"
+    );
 
     // Read-only: the caches are byte-identical after both stats calls, and a
     // bogus id fails cleanly.
@@ -456,10 +470,25 @@ fn headless_demo_shows_spawn_and_stagger_recomputes_and_goblin_speed() {
     let readout = sim.demo_entity_lines(&tiles);
     assert!(readout.contains("creature.player"), "{readout}");
     assert!(readout.contains("Spd 98"), "player A9: {readout}");
+    // The Bash lands on the goblin before the readout: HP drops by the
+    // declared 3..6 (read live for the exact value), and the speed still
+    // reflects Agility 13.
+    let goblin_hp = {
+        let b = sim.broker().read().unwrap_or_else(|p| p.into_inner());
+        b.typed_part::<tessera_core::events::Health>(
+            goblin,
+            &tessera_core::events::PART_HEALTH.into(),
+        )
+        .expect("goblin Health")
+        .hp
+    };
     assert!(readout.contains("creature.goblin"), "{readout}");
     assert!(
         readout.contains("Spd 106"),
         "goblin speed reflects Agility 13 (no longer a flat 100): {readout}"
     );
-    assert!(readout.contains("HP 20/34"), "{readout}");
+    assert!(
+        readout.contains(&format!("HP {goblin_hp}/34")),
+        "goblin hp is live after the bash drop: {readout}"
+    );
 }

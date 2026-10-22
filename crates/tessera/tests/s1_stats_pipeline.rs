@@ -430,7 +430,11 @@ fn tuning_reload_rebuilds_caches_from_the_new_table() {
         46,
         "10 + 2*13 with hp_base 20"
     );
-    assert_eq!(derived_map(&sim, goblin)["max_hp"], 46);
+    assert_eq!(
+        derived_map(&sim, goblin)["max_hp"],
+        44,
+        "goblin T 9: 20 + 2*9 + 1*(3 + 9//3) with hp_base 20"
+    );
 }
 
 /// Fail-closed spawn : a stat-ful blueprint without a registered rules
