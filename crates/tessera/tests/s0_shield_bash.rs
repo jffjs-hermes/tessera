@@ -1,4 +1,4 @@
-//! S0 builder 4 — the Shield Bash vertical slice, end to end.
+//! Shield Bash vertical slice, end to end.
 //!
 //! Proves the four merged-schema conditions through the real content path
 //! (`data/mods/tessera-campaign` loads as a mod), a seeded headless sim, and
@@ -16,7 +16,7 @@
 //! focused hot-reload extension test (only *new* status applications read
 //! the reloaded duration; in-flight instances keep their snapshot).
 //!
-//! Scope guard: no S2 combat-sim harness, scenario/bot formats, band policy,
+//! Scope guard: no combat-sim harness, scenario/bot formats, band policy,
 //! or sweep-driver behavior is exercised here.
 
 use std::path::{Path, PathBuf};

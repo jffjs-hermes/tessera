@@ -57,7 +57,7 @@ pub enum PlayerAction {
     /// scripted handler vetoes when out of charges).
     Zap,
     /// The scripted `Bash` (X): use the player's first granted ability (the
-    /// campaign's `Ability_ShieldBash`) on the reference enemy — the S0
+    /// campaign's `Ability_ShieldBash`) on the reference enemy — the
     /// declarative ability path (charge spend -> damage/status/push -> Luau
     /// assertion), with no ability script involved.
     Bash,
@@ -95,7 +95,7 @@ pub struct Sim {
     facing: (i32, i32),
     log: Vec<String>,
     /// Shared sink for the deterministic native event lines dispatched during
-    /// a turn (`UseAbility`, `TakeDamage`, `ApplyStatus` — the S0 headless
+    /// a turn (`UseAbility`, `TakeDamage`, `ApplyStatus` — the headless
     /// event-log mapping). The LATE observers push here; the turn loop drains
     /// the lines into `log` right after each turn so nested events appear in
     /// causal order.
@@ -643,7 +643,7 @@ impl Sim {
                 TurnAction::Attack(self.target_at(target))
             }
             PlayerAction::Bash => match self.enemy {
-                // Shield Bash the reference enemy (the S0 ability path: the
+                // Shield Bash the reference enemy (the ability path: the
                 // scheduler resolves the player's first granted ability and
                 // the native effect runtime spends a charge and resolves the
                 // declarative damage/status/push).
@@ -737,7 +737,7 @@ impl Sim {
             sched.take_turn(&mut self.ctx, actor, action)?
         };
         self.log.push(self.format_log_line(&report, from));
-        // Nested native event lines for this turn (the S0 headless mapping:
+        // Nested native event lines for this turn (the headless mapping:
         // `UseAbility`'s turn line, then the causal `TakeDamage`/`ApplyStatus`
         // lines the LATE observers queued during dispatch).
         self.log.extend(drain_event_lines(&self.event_lines));
@@ -1114,7 +1114,7 @@ pub fn build_cells(
 /// down, down, wait, bash, right, wait × 5]`. Within a few steps the player
 /// walks into a map collision (the pillar at x%8==4 && y%6==3) exercising
 /// the cancellation path, and exactly one turn uses the Shield Bash ability —
-/// the S0 headless event-log mapping (`UseAbility` → `TakeDamage(blunt)` →
+/// the headless event-log mapping (`UseAbility` → `TakeDamage(blunt)` →
 /// `ApplyStatus(Status_Staggered)` in order). One bash per run keeps the
 /// goblin's HP inside the single-bash declared range the assertion script
 /// checks (a second bash would deal cumulative damage past one bash's range).
@@ -1151,7 +1151,7 @@ fn tile_glyph(tiles: &TileRegistry, id: &str) -> char {
 /// - a `Move` collision + occupancy cancel (no actor ever enters a wall or
 ///   another actor's tile);
 /// - the reference demo combat (Attack → base TakeDamage → Health.hp);
-/// - the native S0 effect runtime (UseAbility/ApplyStatus declarative
+/// - the native effect runtime (UseAbility/ApplyStatus declarative
 ///   resolution) when the bridge's content library is present, so the
 ///   campaign's Shield Bash works in the demo;
 /// - the headless event-log observers (`TakeDamage`/`ApplyStatus` lines);
@@ -1180,7 +1180,7 @@ fn install_default_handlers(
     // `Health.hp`. This is the native "base hit" the Zapper's scripted zap
     // stacks on top of.
     install_base_combat(ctx);
-    // The S0 headless event-log mapping: deterministic `EVENT TakeDamage` /
+    // The headless event-log mapping: deterministic `EVENT TakeDamage` /
     // `EVENT ApplyStatus` lines for the declarative ability path (the
     // `EVENT UseAbility` turn line is logged by the sim on the action turn).
     install_event_logging(ctx, event_lines);

@@ -241,7 +241,7 @@ impl SimWorldAccess {
     /// Serialize a part's visible fields into the plain `PartValue` form the
     /// host snapshot and `engine.get_part` consume. A scripted `ScriptPart`
     /// returns its closed field map; the demo's writable native part
-    /// (`Health`) returns its `hp` field; the S0 effect runtime's native
+    /// (`Health`) returns its `hp` field; the effect runtime's native
     /// parts expose read-only snapshots: `Charges` (max/recharge/charges)
     /// and `StatusEffects` (status id → skip-turn credit owed). Other native
     /// parts read as `None` (invisible to scripts in v1).

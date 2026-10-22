@@ -1,4 +1,4 @@
-//! S0 native effect runtime: the declarative effect vocabulary, the native
+//! Native effect runtime: the declarative effect vocabulary, the native
 //! status store, the `Derived` cache invalidation hook, and the `UseAbility`
 //! resource path.
 //!
@@ -25,7 +25,7 @@
 //!   [`elapse_statuses`] (duration tick → `StatusExpired`), and
 //!   [`invalidate_derived`] (the declared cache-invalidation hook).
 //!
-//! No S2 hit-resolution rules are decided here: `Damage` rolls `lo..=hi` on a
+//! No hit-resolution rules are decided here: `Damage` rolls `lo..=hi` on a
 //! forked RNG stream and dispatches the existing `TakeDamage` event with the
 //! dtype field named; the resolution pipeline is later work.
 
@@ -48,7 +48,7 @@ use crate::kinds::Stacking;
 // Part names
 // ---------------------------------------------------------------------------
 
-/// `parts.Abilities`: the S0 ownership stub — the ability ids an entity is
+/// `parts.Abilities`: the ownership stub — the ability ids an entity is
 /// granted (`list = ["Ability_ShieldBash"]`). The grant seam
 /// ([`grant_ability_resources`]) resolves each id's `parts.Charges` into an
 /// entity charge pool.
@@ -87,7 +87,7 @@ pub const COMBAT_STREAM_LABEL: u64 = 1;
 /// `{ max = 3, recharge = 1200 }` (game-time units per charge); the native
 /// grant seam stamps the entity instance with `charges = max`, and the
 /// `UseAbility` resource path decrements it on use. Charge *recharge* accrual
-/// (the timer) is later work — S0 owns the declaration and the decrement.
+/// (the timer) is later work — this owns the declaration and the decrement.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Charges {
@@ -151,10 +151,10 @@ pub struct Effect {
     pub script: String,
 }
 
-/// `parts.Abilities`: the S0 ownership stub — granted ability ids in declared
+/// `parts.Abilities`: the ownership stub — granted ability ids in declared
 /// order. `UseAbility` spends the pool stamped from the matching ability
 /// blueprint; multiple granted abilities key off the same pool name for now
-/// (one charge pool per entity in S0; multi-pool ownership is later work).
+/// (one charge pool per entity; multi-pool ownership is later work).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Abilities {
@@ -495,7 +495,7 @@ impl StatusEffects {
 // Registration
 // ---------------------------------------------------------------------------
 
-/// Register the seven S0 effect/status parts as `Dynamic` parts with a serde
+/// Register the seven effect/status parts as `Dynamic` parts with a serde
 /// factory (same mechanism as the six content kinds), so blueprints carrying
 /// `parts.Charges` / `parts.Damage` / `parts.Effect` / `parts.Modifiers` /
 /// `parts.Abilities` / `parts.Derived` load and validate. `StatusEffects` is
@@ -790,7 +790,7 @@ fn resolve_apply_status(
 
 /// Advance every status on `entity` by `dt` game-time units, firing
 /// [`StatusExpired`] for each expiration (deterministic order; the scheduler
-/// calls this seam on its clock — S0 wires the event, not the clock).
+/// calls this seam on its clock — the event is wired here, not the clock).
 /// Returns the expired status ids.
 pub fn elapse_statuses(ctx: &mut SimContext, entity: Entity, dt: i64) -> Vec<String> {
     let expired = {

@@ -122,16 +122,16 @@ impl World {
     /// An empty world (empty library + empty registry). Call [`Self::load`]
     /// after registering engine components and parts to populate content.
     ///
-    /// The S0 content kinds (`Ability`, `Skill`, `Status`, `Item`, `Quest`,
+    /// The six content kinds (`Ability`, `Skill`, `Status`, `Item`, `Quest`,
     /// `Tuning` — see [`crate::kinds`]) are always registered so blueprint
     /// content may use them everywhere; their names are fixed and cannot
     /// collide with engine parts.
     pub fn new() -> Self {
         let mut registry = PartRegistry::new();
         crate::kinds::register_all(&mut registry)
-            .expect("S0 kind part names are fixed and never collide");
+            .expect("kind part names are fixed and never collide");
         crate::effects::register_all(&mut registry)
-            .expect("S0 effect part names are fixed and never collide");
+            .expect("effect part names are fixed and never collide");
         Self {
             library: Arc::new(RwLock::new(BlueprintLibrary::new())),
             registry,
@@ -588,7 +588,7 @@ parts.Abilities = { list = ["Ability_Ghost"] }
         let w = world(&vfs);
         // The same single registry the loader validates against must declare a
         // storage class for every part name it accepts: the two engine parts
-        // below plus the six always-registered S0 kind parts and the seven
+        // below plus the six always-registered kind parts and the seven
         // always-registered effect/status parts.
         assert_eq!(w.registry.len(), 15);
         for (id, storage) in w.registry.iter_storage() {
@@ -626,7 +626,7 @@ parts.Abilities = { list = ["Ability_Ghost"] }
         // Same name re-registered with a different storage class -> error.
         let err = w.register_part::<Stats>("Render").unwrap_err();
         assert!(matches!(err, PartError::DuplicatePartType(id) if id.as_str() == "Render"));
-        // The original entry is intact (6 S0 kind parts + 7 effect parts are
+        // The original entry is intact (6 kind parts + 7 effect parts are
         // always registered).
         assert_eq!(w.registry.len(), 14);
         assert_eq!(
