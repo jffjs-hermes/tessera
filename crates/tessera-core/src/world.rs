@@ -122,14 +122,16 @@ impl World {
     /// An empty world (empty library + empty registry). Call [`Self::load`]
     /// after registering engine components and parts to populate content.
     ///
-    /// The S0 content kinds (`Ability`, `Skill`, `Status`, `Item`, `Quest`,
+    /// The six content kinds (`Ability`, `Skill`, `Status`, `Item`, `Quest`,
     /// `Tuning` — see [`crate::kinds`]) are always registered so blueprint
     /// content may use them everywhere; their names are fixed and cannot
     /// collide with engine parts.
     pub fn new() -> Self {
         let mut registry = PartRegistry::new();
         crate::kinds::register_all(&mut registry)
-            .expect("S0 kind part names are fixed and never collide");
+            .expect("kind part names are fixed and never collide");
+        crate::effects::register_all(&mut registry)
+            .expect("effect part names are fixed and never collide");
         Self {
             library: Arc::new(RwLock::new(BlueprintLibrary::new())),
             registry,
@@ -382,6 +384,37 @@ impl World {
                 }
             }
         }
+
+        // The native resource-grant seam: a blueprint carrying
+        // `parts.Abilities` stamps each granted ability's charge pool (from
+        // the ability blueprint's `parts.Charges`) onto the entity, starting
+        // full. This is what turns a data declaration (`parts.Abilities.list`)
+        // into a usable resource pool at spawn; an unknown ability id (or a
+        // malformed `Abilities` payload — unreachable after loader
+        // validation, kept fail-closed regardless) fails the spawn rather
+        // than spawning a half-armed actor.
+        if let Some(payload) = blueprint.part(crate::effects::PART_ABILITIES) {
+            let granted: crate::effects::Abilities =
+                payload
+                    .clone()
+                    .try_into()
+                    .map_err(|e: toml::de::Error| SpawnError::PartBuild {
+                        name: crate::effects::PART_ABILITIES.to_string(),
+                        msg: e.to_string(),
+                    })?;
+            for ability in &granted.list {
+                if let Err(e) =
+                    crate::effects::grant_ability_resources(broker, &lib, entity, ability)
+                {
+                    broker.despawn(entity).ok();
+                    return Err(SpawnError::PartBuild {
+                        name: crate::effects::PART_ABILITIES.to_string(),
+                        msg: e.to_string(),
+                    });
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -488,13 +521,76 @@ parts.Stats  = { strength = 18, agility = 6 }
     }
 
     #[test]
+    fn spawn_blueprint_grants_ability_resources_from_abilities_part() {
+        // A fixture with a declarative Shield Bash (Charges 3) and a Player
+        // that carries `parts.Abilities = { list = [...] }`.
+        let vfs = MemVfs::new().with(
+            "blueprints/campaign.toml",
+            r##"
+[Ability]
+parts.Ability = { name = "Ability", kind = "active", target = "adjacent" }
+
+[Ability_ShieldBash]
+inherits = "Ability"
+parts.Ability = { name = "Shield Bash", kind = "active", target = "adjacent" }
+parts.Charges = { max = 3, recharge = 1200 }
+
+[Player]
+parts.Abilities = { list = ["Ability_ShieldBash"] }
+"##,
+        );
+        let w = world(&vfs);
+        let mut broker = EntityBroker::new();
+
+        let player = w.spawn_blueprint("Player", &mut broker).expect("player");
+        // The grant seam stamped the ability blueprint's charge pool, full.
+        let pool = broker
+            .typed_part::<crate::effects::Charges>(
+                player,
+                &PartTypeId::new(crate::effects::PART_CHARGES),
+            )
+            .expect("charge pool stamped at spawn")
+            .clone();
+        assert_eq!((pool.max, pool.recharge, pool.charges), (3, 1200, 3));
+
+        // An entity without the Abilities part gets no pool.
+        let plain = w.spawn_blueprint("Ability", &mut broker).expect("root");
+        assert!(
+            broker
+                .typed_part::<crate::effects::Charges>(
+                    plain,
+                    &PartTypeId::new(crate::effects::PART_CHARGES)
+                )
+                .is_none(),
+            "no Abilities part -> no grant"
+        );
+
+        // An unknown granted ability id fails the spawn fail-closed (no
+        // half-armed husk survives). The fixture carries no Ability_Ghost
+        // blueprint at all, so the loader passes and the grant seam is what
+        // rejects the spawn.
+        let bad = MemVfs::new().with(
+            "blueprints/bad.toml",
+            r##"
+[Player]
+parts.Abilities = { list = ["Ability_Ghost"] }
+"##,
+        );
+        let bw = world(&bad);
+        let mut bbroker = EntityBroker::new();
+        let err = bw.spawn_blueprint("Player", &mut bbroker).unwrap_err();
+        assert!(err.to_string().contains("Ability_Ghost"), "{err}");
+    }
+
+    #[test]
     fn registered_part_names_have_storage_class_and_loader_accepts_them() {
         let vfs = creatures();
         let w = world(&vfs);
         // The same single registry the loader validates against must declare a
         // storage class for every part name it accepts: the two engine parts
-        // below plus the six always-registered S0 kind parts.
-        assert_eq!(w.registry.len(), 8);
+        // below plus the six always-registered kind parts and the seven
+        // always-registered effect/status parts.
+        assert_eq!(w.registry.len(), 15);
         for (id, storage) in w.registry.iter_storage() {
             assert!(
                 matches!(storage, StorageClass::Component | StorageClass::Dynamic),
@@ -530,8 +626,9 @@ parts.Stats  = { strength = 18, agility = 6 }
         // Same name re-registered with a different storage class -> error.
         let err = w.register_part::<Stats>("Render").unwrap_err();
         assert!(matches!(err, PartError::DuplicatePartType(id) if id.as_str() == "Render"));
-        // The original entry is intact (6 S0 kind parts are always registered).
-        assert_eq!(w.registry.len(), 7);
+        // The original entry is intact (6 kind parts + 7 effect parts are
+        // always registered).
+        assert_eq!(w.registry.len(), 14);
         assert_eq!(
             w.registry.storage(&PartTypeId::new("Render")),
             Some(StorageClass::Component)

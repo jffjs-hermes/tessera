@@ -1,4 +1,4 @@
-//! S0 content kinds: the typed payloads of the six content kinds.
+//! The six content kinds: the typed payloads of the six content kinds.
 //!
 //! Each content kind (Tuning, Skill, Ability, Status, Item, Quest) is **one
 //! registered part** whose payload carries that kind's typed data. A
@@ -132,8 +132,8 @@ pub enum Stacking {
 }
 
 /// `parts.Item`: identity and base item data. Equipment slots and
-/// weapon/armor payloads are S2's contract; `slot` stays a string until S2
-/// fixes the vocabulary.
+/// weapon/armor payloads are a later contract; `slot` stays a string until
+/// that vocabulary is defined.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Item {
@@ -219,7 +219,7 @@ pub(crate) const KIND_PARTS: &[(&str, &str)] = &[
     ("Quest_", "Quest"),
 ];
 
-/// Register all six S0 kind parts in `registry` as `Dynamic` parts with a
+/// Register all six content kind parts in `registry` as `Dynamic` parts with a
 /// serde factory. The blueprint loader validates content against exactly this
 /// registry, so after this call `parts.Ability` & co. are known part names
 /// and `part_typed` deserializes their payloads into the types above.
@@ -237,7 +237,7 @@ pub fn register_all(registry: &mut PartRegistry) -> Result<(), PartError> {
 }
 
 /// A `PartFactory` deserializing the raw `toml::Value` payload into `T`.
-fn build<T>(value: &toml::Value) -> Result<Box<dyn Part>, PartError>
+pub(crate) fn build<T>(value: &toml::Value) -> Result<Box<dyn Part>, PartError>
 where
     T: serde::de::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
 {
@@ -251,7 +251,9 @@ where
     Ok(Box::new(t))
 }
 
-fn register<T>(registry: &mut PartRegistry, name: &str) -> Result<(), PartError>
+/// Register `T` as a `Dynamic` part under `name` (shared by the kind parts
+/// and the effect/status parts).
+pub(crate) fn register<T>(registry: &mut PartRegistry, name: &str) -> Result<(), PartError>
 where
     T: serde::de::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
 {

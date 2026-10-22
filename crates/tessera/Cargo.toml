@@ -8,10 +8,10 @@ rust-version.workspace = true
 
 [features]
 # Windowed developer tooling (debug console panel + inspector hook). Non-default
-# so release / dist builds and the headless path never compile egui (spec §4.3).
+# so release / dist builds and the headless path never compile egui.
 # egui 0.37 ships `default = []` (no bundled fonts), so `default_fonts` is
-# required for any text to render (spec §4.1: "verify exact feature list at
-# implementation").
+# required for any text to render (re-verify the exact feature list when
+# bumping the egui version).
 devtools = ["dep:egui", "dep:egui-winit", "dep:egui-wgpu"]
 
 [dependencies]
@@ -27,12 +27,12 @@ tessera-script = { path = "../tessera-script" }
 tessera-render = { path = "../tessera-render" }
 winit = "0.30.13"
 
-# M7 Card E — egui devtools. Optional, gated behind the `devtools` feature so a
-# default build has zero egui in the dependency graph (CI asserts this).
+# Optional egui devtools, gated behind the `devtools` feature so a default
+# build has zero egui in the dependency graph (CI asserts this).
 # egui-wgpu 0.37 pairs with wgpu ^30 / winit ^0.30.13 (first-class match, no
 # pinning); egui-winit 0.37 with `clipboard` (arboard + wayland dlopen, no
 # system-wayland build dep). No eframe: we wire egui directly onto the existing
-# winit/wgpu objects (spec §4.1).
+# winit/wgpu objects.
 egui = { version = "0.37", optional = true, default-features = false, features = ["default_fonts"] }
 egui-winit = { version = "0.37", optional = true, default-features = false, features = ["clipboard"] }
 egui-wgpu = { version = "0.37", optional = true, default-features = false, features = ["winit"] }

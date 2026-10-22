@@ -56,6 +56,11 @@ pub enum PlayerAction {
     /// direction. A wall/no-target cell is a no-op (the attack cancels or the
     /// scripted handler vetoes when out of charges).
     Zap,
+    /// The scripted `Bash` (X): use the player's first granted ability (the
+    /// campaign's `Ability_ShieldBash`) on the reference enemy — the
+    /// declarative ability path (charge spend -> damage/status/push -> Luau
+    /// assertion), with no ability script involved.
+    Bash,
     /// Do nothing this turn.
     Wait,
 }
@@ -89,6 +94,12 @@ pub struct Sim {
     /// Last facing direction (dx, dy), for the E=Zap scripted action.
     facing: (i32, i32),
     log: Vec<String>,
+    /// Shared sink for the deterministic native event lines dispatched during
+    /// a turn (`UseAbility`, `TakeDamage`, `ApplyStatus` — the headless
+    /// event-log mapping). The LATE observers push here; the turn loop drains
+    /// the lines into `log` right after each turn so nested events appear in
+    /// causal order.
+    event_lines: Arc<Mutex<Vec<String>>>,
     /// Player-turn clock: increments once per submitted player action
     /// (cancelled or not). Exposed to scripts via `engine.player_turns()`.
     player_turns: u64,
@@ -273,7 +284,8 @@ impl Sim {
         // Content-level handlers (collision, base combat, script death forward)
         // are re-registered identically on every construction — a save captures
         // *state*, not wiring, and load re-runs them exactly as zone start.
-        install_default_handlers(&mut ctx, bridge.as_ref());
+        let event_lines = Arc::new(Mutex::new(Vec::new()));
+        install_default_handlers(&mut ctx, bridge.as_ref(), event_lines.clone());
 
         let speed = ctx
             .broker
@@ -309,6 +321,7 @@ impl Sim {
             enemy,
             facing: (1, 0),
             log: Vec::new(),
+            event_lines,
             player_turns: 0,
         }
     }
@@ -538,7 +551,8 @@ impl Sim {
         // Live context over the restored broker, re-registering the default
         // handlers (never saved — wiring is re-created at zone start).
         let mut ctx = SimContext::shared(broker.clone(), zone, data.rng);
-        install_default_handlers(&mut ctx, bridge.as_ref());
+        let event_lines = Arc::new(Mutex::new(Vec::new()));
+        install_default_handlers(&mut ctx, bridge.as_ref(), event_lines.clone());
 
         // The reference enemy is the first scheduled non-player actor
         // (deterministic entity-id order); matches how `from_shared` treats the
@@ -559,6 +573,7 @@ impl Sim {
             enemy,
             facing: data.facing,
             log: Vec::new(),
+            event_lines,
             player_turns: data.player_turns,
         })
     }
@@ -627,6 +642,16 @@ impl Sim {
                 let target = Point::new(from.0 + dx, from.1 + dy);
                 TurnAction::Attack(self.target_at(target))
             }
+            PlayerAction::Bash => match self.enemy {
+                // Shield Bash the reference enemy (the ability path: the
+                // scheduler resolves the player's first granted ability and
+                // the native effect runtime spends a charge and resolves the
+                // declarative damage/status/push).
+                Some(e) => TurnAction::UseAbility { target: e },
+                // No reference enemy to bash (and the targeting pipeline is
+                // later work): the turn is a no-op.
+                None => TurnAction::Wait,
+            },
         };
         let report = {
             // Player-turn clock: increment *before* the player's turn resolves
@@ -712,6 +737,10 @@ impl Sim {
             sched.take_turn(&mut self.ctx, actor, action)?
         };
         self.log.push(self.format_log_line(&report, from));
+        // Nested native event lines for this turn (the headless mapping:
+        // `UseAbility`'s turn line, then the causal `TakeDamage`/`ApplyStatus`
+        // lines the LATE observers queued during dispatch).
+        self.log.extend(drain_event_lines(&self.event_lines));
         // Drains any deaths observed during the turn *after* the scheduler
         // lock is released, so the respawn policy's spawn/despawn can mutate
         // the scheduler without re-entering the lock.
@@ -753,15 +782,19 @@ impl Sim {
             sched.take_turn(&mut self.ctx, actor, action)?
         };
         self.log.push(self.format_log_line(&report, from));
+        // Nested native event lines for this actor's turn (same mapping as the
+        // player path — a staggered goblin, for instance, logs no Attack line).
+        self.log.extend(drain_event_lines(&self.event_lines));
         // Drain deaths observed during the turn once the scheduler lock is
         // released (the respawn policy mutates the scheduler).
         if let Some(b) = &self.bridge {
             b.drain_deaths();
         }
-        // Forward the acted event (Attack) so scripted LATE handlers stack on
-        // the native base hit, same as the player path.
+        // Forward the *resolved* action (the scheduler may have replaced it —
+        // e.g. a staggered actor's skip turns an Attack into a Wait), so
+        // scripted LATE handlers only see what actually happened.
         if self.bridge.is_some() {
-            self.forward_scripted_action(actor, action);
+            self.forward_scripted_action(actor, report.action);
         }
         Ok(report)
     }
@@ -884,6 +917,12 @@ impl Sim {
         if let Some(w) = bridge.world_state_id() {
             params.push(("world_state", mlua::Value::Integer(w as i64)));
         }
+        // The player lands in the dispatch snapshot too, so handlers can read
+        // the player's parts (e.g. the Shield Bash assertion reads the
+        // attacker's native `Charges` pool via `engine.get_part`).
+        if let Some(p) = bridge.player_id() {
+            params.push(("player", mlua::Value::Integer(p as i64)));
+        }
         let mut h = match host.lock() {
             Ok(h) => h,
             Err(_) => return Vec::new(),
@@ -945,7 +984,8 @@ impl Sim {
     }
 
     /// Pretty-print one event-log line: stable one-event-per-line format
-    /// `KEY <Event::NAME> tick=..` with the outcome for moves.
+    /// `KEY <Event::NAME> tick=..` with the outcome for moves and ability
+    /// uses.
     fn format_log_line(&self, report: &TurnReport, from: (i32, i32)) -> String {
         match report.action {
             TurnAction::MoveTo(to) => {
@@ -957,6 +997,19 @@ impl Sim {
                 format!(
                     "EVENT Move tick={} from=({},{}) to=({},{}) {}",
                     report.tick, from.0, from.1, to.x, to.y, outcome
+                )
+            }
+            TurnAction::UseAbility { target } => {
+                let outcome = if report.charged {
+                    "handled"
+                } else {
+                    "cancelled"
+                };
+                format!(
+                    "EVENT UseAbility tick={} target={} {}",
+                    report.tick,
+                    entity_to_id(target),
+                    outcome
                 )
             }
             TurnAction::Wait => format!("EVENT Wait tick={}", report.tick),
@@ -1057,17 +1110,31 @@ pub fn build_cells(
         .collect()
 }
 
-/// Deterministic headless action script. Cycle of `[right, right, down, down,
-/// wait]`, so within a few steps the player walks into a map collision (the
-/// pillar at x%8==4 && y%6==3) and the cancellation path is exercised.
+/// Deterministic headless action script. One 12-step cycle: `[right, right,
+/// down, down, wait, bash, right, wait × 5]`. Within a few steps the player
+/// walks into a map collision (the pillar at x%8==4 && y%6==3) exercising
+/// the cancellation path, and exactly one turn uses the Shield Bash ability —
+/// the headless event-log mapping (`UseAbility` → `TakeDamage(blunt)` →
+/// `ApplyStatus(Status_Staggered)` in order). One bash per run keeps the
+/// goblin's HP inside the single-bash declared range the assertion script
+/// checks (a second bash would deal cumulative damage past one bash's range).
 fn headless_script(i: usize) -> PlayerAction {
-    match i % 5 {
+    match i % 12 {
         0 => PlayerAction::Move { dx: 1, dy: 0 },
         1 => PlayerAction::Move { dx: 1, dy: 0 },
         2 => PlayerAction::Move { dx: 0, dy: 1 },
         3 => PlayerAction::Move { dx: 0, dy: 1 },
+        4 => PlayerAction::Wait,
+        5 => PlayerAction::Bash,
+        6 => PlayerAction::Move { dx: 1, dy: 0 },
         _ => PlayerAction::Wait,
     }
+}
+
+/// Take the queued native event lines out of the shared sink (called after
+/// each turn so nested events appear in the sim log in causal order).
+fn drain_event_lines(sink: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    std::mem::take(&mut *sink.lock().unwrap_or_else(|p| p.into_inner()))
 }
 
 /// The glyph for a tile id, falling back to `'?'`.
@@ -1084,9 +1151,17 @@ fn tile_glyph(tiles: &TileRegistry, id: &str) -> char {
 /// - a `Move` collision + occupancy cancel (no actor ever enters a wall or
 ///   another actor's tile);
 /// - the reference demo combat (Attack → base TakeDamage → Health.hp);
+/// - the native effect runtime (UseAbility/ApplyStatus declarative
+///   resolution) when the bridge's content library is present, so the
+///   campaign's Shield Bash works in the demo;
+/// - the headless event-log observers (`TakeDamage`/`ApplyStatus` lines);
 /// - when a script bridge is present, forward the reserved `Death` event to the
 ///   host so scripts can respond (respawn/policy).
-fn install_default_handlers(ctx: &mut SimContext, bridge: Option<&ScriptBridge>) {
+fn install_default_handlers(
+    ctx: &mut SimContext,
+    bridge: Option<&ScriptBridge>,
+    event_lines: Arc<Mutex<Vec<String>>>,
+) {
     // Content-level collision + occupancy: cancel any Move whose target is
     // not walkable, or whose target is already occupied by a live actor other
     // than the mover. This is the shipped cancellation handler.
@@ -1105,6 +1180,18 @@ fn install_default_handlers(ctx: &mut SimContext, bridge: Option<&ScriptBridge>)
     // `Health.hp`. This is the native "base hit" the Zapper's scripted zap
     // stacks on top of.
     install_base_combat(ctx);
+    // The headless event-log mapping: deterministic `EVENT TakeDamage` /
+    // `EVENT ApplyStatus` lines for the declarative ability path (the
+    // `EVENT UseAbility` turn line is logged by the sim on the action turn).
+    install_event_logging(ctx, event_lines);
+    // Native effect runtime (declarative abilities/statuses): resolvers read
+    // the shared content library, so reloads (in-place library swap) change
+    // the definitions new applications resolve against without re-registration.
+    if let Some(b) = bridge
+        && let Some(world) = b.world()
+    {
+        tessera_core::effects::install_native_effects(ctx, world.library().clone());
+    }
     // Forward the reserved `Death` event (dispatched by the native TakeDamage
     // applicator when hp clamps to zero) to the script host, so scripts can
     // react with respawn/policy (the turn hook contract).
@@ -1117,6 +1204,31 @@ fn install_default_handlers(ctx: &mut SimContext, bridge: Option<&ScriptBridge>)
             fwd.push_death(entity_to_id(ev.target));
         });
     }
+}
+
+/// The named `--headless` event-log mapping: LATE observers that queue one
+/// deterministic line per dispatched `TakeDamage` / `ApplyStatus` event into
+/// the shared sink (drained into the sim log at the end of the turn, so the
+/// nested events of one `UseAbility` appear in causal order after the turn's
+/// own line). `UseAbility` itself is logged by the turn line.
+fn install_event_logging(ctx: &mut SimContext, event_lines: Arc<Mutex<Vec<String>>>) {
+    let sink = event_lines.clone();
+    ctx.register_observer::<tessera_core::events::TakeDamage>(LATE, move |_ctx, ev| {
+        sink.lock().unwrap_or_else(|p| p.into_inner()).push(format!(
+            "EVENT TakeDamage target={} amount={} dtype={}",
+            entity_to_id(ev.target),
+            ev.amount,
+            ev.dtype
+        ));
+    });
+    let sink = event_lines.clone();
+    ctx.register_observer::<tessera_core::events::ApplyStatus>(LATE, move |_ctx, ev| {
+        sink.lock().unwrap_or_else(|p| p.into_inner()).push(format!(
+            "EVENT ApplyStatus target={} status={}",
+            entity_to_id(ev.target),
+            ev.status
+        ));
+    });
 }
 
 /// Register the reference demo combat: an `Attack` on a Health-carrying

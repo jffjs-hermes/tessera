@@ -1,0 +1,29 @@
+# Ability content for the campaign mod.
+#
+# `[Ability]` is the abstract root of the kind: it carries the full `Ability`
+# payload so a child that only overrides a couple of fields inherits the rest
+# (whole-part inheritance, M2 semantics). The naming lint exempts the bare
+# abstract-root ids (`[Ability]` == the kind part's name) from the prefix
+# rule while every `Ability_`-prefixed id must carry `parts.Ability`.
+[Ability]
+parts.Ability = { name = "Ability", kind = "active", target = "adjacent" }
+
+# Shield Bash: the S0 proof ability. All behavior is **declarative data** —
+# no ability script (`parts.Effect.script = ""`):
+#
+#   - `parts.Charges`   : the native resource pool (max 3, recharge 1200);
+#                         the spawn grant seam stamps the owner full.
+#   - `parts.Damage`    : a hit of `lo..=hi` (3..6) with dtype `blunt`, drawn
+#                         from the forked `combat` RNG stream natively.
+#   - `parts.Effect`    : applies `Status_Staggered`, pushes the target
+#                         1 tile away from the user.
+#
+# The headless assertion script reads the *expected* damage range and goblin
+# baseline HP from `Tuning_Combat` (the script-visible number source); keep
+# those keys in sync with this payload and the Goblin patch.
+[Ability_ShieldBash]
+inherits = "Ability"
+parts.Ability = { name = "Shield Bash", kind = "active", target = "adjacent", tags = ["melee", "stagger"] }
+parts.Charges = { max = 3, recharge = 1200 }
+parts.Damage  = { lo = 3, hi = 6, dtype = "blunt", stat = "might", acc_bonus = 3 }
+parts.Effect  = { applies = ["Status_Staggered"], push = 1, script = "" }

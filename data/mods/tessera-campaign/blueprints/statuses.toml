@@ -1,0 +1,17 @@
+# Status content for the campaign mod.
+#
+# `[Status]` is the abstract root of the kind (the naming lint exempts the
+# bare root id); `Status_Staggered` inherits it and carries the full payload
+# plus its modifier list.
+[Status]
+parts.Status = { name = "Status", duration = 1, stacking = "refresh" }
+
+# Staggered: the status Shield Bash applies. `duration` is in game-time units;
+# `stacking = "refresh"` means a reapplication resets the applied duration.
+# `parts.Modifiers = { skip_turns = 1 }` is the control modifier the native
+# scheduler seam consumes: a staggered actor wastes its next scheduled action
+# (see the skip-turn consumption in the scheduler).
+[Status_Staggered]
+inherits = "Status"
+parts.Status    = { name = "Staggered", duration = 100, stacking = "refresh", tags = ["harmful", "control"] }
+parts.Modifiers = { skip_turns = 1 }

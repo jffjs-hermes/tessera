@@ -1,18 +1,21 @@
-//! Integration test: no milestone references may appear anywhere in the
+//! Integration test: no planning references may appear anywhere in the
 //! `crates/` tree (Rust comments, doc comments, or user-visible strings).
 //!
-//! Rule of the project owner: milestone names (M3, M4, ...) and the word
-//! "milestone" belong only in `docs/` (specs, architecture, roadmap, README).
-//! Code under `crates/` must describe behavior and constraints instead.
+//! Rule of the project owner: milestones (M-labelled like `M3`, or S-labelled
+//! like `S0`/`S4b`), kanban cards (the whole word `card`, or a `t_<hex>` card
+//! id), planning specs (the whole word `spec`, a `§` section pointer, or a
+//! `docs/specs` path) and the word "milestone" belong only in `docs/` (specs,
+//! architecture, roadmap, README). Code under `crates/` must describe
+//! behavior and constraints instead.
 //!
 //! This test walks every `*.rs` file under the `crates/` directory (the parent
-//! of this crate) and fails if any line references a milestone.
+//! of this crate) and fails if any line references a milestone or card.
 //!
 //! IMPORTANT: this guard intentionally skips its *own* source file (compared by
 //! canonical path). That is not an allowlist of a milestone — rather, the guard
 //! necessarily contains in its source the very words it detects (its failure
-//! message says "milestone", and its unit test feeds it `M3` / `milestone`
-//! samples). Everything else under `crates/` is scanned with no exemptions.
+//! message and its unit tests feed it `M3` / `S0` / `t_84ef789d` samples).
+//! Everything else under `crates/` is scanned with no exemptions.
 
 use std::fs;
 use std::path::Path;
@@ -40,6 +43,44 @@ fn has_m_token(line: &str) -> bool {
                 }
             }
             // Skip the whole M+digits run either way.
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// True if `line` contains a standalone `S<digits>` token (e.g. `S0`, `S2`,
+/// `S11`) or the `S<digits><letter>` form (`S4b`), where the characters
+/// immediately before and after the token are not ASCII letters or digits (or
+/// are line boundaries). This mirrors [`has_m_token`] for the S-labelled
+/// milestone names. So `S2`, `(S0)`, and `S4b:` match, while `SITEM` and
+/// `Slot2` do not (no digit run after the `S`).
+fn has_s_token(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'S' {
+            let mut j = i + 1;
+            let digits_start = j;
+            while j < len && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            // Requires at least one digit after the S. A single trailing
+            // lowercase letter (the `S4b` sub-label form) is part of the token.
+            if j > digits_start {
+                if j < len && bytes[j].is_ascii_lowercase() {
+                    j += 1;
+                }
+                let left_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+                let right_ok = j >= len || !bytes[j].is_ascii_alphanumeric();
+                if left_ok && right_ok {
+                    return true;
+                }
+            }
+            // Skip the whole S+digits(+letter) run either way.
             i = j;
         } else {
             i += 1;
@@ -108,6 +149,42 @@ fn has_spec_word(line: &str) -> bool {
     has_whole_word(line, "spec") || has_whole_word(line, "specs")
 }
 
+/// True if `line` contains a kanban card id: a whole-word `t_` run followed
+/// by at least 6 hex characters (case-insensitive). The characters immediately
+/// before and after the run must not be ASCII letters or digits (or are line
+/// boundaries). So `t_84ef789d` matches, while `t_matrix` (not hex), `t_a` (too
+/// short) and `item_84ef789d` (no `t_` word boundary) do not.
+fn has_kanban_id(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b't' {
+            let j = i + 1;
+            if j < len && bytes[j] == b'_' {
+                let mut k = j + 1;
+                while k < len && bytes[k].is_ascii_hexdigit() {
+                    k += 1;
+                }
+                if k - (j + 1) >= 6 {
+                    let left_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+                    let right_ok = k >= len || !bytes[k].is_ascii_alphanumeric();
+                    if left_ok && right_ok {
+                        return true;
+                    }
+                }
+                // Skip the whole t_+hex run either way.
+                i = k;
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
 /// True if `line` contains a section-sign `§` (a spec section pointer).
 fn has_section_sign(line: &str) -> bool {
     line.contains('§')
@@ -118,11 +195,14 @@ fn has_docs_specs_path(line: &str) -> bool {
     line.contains("docs/specs")
 }
 
-/// True if `line` contains any planning reference: a milestone name, the words
-/// `card`/`spec`, a `§` section pointer, or a `docs/specs` path.
+/// True if `line` contains any planning reference: a milestone name (M- or
+/// S-labelled), a `t_<hex>` kanban card id, the words `card`/`spec`, a `§`
+/// section pointer, or a `docs/specs` path.
 fn line_has_milestone_ref(line: &str) -> bool {
     has_m_token(line)
+        || has_s_token(line)
         || has_milestone_word(line)
+        || has_kanban_id(line)
         || has_card_word(line)
         || has_spec_word(line)
         || has_section_sign(line)
@@ -203,6 +283,14 @@ fn matcher_catches_real_milestone_references() {
     assert!(line_has_milestone_ref("see §3.2"));
     // spec tree paths
     assert!(line_has_milestone_ref("see `docs/specs/m2-entities.md`"));
+    // S-labelled milestone names (slice labels), including the S4b sub-form
+    assert!(line_has_milestone_ref("// S0 scope"));
+    assert!(line_has_milestone_ref("S2's contract"));
+    assert!(line_has_milestone_ref("(S4b) UI shell"));
+    assert!(line_has_milestone_ref("per S11: stable"));
+    // kanban card ids (whole-word t_ + ≥6 hex)
+    assert!(line_has_milestone_ref("handled in t_84ef789d"));
+    assert!(line_has_milestone_ref("t_84ef789d"));
 }
 
 #[test]
@@ -216,4 +304,14 @@ fn matcher_ignores_lookalikes() {
     assert!(!line_has_milestone_ref("the specification declares it"));
     assert!(!line_has_milestone_ref("discard the bad value"));
     assert!(!line_has_milestone_ref("a cardamom reference"));
+    // S-token lookalikes: no digit run after `S`, or the run is part of a word
+    assert!(!line_has_milestone_ref("Slot2"));
+    assert!(!line_has_milestone_ref("Slice"));
+    assert!(!line_has_milestone_ref("SITEM"));
+    assert!(!line_has_milestone_ref("s0_shield"));
+    // kanban id lookalikes: `t_` must be followed by ≥6 hex as a whole word
+    assert!(!line_has_milestone_ref("t_matrix"));
+    assert!(!line_has_milestone_ref("item_84ef789d"));
+    assert!(!line_has_milestone_ref("t_4b"));
+    assert!(!line_has_milestone_ref("at_84ef789d"));
 }
