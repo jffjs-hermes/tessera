@@ -1,0 +1,13 @@
+# Base combat tuning: the full S1 key set (s1-stats §4.1), typed integer
+# values only (no floats). `rules/stats.luau` reads every key it uses through
+# `engine.tuning("Tuning_Combat")`; a missing key is a script error
+# (fail-closed), an unknown-key override is already a TuningError.
+#
+# The campaign mod RESTATES this full key set (M2 whole-part replace would
+# otherwise drop every base key) plus its own goblin_hp/bash_lo/bash_hi.
+#
+# Values: calibrated against Specs/prototype_formula_sim.py (P) and
+# Specs/prototype_class_sim.py (K) — the two prototypes agree on all shared
+# values, so a single table serves both (§4.7).
+[Tuning_Combat]
+parts.Tuning = { hp_base = 10, hp_per_toughness = 2, hp_level_base = 3, hp_toughness_divisor = 3, acc_per_agility = 2, level_bonus = 1, base_hit = 50, hit_min = 5, hit_max = 95, ac_factor = 2, ac_cap = 30, speed_slope = 2, speed_min = 50, speed_max = 140, untrained_penalty = 15 }

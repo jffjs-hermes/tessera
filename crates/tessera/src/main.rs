@@ -1,5 +1,5 @@
 //! Tessera demo: a data-driven `@` spawned from `[Player]` (a blueprint with
-//! `parts.Render = { tile = "creature.player" }`), drawn from the tile registry.
+//! `parts.Render = { tile = "creature.player()" }`), drawn from the tile registry.
 //! Edit `data/base/blueprints/` while running and the blueprint library reloads
 //! (new spawns use the new library; existing entities keep their parts).
 //!
@@ -53,9 +53,9 @@ enum UserEvent {
 
 struct Args {
     data: PathBuf,
-    /// Mods root (`--mods <dir>`), where local directory / zip mods are
+    /// Mods root (`--mods() <dir>`), where local directory / zip mods() are
     /// discovered. The shipped layout keeps the base pack at `data/base` and
-    /// mods at `data/mods`, so the default matches when `--data` is unchanged.
+    /// mods() at `data/mods()`, so the default matches when `--data` is unchanged.
     mods: PathBuf,
     /// Which zone to load (`--zone <id>`); the pack must have exactly one zone
     /// when omitted (fail-closed, no silent pick).
@@ -102,7 +102,7 @@ fn parse_args() -> Result<Args> {
             }
             "-h" | "--help" => {
                 println!(
-                    "tessera [--data <dir>] [--mods <dir>] [--zone <id>] [--frames <n>] [--headless <n>]\n\
+                    "tessera [--data <dir>] [--mods() <dir>] [--zone <id>] [--frames <n>] [--headless <n>]\n\
                      \n\
                      Interactive: arrow keys / WASD / hjklyubn or numpad to move (all 8\n\
                      directions, numpad 5 = wait), `.` / Space = wait,\n\
@@ -112,7 +112,7 @@ fn parse_args() -> Result<Args> {
                      The headless script includes one Bash step, so the event log shows the\n\
                      declarative ability path in order: UseAbility -> TakeDamage(blunt) -> ApplyStatus.\n\
                      `--zone <id>`: load the named zone (defaults to the single zone in the pack).\n\
-                     `--mods <dir>`: discover local directory / zip mods (default data/mods);\n\
+                     `--mods() <dir>`: discover local directory / zip mods() (default data/mods());\n\
                      base data loads first, then each mod in deterministic load order.\n\
                      `--save-dir <dir>`: save directory for save/load and --load (default ./saves).\n\
                      `--load <name>`: load the named save at startup, replacing live state.\n\
@@ -147,7 +147,7 @@ struct Content {
     broker: Arc<RwLock<EntityBroker>>,
     /// Script host bridge (loads + dispatches scripts against `broker`).
     bridge: ScriptBridge,
-    /// Deterministic load order of the loaded mods (empty for a base-only
+    /// Deterministic load order of the loaded mods() (empty for a base-only
     /// pack). Kept so the headless demo can report what a mod run exercised.
     mod_ids: Vec<String>,
     /// Whitelist save hooks for this world (native + script parts), built once
@@ -158,12 +158,12 @@ struct Content {
 
 /// Build the world: register the engine's known part types and the dynamic
 /// parts (Position / ActorEnergy / Health; the native stat parts Attributes/
-/// Level/Bonuses are registered centrally by `World::new`), load every script
+/// Level/Bonuses are registered centrally by `World::new()`), load every script
 /// in the content set (registering their `define_part` schemas via the host)
 /// and sync those schemas into the world registry so blueprint
 /// `parts.<ScriptPart>` keys validate — THEN load the blueprint set. On any
 /// error returns an anyhow error carrying `file + id` diagnostics. `vfs` is
-/// the composed overlay (base + mods), so scripts and blueprints resolve
+/// the composed overlay (base + mods()), so scripts and blueprints resolve
 /// across all of them in one pass.
 fn build_world(vfs: &dyn Vfs, bridge: &ScriptBridge) -> Result<World> {
     let mut world = World::new();
@@ -215,11 +215,11 @@ fn build_world(vfs: &dyn Vfs, bridge: &ScriptBridge) -> Result<World> {
 /// plus every discovered local directory / zip mod, layered in deterministic
 /// load order. The composed overlay Vfs feeds the tile, script and blueprint
 /// loaders, and each mod's `patches/*.toml` are applied to the blueprint library
-/// afterwards. `mods` may be a missing or empty directory (base-only load).
+/// afterwards. `mods()` may be a missing or empty directory (base-only load).
 fn load_content(data: &std::path::Path, mods: &std::path::Path) -> Result<Content> {
     let base_vfs = DirVfs::new(data);
     // Discover mods: directory + zip sources under the mods root. A missing /
-    // empty mods directory is not an error — the demo loads base-only then.
+    // empty mods() directory is not an error — the demo loads base-only then.
     let sources = if mods.is_dir() {
         tessera::mods::discover_sources(mods)?
     } else {
@@ -299,6 +299,22 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
         .world
         .spawn_blueprint(start_bp, &mut broker)
         .with_context(|| format!("spawning {start_bp:?}"))?;
+    // Fail-closed spawn : a stat-ful entity without the
+    // registered rules script is a spawn error.
+    if broker
+        .typed_part::<tessera_core::stats::Attributes>(
+            player,
+            &tessera_core::ecs::PartTypeId::new(tessera_core::stats::PART_ATTRIBUTES),
+        )
+        .is_some()
+        && !content.bridge.has_event_handler("RecomputeDerived")
+    {
+        drop(broker);
+        anyhow::bail!(
+            "spawning {start_bp:?}: entity carries parts.Attributes but no \
+             rules/stats.luau handler is registered (fail-closed)"
+        );
+    }
     broker.insert_part(
         player,
         PART_POSITION,
@@ -322,6 +338,24 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
                 .spawn_blueprint(bp, &mut broker)
                 .with_context(|| format!("spawning {bp:?}"))?
         };
+        // Fail-closed spawn : a stat-ful entity without the
+        // registered rules script is a spawn error.
+        if content
+            .broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .typed_part::<tessera_core::stats::Attributes>(
+                e,
+                &tessera_core::ecs::PartTypeId::new(tessera_core::stats::PART_ATTRIBUTES),
+            )
+            .is_some()
+            && !content.bridge.has_event_handler("RecomputeDerived")
+        {
+            anyhow::bail!(
+                "spawning {bp:?}: entity carries parts.Attributes but no \
+                 rules/stats.luau handler is registered (fail-closed)"
+            );
+        }
         let to = {
             let b = content.broker.read().unwrap_or_else(|p| p.into_inner());
             let occupied = |cx: i32, cy: i32| {
@@ -684,7 +718,7 @@ fn startup_console(sim: &mut Sim, content: &Content, args: &Args) {
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -694,7 +728,7 @@ fn main() -> Result<()> {
     let args = parse_args()?;
     let content = load_content(&args.data, &args.mods).with_context(|| {
         format!(
-            "loading content from {} (mods {})",
+            "loading content from {} (mods() {})",
             args.data.display(),
             args.mods.display()
         )
@@ -722,7 +756,7 @@ fn main() -> Result<()> {
 
         let map_text = sim.run_headless(&content.tiles, n);
         print!("{map_text}");
-        for line in sim.log() {
+        for line in &sim.log {
             println!("{line}");
         }
         // One-line status readout: hp + player-turn clock (the combat / death
@@ -742,7 +776,7 @@ fn main() -> Result<()> {
                 .library()
                 .read()
                 .unwrap_or_else(|p| p.into_inner());
-            println!("mods loaded: {}", content.mod_ids.join(", "));
+            println!("mods() loaded: {}", content.mod_ids.join(", "));
             if lib.contains("Bogling") {
                 println!("mod demo: Bogling spawned with sample-mod Charge; Goblin tile patched");
             }
@@ -765,10 +799,10 @@ fn main() -> Result<()> {
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
 
-    // Dev hot reload: any change under the data dir — base *or* mods — triggers
-    // a reload (a single miss keeps the whole previous content, mods included,
-    // fail-closed). Watch the mods root too when it exists, so edits to local
-    // directory / zip mods are picked up like base edits.
+    // Dev hot reload: any change under the data dir — base *or* mods() — triggers
+    // a reload (a single miss keeps the whole previous content, mods() included,
+    // fail-closed). Watch the mods() root too when it exists, so edits to local
+    // directory / zip mods() are picked up like base edits.
     let watcher = {
         let p = proxy.clone();
         let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {

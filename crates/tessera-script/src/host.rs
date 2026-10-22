@@ -403,7 +403,7 @@ impl ScriptHost {
     /// Build a host with the given [`WorldAccess`] (writer) and [`WorldRead`]
     /// (shared spatial query) handle. The reader is what the world-slice nav
     /// API closures answer from; the writer is the apply seam the host uses for
-    /// `set_part`/`spawn_at`/etc. A host built with [`Self::new`] gets a
+    /// `set_part`/`spawn_at`/etc. A host built with [`Self::new()`] gets a
     /// fail-closed [`DefaultWorldRead`].
     pub fn with_reader(world: Box<dyn WorldAccess>, world_read: Arc<dyn WorldRead>) -> Self {
         Self::with_reader_base(world, world_read, crate::FIRST_SCRIPT_ENTITY)
@@ -421,6 +421,20 @@ impl ScriptHost {
     ) -> Self {
         let mut writable_native = BTreeMap::new();
         writable_native.insert("Health".to_string(), BTreeSet::from(["hp".to_string()]));
+        // stats: scripts may write the persistent stat parts (the dirtying-event
+        // declaration — a write to Attributes/Level recomputes Derived) and
+        // the Derived cache itself (the rules script's single write path).
+        writable_native.insert(
+            "Attributes".to_string(),
+            BTreeSet::from([
+                "might".to_string(),
+                "agility".to_string(),
+                "toughness".to_string(),
+                "will".to_string(),
+                "intellect".to_string(),
+            ]),
+        );
+        writable_native.insert("Level".to_string(), BTreeSet::from(["level".to_string()]));
         Self {
             lua: None,
             counter: Arc::new(AtomicU64::new(crate::SCRIPT_INSTRUCTION_BUDGET)),
@@ -529,7 +543,7 @@ impl ScriptHost {
             msg: format!("thread sandbox: {e}"),
         })?;
         thread
-            .resume::<()>(())
+            .resume::<MultiValue>(MultiValue::new())
             .map_err(|e| map_load(script, e, &self.counter))?;
 
         // Apply `on` registrations the top level queued.
@@ -983,7 +997,21 @@ impl ScriptHost {
     /// Known handler event names for `engine.on` validation (the canonical
     /// core events shipped by the event bus).
     pub fn known_events(&self) -> &'static [&'static str] {
-        &["Move", "Attack", "TakeDamage", "ActorTurnStart", "Death"]
+        &[
+            "Move",
+            "Attack",
+            "TakeDamage",
+            "ActorTurnStart",
+            "Death",
+            "RecomputeDerived",
+        ]
+    }
+
+    /// True when at least one scripted handler is registered for `event`
+    /// (the engine's fail-closed check: a stat-ful spawn without a
+    /// `RecomputeDerived` handler is a spawn error, ).
+    pub fn has_event_handler(&self, event: &str) -> bool {
+        self.handler_count(event) > 0
     }
 
     pub fn register_handler(
@@ -1194,6 +1222,12 @@ impl ScriptHost {
                     .clone()
             };
             value::validate_scripted_write(&schema, fields)?;
+        } else if name == tessera_core::effects::PART_DERIVED {
+            // The derived cache is the rules script's single write path. Its
+            // keys are validated natively when the write commits (the world
+            // apply seam builds the typed part through Derived::from_values,
+            // which rejects unknown/reserved stat names fail-closed) — the
+            // field-set whitelist cannot express an open map.
         } else {
             let writable = self.writable_native.get(name).cloned().unwrap_or_default();
             if fields.keys().any(|f| !writable.contains(f.as_str())) {

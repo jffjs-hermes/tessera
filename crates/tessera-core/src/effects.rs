@@ -39,7 +39,7 @@ use thiserror::Error;
 use crate::blueprints::BlueprintLibrary;
 use crate::ecs::{EntityBroker, PartError, PartRegistry, PartTypeId};
 use crate::events::{
-    ApplyStatus, DamageSource, HandlerAction, Move, NORMAL, Point, SimContext, StatusApplied,
+    ApplyStatus, DamageSource, HandlerAction, LATE, Move, NORMAL, Point, SimContext, StatusApplied,
     StatusExpired, TakeDamage, TileEntry, UseAbility,
 };
 use crate::kinds::Stacking;
@@ -176,6 +176,37 @@ pub struct Derived {
     pub values: BTreeMap<String, i64>,
 }
 
+impl Derived {
+    /// Validate a candidate cache payload against the closed `DerivedStat`
+    /// vocabulary: every key must be a known stat name and in the computed
+    /// set. `Ok(())` means the payload may be stored; anything else fails
+    /// closed (an unknown or reserved key is an error, never silently
+    /// dropped). Single source of truth for the deserialize path and the
+    /// script `set_part` write path alike.
+    pub fn validate_keys(values: &BTreeMap<String, i64>) -> Result<(), String> {
+        for key in values.keys() {
+            let stat = crate::stats::DerivedStat::from_str(key).ok_or_else(|| {
+                format!("unknown derived stat key '{key}' (expected one of the stat names)")
+            })?;
+            if !stat.is_computed() {
+                return Err(format!(
+                    "derived stat '{key}' is reserved and not yet computed; \
+                     the cache may not carry it"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Build a cache payload from a script-written field map, validating
+    /// every key first (fail closed). `values` may be empty; missing keys
+    /// are absent, they are never defaulted.
+    pub fn from_values(values: BTreeMap<String, i64>) -> Result<Self, String> {
+        Self::validate_keys(&values)?;
+        Ok(Derived { values })
+    }
+}
+
 impl<'de> Deserialize<'de> for Derived {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -188,20 +219,7 @@ impl<'de> Deserialize<'de> for Derived {
             values: BTreeMap<String, i64>,
         }
         let raw = RawDerived::deserialize(deserializer)?;
-        for key in raw.values.keys() {
-            let stat = crate::stats::DerivedStat::from_str(key).ok_or_else(|| {
-                serde::de::Error::custom(format!(
-                    "unknown derived stat key '{key}' (expected one of the stat names)"
-                ))
-            })?;
-            if !stat.is_computed() {
-                return Err(serde::de::Error::custom(format!(
-                    "derived stat '{key}' is reserved and not yet computed; \
-                     the cache may not carry it"
-                )));
-            }
-        }
-        Ok(Derived { values: raw.values })
+        Derived::from_values(raw.values).map_err(serde::de::Error::custom)
     }
 }
 
@@ -260,6 +278,13 @@ impl Modifiers {
     /// The resolved skip-turn count (the control field's `add`).
     pub fn skip_turns(&self) -> i64 {
         self.stats.get(CONTROL_SKIP_TURNS).map_or(0, |m| m.add)
+    }
+
+    /// The resolver entry for one stat key (the `add`/`pct` steps a live
+    /// status contributes), or `None` when this modifier list has no entry
+    /// for it. Deterministic read for the native recompute finalization.
+    pub fn get(&self, stat: &str) -> Option<AddPct> {
+        self.stats.get(stat).copied()
     }
 
     /// Consume one skip-turn credit: decrement the control field's `add` by
@@ -639,8 +664,9 @@ pub fn invalidate_derived(ctx: &mut SimContext, entity: Entity) {
 
 /// Register the native effect runtime on `ctx`: the `UseAbility` resource
 /// path, the `ApplyStatus` store application, the `StatusApplied` /
-/// `StatusExpired` observers that invalidate the target's `Derived` cache,
-/// and — via the returned seam — duration ticking.
+/// `StatusExpired` observers that invalidate the target's `Derived` cache
+/// and dispatch [`RecomputeDerived`] (the declared status dirtying events,
+/// ), and — via the returned seam — duration ticking.
 ///
 /// All handlers resolve declarative parts against `library` (the shared
 /// content library). An unknown ability/status id cancels the event
@@ -653,8 +679,21 @@ pub fn install_native_effects(ctx: &mut SimContext, library: Arc<RwLock<Blueprin
     ctx.register::<ApplyStatus>(NORMAL, move |ctx, ev| {
         resolve_apply_status(ctx, ev, &library)
     });
-    ctx.register_observer::<StatusApplied>(NORMAL, |ctx, ev| invalidate_derived(ctx, ev.target));
-    ctx.register_observer::<StatusExpired>(NORMAL, |ctx, ev| invalidate_derived(ctx, ev.target));
+    // A successful status application/expiry dirties the target's derived
+    // stats: clear the cache immediately and
+    // defer the `RecomputeDerived` dispatch until the dirtying dispatch's
+    // stack unwinds, so the recompute — and its headless log line — lands
+    // after the status event's own observers ( ordering). The
+    // engine's RecomputeDerived handler re-checks that the entity actually
+    // carries `Attributes` (a status on a legacy entity recomputes nothing).
+    ctx.register_observer::<StatusApplied>(LATE, |ctx, ev| {
+        invalidate_derived(ctx, ev.target);
+        ctx.defer_recompute(ev.target);
+    });
+    ctx.register_observer::<StatusExpired>(LATE, |ctx, ev| {
+        invalidate_derived(ctx, ev.target);
+        ctx.defer_recompute(ev.target);
+    });
 }
 
 /// `UseAbility { user, ability, target }`:

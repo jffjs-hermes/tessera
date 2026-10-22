@@ -10,6 +10,7 @@ pub mod effects;
 pub mod events;
 pub mod kinds;
 pub mod path;
+pub mod recompute;
 pub mod rng;
 pub mod save;
 pub mod script_part;

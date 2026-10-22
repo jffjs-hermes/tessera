@@ -5,7 +5,7 @@
 //! The broker is shared via `Arc<RwLock<EntityBroker>>` (the same handle the
 //! [`SimContext`] was built with), so script snapshots and native handlers
 //! observe the *same* live entity state — the "one dispatch path" seam.
-//! Entity ids cross the boundary as `Entity::to_bits().get()` values
+//! Entity ids cross the boundary as `Entity::to_bits.get` values
 //! and are recovered with [`hecs::Entity::from_bits`], so no side table is
 //! needed.
 //!
@@ -27,7 +27,7 @@
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Result;
@@ -76,11 +76,53 @@ pub struct SharedSim {
     /// `spawn_at`/`despawn` re-lock the scheduler, so forwarding under the lock
     /// would deadlock).
     pending_deaths: Mutex<Vec<u64>>,
+    /// Script-facing entity ids whose `Attributes`/`Level` were written by a
+    /// scripted `set_part` pending action mid-dispatch (the world apply seam
+    /// queues here because it has no `SimContext`). The sim drains the queue
+    /// once dispatch returns and dispatches `RecomputeDerived` per id, FIFO
+    /// order (deterministic).
+    recompute_queue: Mutex<Vec<u64>>,
+    /// Whether a `rules/stats.luau` handler was registered by the engine at
+    /// install time (the fail-closed spawn gate; set by the sim, read by the
+    /// scripted spawn path which has no host access).
+    stats_armed: AtomicBool,
 }
 
+#[allow(dead_code)] // accessors used by the console/stats path and scheduled recomputation
 impl SharedSim {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Queue a script-facing entity id for a `RecomputeDerived` dispatch once
+    /// the current dispatch returns (the scripted `set_part` write to
+    /// `Attributes`/`Level` path, ).
+    pub fn push_recompute(&self, id: u64) {
+        self.recompute_queue
+            .lock()
+            .expect("recompute queue lock")
+            .push(id);
+    }
+
+    /// Drain the queued recompute ids, in queue order (deterministic).
+    pub fn drain_recompute(&self) -> Vec<u64> {
+        self.recompute_queue
+            .lock()
+            .expect("recompute queue lock")
+            .drain(..)
+            .collect()
+    }
+
+    /// Record whether the engine registered the stats rules handler at install
+    /// time (the fail-closed spawn gate).
+    pub fn set_stats_armed(&self, armed: bool) {
+        self.stats_armed.store(armed, Ordering::Relaxed);
+    }
+
+    /// True when the engine's stats rules handler is registered (spawns of
+    /// stat-ful entities fail closed when false, ).
+    pub fn stats_armed(&self) -> bool {
+        self.stats_armed.load(Ordering::Relaxed)
     }
 
     /// Set the pieces known only after the sim is constructed. `scheduler` is
@@ -223,6 +265,8 @@ impl Default for SharedSim {
             world: RwLock::new(None),
             script_entities: RwLock::new(BTreeMap::new()),
             pending_deaths: Mutex::new(Vec::new()),
+            recompute_queue: Mutex::new(Vec::new()),
+            stats_armed: AtomicBool::new(false),
         }
     }
 }
@@ -273,6 +317,44 @@ impl SimWorldAccess {
                 st.skip_turn_map()
                     .into_iter()
                     .map(|(k, v)| (k, PartValue::Int(v)))
+                    .collect(),
+            );
+        }
+        if let Some(a) = part
+            .as_any()
+            .downcast_ref::<tessera_core::stats::Attributes>()
+        {
+            return Some(BTreeMap::from([
+                ("might".to_string(), PartValue::Int(a.might)),
+                ("agility".to_string(), PartValue::Int(a.agility)),
+                ("toughness".to_string(), PartValue::Int(a.toughness)),
+                ("will".to_string(), PartValue::Int(a.will)),
+                ("intellect".to_string(), PartValue::Int(a.intellect)),
+            ]));
+        }
+        if let Some(l) = part.as_any().downcast_ref::<tessera_core::stats::Level>() {
+            return Some(BTreeMap::from([(
+                "level".to_string(),
+                PartValue::Int(l.level),
+            )]));
+        }
+        if let Some(b) = part.as_any().downcast_ref::<tessera_core::stats::Bonuses>() {
+            return Some(BTreeMap::from([
+                ("accuracy".to_string(), PartValue::Int(b.accuracy)),
+                ("dodge".to_string(), PartValue::Int(b.dodge)),
+                ("ac".to_string(), PartValue::Int(b.ac)),
+                ("damage_flat".to_string(), PartValue::Int(b.damage_flat)),
+                ("block".to_string(), PartValue::Int(b.block)),
+            ]));
+        }
+        if let Some(d) = part
+            .as_any()
+            .downcast_ref::<tessera_core::effects::Derived>()
+        {
+            return Some(
+                d.values
+                    .iter()
+                    .map(|(k, v)| (k.clone(), PartValue::Int(*v)))
                     .collect(),
             );
         }
@@ -357,6 +439,87 @@ impl WorldAccess for SimWorldAccess {
                 name: name.to_string(),
             });
         }
+        // stats stat parts: a scripted write to `Attributes`/`Level` mutates the
+        // typed part (whole-part replace, s0 ) and queues a recompute —
+        // this is the declared "write to Attributes/Level" dirtying event
+        // . Bounds stay native load-time invariants; an
+        // out-of-range write fails closed here just like a bad load.
+        if name == tessera_core::stats::PART_ATTRIBUTES {
+            use tessera_core::stats::{ATTRIBUTE_MAX, ATTRIBUTE_MIN, Attributes as Attrs};
+            let get = |key: &str, fallback: i64| -> Result<i64, ScriptError> {
+                match fields.get(key) {
+                    None => Ok(fallback),
+                    Some(PartValue::Int(v)) => Ok(*v),
+                    Some(_) => Err(ScriptError::Internal(format!(
+                        "attribute '{key}' must be an integer"
+                    ))),
+                }
+            };
+            let attrs = Attrs {
+                might: get("might", 10)?,
+                agility: get("agility", 10)?,
+                toughness: get("toughness", 10)?,
+                will: get("will", 10)?,
+                intellect: get("intellect", 10)?,
+            };
+            for (key, value) in [
+                ("might", attrs.might),
+                ("agility", attrs.agility),
+                ("toughness", attrs.toughness),
+                ("will", attrs.will),
+                ("intellect", attrs.intellect),
+            ] {
+                if !(ATTRIBUTE_MIN..=ATTRIBUTE_MAX).contains(&value) {
+                    return Err(ScriptError::Internal(format!(
+                        "attribute '{key}' must be in [{ATTRIBUTE_MIN}, {ATTRIBUTE_MAX}], wrote {value}"
+                    )));
+                }
+            }
+            b.insert_part(e, id.clone(), Box::new(attrs))
+                .map_err(|er| ScriptError::Internal(format!("set_part Attributes: {er}")))?;
+            self.shared.push_recompute(entity);
+            return Ok(());
+        }
+        if name == tessera_core::stats::PART_LEVEL {
+            use tessera_core::stats::{LEVEL_MAX, LEVEL_MIN, Level as Lvl};
+            let level = match fields.get("level") {
+                None => 1,
+                Some(PartValue::Int(v)) => *v,
+                Some(_) => return Err(ScriptError::Internal("level must be an integer".into())),
+            };
+            if !(LEVEL_MIN..=LEVEL_MAX).contains(&level) {
+                return Err(ScriptError::Internal(format!(
+                    "level must be in [{LEVEL_MIN}, {LEVEL_MAX}], wrote {level}"
+                )));
+            }
+            b.insert_part(e, id.clone(), Box::new(Lvl { level }))
+                .map_err(|er| ScriptError::Internal(format!("set_part Level: {er}")))?;
+            self.shared.push_recompute(entity);
+            return Ok(());
+        }
+        // The derived cache: the rules script's single write path. Built
+        // through `Derived::from_values`, which validates every key against
+        // the closed stat vocabulary (unknown/reserved keys fail closed).
+        if name == tessera_core::effects::PART_DERIVED {
+            let mut values = std::collections::BTreeMap::new();
+            for (key, value) in fields {
+                match value {
+                    PartValue::Int(v) => {
+                        values.insert(key, v);
+                    }
+                    other => {
+                        return Err(ScriptError::Internal(format!(
+                            "Derived values must be integers, wrote {other:?}"
+                        )));
+                    }
+                }
+            }
+            let derived = tessera_core::effects::Derived::from_values(values)
+                .map_err(|msg| ScriptError::Internal(format!("Derived write rejected: {msg}")))?;
+            b.insert_part(e, id.clone(), Box::new(derived))
+                .map_err(|er| ScriptError::Internal(format!("set_part Derived: {er}")))?;
+            return Ok(());
+        }
         // Not a currently-held part: treat as a scripted upsert (the host
         // already validated against its schema).
         b.insert_part(e, id, Box::new(ScriptPart(fields)))
@@ -365,7 +528,7 @@ impl WorldAccess for SimWorldAccess {
     }
 
     fn apply_spawn(&mut self, _id: u64, _blueprint: &str) -> Result<(), ScriptError> {
-        // `engine.spawn` (the earlier positionless spawn) has no defined
+        // `engine.spawn()` (the earlier positionless spawn) has no defined
         // placement in the world slice; the positioned `engine.spawn_at` is
         // the real path.
         Err(ScriptError::Internal(
@@ -435,6 +598,25 @@ impl WorldAccess for SimWorldAccess {
                 .map_err(|er| ScriptError::Internal(format!("set_position: {er}")))?;
             }
         }
+        // Fail-closed spawn : a stat-ful spawn without a
+        // registered rules script is a spawn error — a formula-less stat is
+        // an unrepresentable state, not a silently slow goblin.
+        let statful = {
+            let b = self.broker.read().unwrap_or_else(|p| p.into_inner());
+            tessera_core::recompute::carries_attributes(&b, entity)
+        };
+        if statful && !self.shared.stats_armed.load(Ordering::SeqCst) {
+            let _ = self.apply_despawn(id);
+            return Err(ScriptError::Internal(format!(
+                "spawn {blueprint}: entity carries parts.Attributes but no \
+                 rules/stats.luau handler is registered (fail-closed)"
+            )));
+        }
+        // Spawn completion dirtying: queue the recompute for this entity (the
+        // sim dispatches it once the current dispatch returns).
+        if statful {
+            self.shared.push_recompute(id);
+        }
         // Register with the scheduler if the new entity carries `ActorEnergy`
         // (spawning with an energy part makes it schedulable).
         {
@@ -442,7 +624,12 @@ impl WorldAccess for SimWorldAccess {
             if let Some(ae) = b.typed_part::<tessera_core::turns::ActorEnergy>(
                 entity,
                 &PartTypeId::new(tessera_core::turns::PART_ENERGY),
-            ) && let Some(sched) = self.shared.scheduler()
+            ) && let Some(sched) = self
+                .shared
+                .scheduler
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
                 && let Ok(mut s) = sched.lock()
             {
                 s.add_actor(entity, ae.clone());
@@ -460,7 +647,12 @@ impl WorldAccess for SimWorldAccess {
             .map_err(|er| ScriptError::Internal(format!("despawn: {er}")))?;
         // Keep the scheduler in lockstep: a despawned scheduled actor must not
         // remain on the clock.
-        if let Some(sched) = self.shared.scheduler()
+        if let Some(sched) = self
+            .shared
+            .scheduler
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
             && let Ok(mut s) = sched.lock()
         {
             s.remove_actor(e);
@@ -592,7 +784,7 @@ pub struct ScriptBridge {
     /// The host is single-threaded (the sim drives it synchronously on one
     /// thread; mlua's `Lua` is not `Send`/`Sync`), so an `Rc` — not `Arc` —
     /// is the correct shared wrapper. Cloning the bridge shares the handle.
-    host: Rc<Mutex<ScriptHost>>,
+    pub host: Rc<Mutex<ScriptHost>>,
     /// The broker handle shared by every host world-access view.
     broker: Arc<RwLock<EntityBroker>>,
     /// The shared simulation snapshot the world access + reader reference.
@@ -755,8 +947,34 @@ impl ScriptBridge {
     }
 
     /// Access the wrapped host.
+    #[allow(dead_code)] // accessor for the host-handle bridge used by script demos
     pub fn host(&self) -> &Rc<Mutex<ScriptHost>> {
         &self.host
+    }
+
+    /// True when a scripted handler is registered for `event` in the host
+    /// (the engine's fail-closed spawn check — a stat-ful entity needs the
+    /// `RecomputeDerived` rules handler, ).
+    pub fn has_event_handler(&self, event: &str) -> bool {
+        let h = self
+            .host
+            .lock()
+            .map_err(|e| ScriptError::Internal(format!("host lock: {e}")))
+            .expect("host lock");
+        h.has_event_handler(event)
+    }
+
+    /// Record whether the stats rules handler is registered (the fail-closed
+    /// spawn gate; mirrors `has_event_handler` into the shared state the
+    /// scripted spawn path can read without touching the host).
+    pub fn set_stats_armed(&self, armed: bool) {
+        self.shared.set_stats_armed(armed);
+    }
+
+    /// Drain the scripted stat-write recompute queue (ids queued by pending
+    /// `set_part` writes to `Attributes`/`Level`; the sim dispatches each).
+    pub fn drain_recompute(&self) -> Vec<u64> {
+        self.shared.drain_recompute()
     }
 }
 

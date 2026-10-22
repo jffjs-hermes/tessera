@@ -25,12 +25,13 @@ use std::sync::{Arc, Mutex, RwLock};
 use hecs::Entity;
 use tessera_core::ecs::EntityBroker;
 use tessera_core::events::{
-    EARLY, HandlerAction, Health, LATE, Move, NORMAL, PART_HEALTH, PART_POSITION, Point, Position,
-    SimContext, TakeDamage, TileEntry,
+    EARLY, HandlerAction, HandlerId, Health, LATE, Move, NORMAL, PART_HEALTH, PART_POSITION, Point,
+    Position, RecomputeDerived, SimContext, TakeDamage, TileEntry,
 };
 use tessera_core::rng::SimRng;
 use tessera_core::save::SAVE_FORMAT_VERSION;
 use tessera_core::save::{SaveData, SaveError, SaveHooks, restore_broker, snapshot_entities};
+use tessera_core::stats::PART_ATTRIBUTES;
 use tessera_core::tiles::{Rgb, Tile, TileRegistry, TileVisual};
 use tessera_core::turns::{
     ActorEnergy, BASE_SPEED, PART_ENERGY, Scheduler, TurnAction, TurnReport,
@@ -93,7 +94,7 @@ pub struct Sim {
     enemy: Option<Entity>,
     /// Last facing direction (dx, dy), for the E=Zap scripted action.
     facing: (i32, i32),
-    log: Vec<String>,
+    pub log: Vec<String>,
     /// Shared sink for the deterministic native event lines dispatched during
     /// a turn (`UseAbility`, `TakeDamage`, `ApplyStatus` — the headless
     /// event-log mapping). The LATE observers push here; the turn loop drains
@@ -103,8 +104,17 @@ pub struct Sim {
     /// Player-turn clock: increments once per submitted player action
     /// (cancelled or not). Exposed to scripts via `engine.player_turns()`.
     player_turns: u64,
+    /// The registered `RecomputeDerived` handler id (unregistered/replaced on
+    /// a rules reload so the new bridge's handler takes over without stacking).
+    #[allow(dead_code)] // registered handler id, kept for reload wiring
+    recompute_handler: HandlerId,
+    /// Whether a `rules/stats.luau` handler was registered at install time —
+    /// the fail-closed spawn gate (a stat-ful entity without a formula owner
+    /// is a spawn error, ).
+    stats_armed: bool,
 }
 
+#[allow(dead_code)] // console/devtools accessors: actor_speed/reload_rules/log
 impl Sim {
     // ---- console/devtools support -------------------------------------
     //
@@ -164,6 +174,20 @@ impl Sim {
                 .map_err(|e| e.to_string())?;
             e
         };
+        // Fail-closed spawn : a stat-ful entity requires a
+        // registered rules script — a formula-less stat is an
+        // unrepresentable state, not a silently slow goblin.
+        let statful = {
+            let broker = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
+            tessera_core::recompute::carries_attributes(&broker, entity)
+        };
+        if statful && !self.stats_armed {
+            let _ = self.despawn_entity(entity);
+            return Err(format!(
+                "spawn {bp}: entity carries parts.Attributes but no rules/stats.luau \
+                 handler is registered (fail-closed)"
+            ));
+        }
         let speed = self
             .ctx
             .broker
@@ -176,7 +200,99 @@ impl Sim {
             .lock()
             .map_err(|_| "scheduler poisoned".to_string())?
             .add_actor(entity, ActorEnergy::at_threshold(speed));
+        // Spawn-after-stamp dirtying : the recompute lands the
+        // cache (and the scheduler speed sync) before the next scheduled
+        // action.
+        let _ = self.ctx.dispatch(RecomputeDerived { entity });
+        self.log.extend(drain_event_lines(&self.event_lines));
         Ok(entity)
+    }
+
+    /// Write a stat part directly (console `setpart`; debug mutation between
+    /// turns). Only the persistent stat parts (`Attributes`/`Level`) are
+    /// writable — this is the declared console dirtying path: a write to
+    /// either dispatches `RecomputeDerived` so the cache reflects the new
+    /// values before the next action . Bounds are the native
+    /// load invariants; an out-of-range write fails closed.
+    pub fn set_part_console(
+        &mut self,
+        entity: hecs::Entity,
+        name: &str,
+        fields: &std::collections::BTreeMap<String, i64>,
+    ) -> Result<(), String> {
+        use tessera_core::stats::{ATTRIBUTE_MAX, ATTRIBUTE_MIN, LEVEL_MAX, LEVEL_MIN};
+        {
+            let mut broker = self
+                .ctx
+                .broker
+                .write()
+                .map_err(|_| "broker poisoned".to_string())?;
+            match name {
+                tessera_core::stats::PART_ATTRIBUTES => {
+                    let get = |key: &str| fields.get(key).copied().unwrap_or(10);
+                    for (key, value) in [
+                        ("might", get("might")),
+                        ("agility", get("agility")),
+                        ("toughness", get("toughness")),
+                        ("will", get("will")),
+                        ("intellect", get("intellect")),
+                    ] {
+                        if !(ATTRIBUTE_MIN..=ATTRIBUTE_MAX).contains(&value) {
+                            return Err(format!(
+                                "attribute '{key}' must be in [{ATTRIBUTE_MIN}, {ATTRIBUTE_MAX}], wrote {value}"
+                            ));
+                        }
+                    }
+                    broker
+                        .insert_part(
+                            entity,
+                            tessera_core::stats::PART_ATTRIBUTES.to_string(),
+                            Box::new(tessera_core::stats::Attributes {
+                                might: get("might"),
+                                agility: get("agility"),
+                                toughness: get("toughness"),
+                                will: get("will"),
+                                intellect: get("intellect"),
+                            }),
+                        )
+                        .map_err(|e| format!("setpart Attributes: {e}"))?;
+                }
+                tessera_core::stats::PART_LEVEL => {
+                    let level = fields.get("level").copied().unwrap_or(1);
+                    if !(LEVEL_MIN..=LEVEL_MAX).contains(&level) {
+                        return Err(format!(
+                            "level must be in [{LEVEL_MIN}, {LEVEL_MAX}], wrote {level}"
+                        ));
+                    }
+                    broker
+                        .insert_part(
+                            entity,
+                            tessera_core::stats::PART_LEVEL.to_string(),
+                            Box::new(tessera_core::stats::Level { level }),
+                        )
+                        .map_err(|e| format!("setpart Level: {e}"))?;
+                }
+                other => {
+                    return Err(format!(
+                        "setpart: '{other}' is not writable; only Attributes/Level are"
+                    ));
+                }
+            }
+        }
+        // The console dirtying path: recompute the cache immediately (the
+        // values settle before the next scheduled action).
+        let _ = self.ctx.dispatch(RecomputeDerived { entity });
+        self.log.extend(drain_event_lines(&self.event_lines));
+        Ok(())
+    }
+
+    /// The scheduler speed of an actor (the row the recompute sync keeps in
+    /// step with the derived cache). Mainly for tests and read-only seams.
+    pub fn actor_speed(&self, entity: Entity) -> Option<u32> {
+        self.scheduler
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .speed(entity)
     }
 
     /// Resolve a console entity id (the `CMD ...`/`entities` decimal `u64`
@@ -262,7 +378,7 @@ impl Sim {
 
     /// Build the harness around an already-spawned `player` whose broker
     /// carries a `Position` part (no script host / no enemy).
-    #[cfg_attr(not(test), allow(dead_code))] // used by the sim test fixture
+    #[cfg_attr(not(test), allow(dead_code))] // used by the sim test fixture()
     pub fn new(broker: EntityBroker, zone: Zone, player: Entity) -> Self {
         let broker = Arc::new(RwLock::new(broker));
         Self::from_shared(broker, None, zone, player, None)
@@ -307,13 +423,25 @@ impl Sim {
             scheduler.add_actor(e, ActorEnergy::at_threshold(espeed));
         }
         let scheduler = Arc::new(Mutex::new(scheduler));
+        // The stats recompute pipeline: register the `RecomputeDerived` handler
+        // (native invalidate -> rules script forward -> native finalize ->
+        // scheduler speed sync), then recompute every live stat-ful entity in
+        // deterministic entity-id order so the cache exists before the first
+        // scheduled action. Entities already carrying a `Derived` cache are
+        // recomputed too (spawn-completion dirtying, ).
+        let recompute_handler =
+            install_recompute_derived(&mut ctx, bridge.as_ref(), scheduler.clone());
+        let stats_armed = bridge
+            .as_ref()
+            .is_some_and(|b| b.has_event_handler("RecomputeDerived"));
         // Install the live world state into the shared bridge snapshot so the
         // script host's map/nav reads and `spawn_at` resolve against the same
         // zone, scheduler and player this sim drives.
         if let Some(b) = &bridge {
             b.set_sim_world_state(ctx.map.clone(), scheduler.clone(), player);
+            b.set_stats_armed(stats_armed);
         }
-        Sim {
+        let mut sim = Sim {
             ctx,
             scheduler,
             player,
@@ -323,7 +451,89 @@ impl Sim {
             log: Vec::new(),
             event_lines,
             player_turns: 0,
+            recompute_handler,
+            stats_armed,
+        };
+        sim.recompute_live();
+        sim
+    }
+
+    /// The stats headless demo mapping for the recompute pipeline: dispatch
+    /// `RecomputeDerived` for every live stat-ful entity in deterministic
+    /// (entity-id) order. Called at sim construction (spawn completion for
+    /// entities stamped before the sim existed) and after a rules/tuning
+    /// reload; the dirtying events dispatched inside a turn (statuses,
+    /// part writes) are wired separately.
+    pub fn recompute_live(&mut self) {
+        let entities = {
+            let broker = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
+            broker.entities_with_part(PART_ATTRIBUTES)
+        };
+        for entity in entities {
+            let _ = self.ctx.dispatch(RecomputeDerived { entity });
         }
+        self.log.extend(drain_event_lines(&self.event_lines));
+    }
+
+    /// Bring every scheduled stat-ful actor's scheduler row in step with its
+    /// `Derived` cache (the post-turn safety net: status dirtying recomputes
+    /// run *under* `take_turn`'s scheduler lock, where the handler's inline
+    /// sync skips via `try_lock`). Called right after the lock is released,
+    /// before the next scheduled action; entity-id order, deterministic.
+    fn sync_derived_speeds(&mut self) {
+        let entities = {
+            let broker = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
+            broker.entities_with_part(PART_ATTRIBUTES)
+        };
+        for entity in entities {
+            let speed = tessera_core::recompute::derived_or_energy_speed(&self.ctx, entity);
+            if let Ok(mut s) = self.scheduler.try_lock() {
+                s.set_speed(entity, speed);
+            }
+        }
+    }
+
+    /// Drain the scripted-write recompute queue (an `Attributes`/`Level`
+    /// write applied by a pending `set_part` during the previous dispatch) and
+    /// dispatch each queued recompute before the next scheduled action.
+    fn drain_recompute_queue(&mut self) {
+        let Some(b) = &self.bridge else {
+            return;
+        };
+        let ids = b.drain_recompute();
+        for id in ids {
+            // The id may be a script-facing (host-assigned) id from a
+            // scripted spawn; resolve through the mapping first, then the
+            // plain broker bits.
+            let entity = b
+                .resolve_script_entity(id)
+                .or_else(|| Entity::from_bits(id));
+            let Some(entity) = entity else {
+                continue;
+            };
+            let _ = self.ctx.dispatch(RecomputeDerived { entity });
+        }
+        self.log.extend(drain_event_lines(&self.event_lines));
+    }
+
+    /// Replace the rules handler with a freshly built script bridge's (the
+    /// deterministic tuning/script reload seam: a content reload re-registers
+    /// `rules/stats.luau` from the new library and recomputes every live
+    /// stat-ful entity in entity-id order, so the cache reflects the new
+    /// tuning before the next scheduled action — ).
+    pub fn reload_rules(&mut self, bridge: Option<ScriptBridge>) {
+        self.ctx
+            .unregister::<RecomputeDerived>(self.recompute_handler);
+        self.recompute_handler =
+            install_recompute_derived(&mut self.ctx, bridge.as_ref(), self.scheduler.clone());
+        self.stats_armed = bridge
+            .as_ref()
+            .is_some_and(|b| b.has_event_handler("RecomputeDerived"));
+        self.bridge = bridge;
+        if let Some(b) = &self.bridge {
+            b.set_stats_armed(self.stats_armed);
+        }
+        self.recompute_live();
     }
 
     /// The player's current grid position (from the `Position` part).
@@ -487,7 +697,7 @@ impl Sim {
     /// [`SaveError::ZoneMismatch`] (saves are pack-specific; fail closed
     /// rather than teleport entities into a different map).
     ///
-    /// Re-registers the demo world's default handlers exactly as [`Sim::new`] /
+    /// Re-registers the demo world's default handlers exactly as [`Sim::new()`] /
     /// [`Sim::from_shared`] do at zone start (event handlers are wiring, not
     /// state, and are never saved), restores the exact entity ids so
     /// deterministic id-ordering is preserved, and restores the scheduler
@@ -553,6 +763,11 @@ impl Sim {
         let mut ctx = SimContext::shared(broker.clone(), zone, data.rng);
         let event_lines = Arc::new(Mutex::new(Vec::new()));
         install_default_handlers(&mut ctx, bridge.as_ref(), event_lines.clone());
+        let recompute_handler =
+            install_recompute_derived(&mut ctx, bridge.as_ref(), scheduler.clone());
+        let stats_armed = bridge
+            .as_ref()
+            .is_some_and(|b| b.has_event_handler("RecomputeDerived"));
 
         // The reference enemy is the first scheduled non-player actor
         // (deterministic entity-id order); matches how `from_shared` treats the
@@ -563,9 +778,10 @@ impl Sim {
         };
         if let Some(b) = &bridge {
             b.set_sim_world_state(ctx.map.clone(), scheduler.clone(), player);
+            b.set_stats_armed(stats_armed);
         }
 
-        Ok(Sim {
+        let mut sim = Sim {
             ctx,
             scheduler,
             player,
@@ -575,7 +791,14 @@ impl Sim {
             log: Vec::new(),
             event_lines,
             player_turns: data.player_turns,
-        })
+            recompute_handler,
+            stats_armed,
+        };
+        // Restore-recompute : a loaded world gets live derived
+        // values for every restored stat-ful entity, in entity-id order,
+        // before the next scheduled action.
+        sim.recompute_live();
+        Ok(sim)
     }
 
     /// Submit one player action: run the scheduler until the player's turn
@@ -588,6 +811,10 @@ impl Sim {
     /// player's are resolved first (the enemy attacks the player), so the
     /// shared dispatch path is exercised for both sides.
     pub fn submit_action(&mut self, action: PlayerAction) -> anyhow::Result<TurnReport> {
+        // A scripted `Attributes`/`Level` write from the previous turn's
+        // dispatch recomputes before this action resolves (the dirtying
+        // table's "pending set_part path", ).
+        self.drain_recompute_queue();
         // The player may have respawned since the last action: re-sync the
         // live player entity from the shared bridge snapshot (a scripted
         // respawn creates a *new* Player entity).
@@ -736,6 +963,10 @@ impl Sim {
             let mut sched = self.scheduler.lock().unwrap_or_else(|p| p.into_inner());
             sched.take_turn(&mut self.ctx, actor, action)?
         };
+        // Post-turn derived-speed net: status dirtying recomputed during the
+        // turn (under the scheduler lock); sync the rows now that the lock is
+        // free so the next accumulation uses the cache .
+        self.sync_derived_speeds();
         self.log.push(self.format_log_line(&report, from));
         // Nested native event lines for this turn (the headless mapping:
         // `UseAbility`'s turn line, then the causal `TakeDamage`/`ApplyStatus`
@@ -768,6 +999,9 @@ impl Sim {
     /// attack the player — so the existing Zapper / no-AI interactions are
     /// unchanged.
     fn take_scripted_turn(&mut self, actor: Entity) -> anyhow::Result<TurnReport> {
+        // Same pre-turn recompute drain as the player path (a scripted stat
+        // write during the player's turn recomputes before the enemy acts).
+        self.drain_recompute_queue();
         let pending = self.forward_actor_turn_start(actor);
         let action = self
             .pending_to_turn_action(actor, &pending)
@@ -781,6 +1015,8 @@ impl Sim {
             let mut sched = self.scheduler.lock().unwrap_or_else(|p| p.into_inner());
             sched.take_turn(&mut self.ctx, actor, action)?
         };
+        // Post-turn derived-speed net (same as the player path).
+        self.sync_derived_speeds();
         self.log.push(self.format_log_line(&report, from));
         // Nested native event lines for this actor's turn (same mapping as the
         // player path — a staggered goblin, for instance, logs no Attack line).
@@ -911,7 +1147,7 @@ impl Sim {
         let Some(bridge) = &self.bridge else {
             return Vec::new();
         };
-        let host = bridge.host().clone();
+        let host = bridge.host.clone();
         let actor_id = entity_to_id(actor);
         let mut params = int_params(&[("actor", actor_id as i64)]);
         if let Some(w) = bridge.world_state_id() {
@@ -943,7 +1179,7 @@ impl Sim {
         let Some(bridge) = &self.bridge else {
             return;
         };
-        let host = bridge.host().clone();
+        let host = bridge.host.clone();
         let attacker_id = entity_to_id(actor);
         let defender_id = entity_to_id(defender);
         let params = int_params(&[
@@ -1207,10 +1443,11 @@ fn install_default_handlers(
 }
 
 /// The named `--headless` event-log mapping: LATE observers that queue one
-/// deterministic line per dispatched `TakeDamage` / `ApplyStatus` event into
-/// the shared sink (drained into the sim log at the end of the turn, so the
-/// nested events of one `UseAbility` appear in causal order after the turn's
-/// own line). `UseAbility` itself is logged by the turn line.
+/// deterministic line per dispatched `TakeDamage` / `ApplyStatus` /
+/// `RecomputeDerived` event into the shared sink (drained into the sim log at
+/// the end of the turn, so the nested events of one `UseAbility` appear in
+/// causal order after the turn's own line). `UseAbility` itself is logged by
+/// the turn line.
 fn install_event_logging(ctx: &mut SimContext, event_lines: Arc<Mutex<Vec<String>>>) {
     let sink = event_lines.clone();
     ctx.register_observer::<tessera_core::events::TakeDamage>(LATE, move |_ctx, ev| {
@@ -1229,6 +1466,93 @@ fn install_event_logging(ctx: &mut SimContext, event_lines: Arc<Mutex<Vec<String
             ev.status
         ));
     });
+    // The stats headless demo mapping: one deterministic line per recompute, so
+    // the event log shows `RecomputeDerived` after spawn and after each
+    // dirtying event (Status_Staggered, part writes, tuning reloads).
+    let sink = event_lines.clone();
+    ctx.register_observer::<RecomputeDerived>(LATE, move |_ctx, ev| {
+        sink.lock().unwrap_or_else(|p| p.into_inner()).push(format!(
+            "EVENT RecomputeDerived entity={}",
+            entity_to_id(ev.entity)
+        ));
+    });
+}
+
+/// The rule name a stat-ful entity's formula owner must register under; the
+/// engine looks up `rules/stats.luau` in the loaded library at install time
+/// .
+pub const RULES_RECOMPUTE_EVENT: &str = "RecomputeDerived";
+
+/// Register the stats recompute pipeline's native handling of `RecomputeDerived`
+/// on `ctx` (called at sim install alongside `install_native_effects`):
+///
+/// 1. **invalidate first** — the native `invalidate_derived` hook (s0 )
+///    clears the cache so a failed recompute leaves an absent cache, never a
+///    stale one ( step 5);
+/// 2. **rules forward** — when a scripted `RecomputeDerived` handler (the
+///    registered `rules/stats.luau`) exists, forward the event to the host:
+///    the script computes the five formula bases from the settled snapshot
+///    and writes them via the whitelisted pending `set_part` path, which the
+///    host applies before this handler continues;
+/// 3. **native finalize** — `finalize_derived` applies live status modifiers
+///    , the invariant clamps  and the `Health.hp <= max_hp`
+///    clamp ;
+/// 4. **cache-only speed sync** — the scheduler's actor row reads speed from
+///    the cache (`derived_or_energy_speed`); no read path ever calls Luau.
+///
+/// Entities without `Attributes` are left untouched (legacy behavior, ).
+/// Returns the handler id so a rules reload can unregister and replace it.
+fn install_recompute_derived(
+    ctx: &mut SimContext,
+    bridge: Option<&ScriptBridge>,
+    scheduler: Arc<Mutex<Scheduler>>,
+) -> HandlerId {
+    let fwd = bridge.cloned();
+    let sched = scheduler.clone();
+    ctx.register::<RecomputeDerived>(NORMAL, move |ctx, ev| {
+        let entity = ev.entity;
+        // Step 1: clear the cache first (s0 ). Absent is detectable; stale
+        // is a lie.
+        tessera_core::effects::invalidate_derived(ctx, entity);
+
+        // Legacy entities (no `Attributes`) recompute nothing: absent cache,
+        // `ActorEnergy.speed` fallback — exactly the pre-derivation behavior.
+        let statful = {
+            let broker = ctx.broker.read().unwrap_or_else(|p| p.into_inner());
+            tessera_core::recompute::carries_attributes(&broker, entity)
+        };
+        if !statful {
+            return HandlerAction::Continue;
+        }
+
+        // Step 2: rules forward (only when a rules handler is registered; an
+        // unarmed engine skips the script call and leaves the cache absent —
+        // recompute_live/spawn seams gate stat-ful spawns fail-closed).
+        if let Some(b) = &fwd
+            && b.has_event_handler(RULES_RECOMPUTE_EVENT)
+        {
+            let id = entity_to_id(entity);
+            let mut host = b.host.lock().unwrap_or_else(|p| p.into_inner());
+            let _ = host.dispatch(RULES_RECOMPUTE_EVENT, id, &int_params(&[]));
+            // The host's dispatch already applied the script's pending
+            // set_part (the cache write). Drain any engine.log lines so they
+            // never leak into a later forward's drain out of causal order.
+            let _ = host.drain_log();
+        }
+
+        // Step 3+4: native finalize and cache-only speed sync. The scheduler
+        // may already be locked by the turn loop that is dispatching this
+        // recompute (status dirtying runs under `take_turn`); `try_lock`
+        // skips the inline sync in that case and the sim's post-turn
+        // `sync_derived_speeds` net brings the rows up to date right after
+        // the lock is released.
+        tessera_core::recompute::finalize_derived(ctx, entity);
+        let speed = tessera_core::recompute::derived_or_energy_speed(ctx, entity);
+        if let Ok(mut s) = sched.try_lock() {
+            s.set_speed(entity, speed);
+        }
+        HandlerAction::Continue
+    })
 }
 
 /// Register the reference demo combat: an `Attack` on a Health-carrying
@@ -1289,7 +1613,7 @@ mod tests {
     use tessera_core::turns::TURN_THRESHOLD;
     use tessera_core::zone::Zone;
 
-    /// The demo room the fixture runs in: bordered all-floor grid with a pillar
+    /// The demo room the fixture() runs in: bordered all-floor grid with a pillar
     /// at `x % 8 == 4 && y % 6 == 3`, matching the legacy hardcoded map.
     fn demo_zone(width: usize, height: usize) -> Zone {
         let mut cells = vec!["terrain.floor".to_string(); width * height];
@@ -1330,7 +1654,7 @@ mod tests {
         sim.submit_action(PlayerAction::Move { dx: 1, dy: 0 })
             .unwrap();
         assert_eq!(sim.position(), (2, 1), "player moved one cell right");
-        let line = &sim.log()[0];
+        let line = &sim.log[0];
         assert!(line.contains("Move") && line.contains("handled"), "{line}");
     }
 
@@ -1341,7 +1665,7 @@ mod tests {
         sim.submit_action(PlayerAction::Move { dx: -1, dy: 0 })
             .unwrap();
         assert_eq!(sim.position(), (1, 1), "cancelled move leaves position");
-        let line = &sim.log()[0];
+        let line = &sim.log[0];
         assert!(
             line.contains("Move") && line.contains("cancelled"),
             "{line}"
@@ -1353,7 +1677,7 @@ mod tests {
         let mut sim = fixture();
         sim.submit_action(PlayerAction::Wait).unwrap();
         assert_eq!(sim.position(), (1, 1));
-        assert!(sim.log()[0].contains("Wait"), "{}", sim.log()[0]);
+        assert!(sim.log[0].contains("Wait"), "{}", sim.log[0]);
     }
 
     #[test]
@@ -1362,7 +1686,7 @@ mod tests {
         let run = || {
             let mut sim = fixture();
             let map = sim.run_headless(&tiles, 12);
-            (map, sim.log().to_vec())
+            (map, sim.log.to_vec())
         };
         let (map_a, log_a) = run();
         let (map_b, log_b) = run();
@@ -1396,14 +1720,14 @@ mod tests {
             sim.submit_action(PlayerAction::Move { dx: 1, dy: 0 })
                 .unwrap();
         }
-        for line in sim.log() {
+        for line in sim.log {
             assert!(line.starts_with("EVENT "), "unexpected log line: {line}");
         }
     }
 
     // ---- Caves-of-Qud bump combat ------------------------------------------
 
-    /// A fixture with a living player (Health 20) and an adjacent live goblin
+    /// A fixture() with a living player (Health 20) and an adjacent live goblin
     /// (Health `goblin_hp`) in the demo room. Only the player is scheduled
     /// (a goblin's independent turns would inject nondeterminism into these
     /// focused tests). Returns the sim, the player, and the goblin entity.
@@ -1468,9 +1792,9 @@ mod tests {
             "one normal attack costs exactly one threshold from fresh energy"
         );
         assert!(
-            sim.log().iter().any(|l| l.contains("EVENT Attack")),
+            sim.log.iter().any(|l| l.contains("EVENT Attack")),
             "expected an Attack log line, got {:?}",
-            sim.log()
+            sim.log
         );
     }
 
@@ -1508,7 +1832,7 @@ mod tests {
         assert_eq!(sim.position(), (2, 2), "blocked move leaves position");
         assert!(!report.charged, "a blocked move costs no energy");
         assert_eq!(report.energy_after, TURN_THRESHOLD, "energy untouched");
-        let line = &sim.log()[0];
+        let line = &sim.log[0];
         assert!(
             line.contains("Move") && line.contains("cancelled"),
             "{line}"
@@ -1585,7 +1909,7 @@ mod tests {
             .insert_one(
                 player,
                 RenderTile {
-                    tile: "creature.player".into(),
+                    tile: "creature.player()".into(),
                 },
             )
             .unwrap();
@@ -1645,7 +1969,7 @@ mod tests {
             sim.submit_action(a).unwrap();
         }
         let before = sim.save(&hooks).expect("save");
-        let log_len_at_save = sim.log().len();
+        let log_len_at_save = sim.log.len();
         let renderables_before = sim.renderables();
 
         // Build an identical-controls world and run it the same way, from the
@@ -1661,8 +1985,7 @@ mod tests {
             reference.submit_action(a).unwrap();
         }
         assert_eq!(
-            reference.log(),
-            sim.log(),
+            reference.log, sim.log,
             "two same-built worlds match pre-save"
         );
 
@@ -1716,8 +2039,8 @@ mod tests {
             loaded.submit_action(a).unwrap();
         }
         assert_eq!(
-            &reference.log()[log_len_at_save..],
-            loaded.log(),
+            &reference.log[log_len_at_save..],
+            loaded.log,
             "loaded world continues with an identical event log"
         );
     }
