@@ -50,9 +50,6 @@ fn build_world(vfs: &DirVfs, bridge: &ScriptBridge, skip: &[&str]) -> World {
     world
         .register_part::<tessera_core::events::Health>(tessera_core::events::PART_HEALTH)
         .expect("register Health");
-    world
-        .register_part::<tessera_core::events::Stats>(tessera_core::events::PART_STATS)
-        .expect("register Stats");
 
     // Load every shipped script (registers `GoblinBrain` + `RespawnSystem`
     // schemas the blueprints validate against), sync schemas into the world

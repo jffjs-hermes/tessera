@@ -90,18 +90,6 @@ pub struct Health {
     pub hp: i32,
 }
 
-/// Name of the dynamic stats part shipped on base creatures, which mods patch
-/// (e.g. the sample mod merges `parts.Stats.strength`).
-pub const PART_STATS: &str = "Stats";
-
-/// Base-data `Stats` part. Integer-only combat attributes a mod may patch in
-/// place (`replace`/`merge`/`remove` act on the raw payload before
-/// deserialization, then this deserializes at spawn).
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize)]
-pub struct Stats {
-    pub strength: i32,
-}
-
 /// The outcome of one actor attempting to enter a tile, from its perspective.
 /// Caves-of-Qud-style occupancy: at most one actor per tile, and moving into a
 /// live enemy becomes a bump attack rather than an overlap.

@@ -37,8 +37,10 @@ use tessera_core::zone::Zone;
 const BASE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/base");
 const MODS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/mods");
 
-/// Register the engine part set exactly as the binary does (including
-/// `Stats`, which the base Goblin carries and the sample patch modifies).
+/// Register the engine part set exactly as the binary does: the event-facing
+/// parts the binary registers by hand (the native `Attributes`/`Level`/
+/// `Bonuses` parts are registered centrally by `World::new`, same as the
+/// content-kind parts).
 fn register_parts(world: &mut World) {
     world
         .register_component::<RenderTile>("Render")
@@ -52,9 +54,6 @@ fn register_parts(world: &mut World) {
     world
         .register_part::<tessera_core::events::Health>(tessera_core::events::PART_HEALTH)
         .expect("register Health");
-    world
-        .register_part::<tessera_core::events::Stats>(tessera_core::events::PART_STATS)
-        .expect("register Stats");
 }
 
 /// Load the real shipped content exactly as the binary does: base under one

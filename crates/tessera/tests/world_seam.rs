@@ -43,9 +43,6 @@ fn build_world(vfs: &DirVfs, bridge: &ScriptBridge) -> World {
     world
         .register_part::<tessera_core::events::Health>(tessera_core::events::PART_HEALTH)
         .expect("register Health");
-    world
-        .register_part::<tessera_core::events::Stats>(tessera_core::events::PART_STATS)
-        .expect("register Stats");
 
     // Load the shipped `zapper.luau`? No — tests load their own scripts on the
     // bridge; only the part schemas are mirrored here.

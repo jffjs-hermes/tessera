@@ -1,5 +1,4 @@
-# Patch the base Goblin in place: recolor its tile and boost its strength.
+# Patch the base Goblin in place: recolor its tile.
 # Base files are never mutated on disk — patches apply to in-memory copies.
 ["Goblin"]
 replace = { "parts.Render.tile" = "creature.goblin.angry" }
-merge   = { "parts.Stats.strength" = 22 }

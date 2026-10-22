@@ -12,7 +12,7 @@
 //!   (a mod blueprint may inherit a base blueprint) and later mods override
 //!   earlier ones / base id-by-id;
 //! - applies each mod's `patches/*.toml` in load order through the patch
-//!   engine, so the shipped sample's Goblin patch (tile + strength) lands.
+//!   engine, so the shipped sample's Goblin patch (tile) lands.
 //!
 //! Determinism: all collections here are `BTreeMap`/`BTreeSet`/`Vec` (no
 //! `HashMap`/`HashSet`), discovery order never influences the registry order,

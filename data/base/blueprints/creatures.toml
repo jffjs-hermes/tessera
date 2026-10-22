@@ -9,6 +9,11 @@
 # Abstract root of the creature chain. M3 base data adds the Health part for
 # the minimal-combat reserve; creatures inherit it.
 parts.Health = { hp = 20 }
+# Every creature carries attributes and a level: the abstract root owns the
+# defaults, blueprints override per creature/class. Attribute values are
+# load-time invariants in [1, 30], level in [1, 20].
+parts.Attributes = { might = 14, agility = 9, toughness = 13, will = 8, intellect = 11 }
+parts.Level = { level = 1 }
 
 [Humanoid]
 inherits = "Actor"
@@ -25,5 +30,4 @@ inherits = "Humanoid"
 parts.Render = { tile = "creature.goblin" }
 parts.GoblinBrain = { detect = 10 }
 parts.Health = { hp = 3 }
-parts.Stats = { strength = 18 }
 scripts = ["scripts/goblin_ai.luau"]

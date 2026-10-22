@@ -166,10 +166,43 @@ pub struct Abilities {
 /// computes values here — it stores whatever the rules script wrote through
 /// the whitelisted `set_part` path and clears the part on invalidation (see
 /// [`invalidate_derived`]). Reads (native or script) never recompute.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+///
+/// Deserialization validates every key against [`DerivedStat`]: keys that
+/// are not stat names, or stat names outside the computed set, are load
+/// errors (fail closed), so the cache is typed at the boundary even though
+/// scripts write it through the generic part path.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Derived {
     pub values: BTreeMap<String, i64>,
+}
+
+impl<'de> Deserialize<'de> for Derived {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawDerived {
+            #[serde(default)]
+            values: BTreeMap<String, i64>,
+        }
+        let raw = RawDerived::deserialize(deserializer)?;
+        for key in raw.values.keys() {
+            let stat = crate::stats::DerivedStat::from_str(key).ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "unknown derived stat key '{key}' (expected one of the stat names)"
+                ))
+            })?;
+            if !stat.is_computed() {
+                return Err(serde::de::Error::custom(format!(
+                    "derived stat '{key}' is reserved and not yet computed; \
+                     the cache may not carry it"
+                )));
+            }
+        }
+        Ok(Derived { values: raw.values })
+    }
 }
 
 // ---------------------------------------------------------------------------

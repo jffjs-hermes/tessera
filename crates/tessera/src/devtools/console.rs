@@ -562,7 +562,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use tessera_core::ecs::Part;
-    use tessera_core::events::{PART_STATS, Point, Stats};
+    use tessera_core::events::Point;
     use tessera_core::script_part::{FieldDef, PartValue, ScriptPartType};
     use tessera_core::turns::{ActorEnergy, PART_ENERGY};
     use tessera_core::vfs::MemVfs;
@@ -737,15 +737,15 @@ mod tests {
     // ---- executor tests --------------------------------------------------
 
     /// A minimal world with `Player` and `Goblin` blueprints, mirroring the
-    /// engine registrations (Render component + Position/ActorEnergy/Health/
-    /// Stats dynamic parts + a `Charge` script part).
+    /// engine registrations (Render component + Position/ActorEnergy/Health
+    /// dynamic parts + a `Charge` script part; the native `Attributes`/`Level`/
+    /// `Bonuses` parts come from `World::new`).
     fn test_world() -> World {
         let mut w = World::new();
         w.register_component::<RenderTile>("Render").unwrap();
         w.register_part::<Position>(PART_POSITION).unwrap();
         w.register_part::<ActorEnergy>(PART_ENERGY).unwrap();
         w.register_part::<Health>(PART_HEALTH).unwrap();
-        w.register_part::<Stats>(PART_STATS).unwrap();
         let mut schema = BTreeMap::new();
         schema.insert(
             "charges".to_string(),
@@ -758,6 +758,8 @@ mod tests {
             r##"
 [Actor]
 parts.Health = { hp = 20 }
+parts.Attributes = { might = 14, agility = 9, toughness = 13, will = 8, intellect = 11 }
+parts.Level = { level = 1 }
 
 [Humanoid]
 inherits = "Actor"
@@ -772,7 +774,6 @@ parts.Render = { tile = "creature.player" }
 inherits = "Humanoid"
 parts.Render = { tile = "creature.goblin" }
 parts.Health = { hp = 3 }
-parts.Stats = { strength = 18 }
 parts.Charge = { charges = 2 }
 "##,
         );

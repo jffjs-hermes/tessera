@@ -132,6 +132,8 @@ impl World {
             .expect("kind part names are fixed and never collide");
         crate::effects::register_all(&mut registry)
             .expect("effect part names are fixed and never collide");
+        crate::stats::register_all(&mut registry)
+            .expect("stat part names are fixed and never collide");
         Self {
             library: Arc::new(RwLock::new(BlueprintLibrary::new())),
             registry,
@@ -279,11 +281,11 @@ impl World {
     }
 
     /// The whitelist [`SaveHooks`] built from this world's registry: the
-    /// engine-native parts (Position/Health/ActorEnergy/Stats) plus every
-    /// schema-backed script part the loaded pack registered. This is the hook
-    /// set `Sim::save`/`Sim::load` and the console save/load commands use — it
-    /// must match exactly what the world can spawn, so a save never fails on a
-    /// part the pack itself declares.
+    /// engine-native parts (Position/Health/ActorEnergy/Attributes/Level/
+    /// Bonuses) plus every schema-backed script part the loaded pack
+    /// registered. This is the hook set `Sim::save`/`Sim::load` and the
+    /// console save/load commands use — it must match exactly what the world
+    /// can spawn, so a save never fails on a part the pack itself declares.
     pub fn save_hooks(&self) -> crate::save::SaveHooks {
         crate::save::build_save_hooks(&self.registry).0
     }
@@ -588,9 +590,10 @@ parts.Abilities = { list = ["Ability_Ghost"] }
         let w = world(&vfs);
         // The same single registry the loader validates against must declare a
         // storage class for every part name it accepts: the two engine parts
-        // below plus the six always-registered kind parts and the seven
-        // always-registered effect/status parts.
-        assert_eq!(w.registry.len(), 15);
+        // below, the six always-registered kind parts, the seven
+        // always-registered effect/status parts, and the three native stat
+        // parts (Attributes/Level/Bonuses) that `World::new` registers.
+        assert_eq!(w.registry.len(), 18);
         for (id, storage) in w.registry.iter_storage() {
             assert!(
                 matches!(storage, StorageClass::Component | StorageClass::Dynamic),
@@ -626,9 +629,9 @@ parts.Abilities = { list = ["Ability_Ghost"] }
         // Same name re-registered with a different storage class -> error.
         let err = w.register_part::<Stats>("Render").unwrap_err();
         assert!(matches!(err, PartError::DuplicatePartType(id) if id.as_str() == "Render"));
-        // The original entry is intact (6 kind parts + 7 effect parts are
-        // always registered).
-        assert_eq!(w.registry.len(), 14);
+        // The original entry is intact (6 kind + 7 effect + 3 stat parts are
+        // always registered by `World::new`).
+        assert_eq!(w.registry.len(), 17);
         assert_eq!(
             w.registry.storage(&PartTypeId::new("Render")),
             Some(StorageClass::Component)
