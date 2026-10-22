@@ -680,7 +680,7 @@ pub fn install_native_effects(ctx: &mut SimContext, library: Arc<RwLock<Blueprin
         resolve_apply_status(ctx, ev, &library)
     });
     // A successful status application/expiry dirties the target's derived
-    // stats: clear the cache immediately (s0  — absent is detectable) and
+    // stats: clear the cache immediately and
     // defer the `RecomputeDerived` dispatch until the dirtying dispatch's
     // stack unwinds, so the recompute — and its headless log line — lands
     // after the status event's own observers ( ordering). The
