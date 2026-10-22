@@ -106,6 +106,7 @@ pub struct Sim {
     player_turns: u64,
     /// The registered `RecomputeDerived` handler id (unregistered/replaced on
     /// a rules reload so the new bridge's handler takes over without stacking).
+    #[allow(dead_code)] // registered handler id, kept for reload wiring
     recompute_handler: HandlerId,
     /// Whether a `rules/stats.luau` handler was registered at install time —
     /// the fail-closed spawn gate (a stat-ful entity without a formula owner
@@ -113,6 +114,7 @@ pub struct Sim {
     stats_armed: bool,
 }
 
+#[allow(dead_code)] // S1 contract seams: actor_speed/reload_rules/log
 impl Sim {
     // ---- console/devtools support -------------------------------------
     //
@@ -430,7 +432,7 @@ impl Sim {
         let recompute_handler =
             install_recompute_derived(&mut ctx, bridge.as_ref(), scheduler.clone());
         let stats_armed = bridge
-			.as_ref()
+            .as_ref()
             .is_some_and(|b| b.has_event_handler("RecomputeDerived"));
         // Install the live world state into the shared bridge snapshot so the
         // script host's map/nav reads and `spawn_at` resolve against the same
@@ -525,7 +527,7 @@ impl Sim {
         self.recompute_handler =
             install_recompute_derived(&mut self.ctx, bridge.as_ref(), self.scheduler.clone());
         self.stats_armed = bridge
-			.as_ref()
+            .as_ref()
             .is_some_and(|b| b.has_event_handler("RecomputeDerived"));
         self.bridge = bridge;
         if let Some(b) = &self.bridge {
@@ -719,7 +721,7 @@ impl Sim {
         // host's WorldAccess clones then observe the same broker as the sim.
         let restored_broker = restore_broker(&data, hooks)?;
         let broker = bridge
-			.as_ref()
+            .as_ref()
             .map(ScriptBridge::broker)
             .unwrap_or_else(|| Arc::new(RwLock::new(EntityBroker::new())));
 
@@ -764,7 +766,7 @@ impl Sim {
         let recompute_handler =
             install_recompute_derived(&mut ctx, bridge.as_ref(), scheduler.clone());
         let stats_armed = bridge
-			.as_ref()
+            .as_ref()
             .is_some_and(|b| b.has_event_handler("RecomputeDerived"));
 
         // The reference enemy is the first scheduled non-player actor
@@ -1983,8 +1985,7 @@ mod tests {
             reference.submit_action(a).unwrap();
         }
         assert_eq!(
-            reference.log,
-            sim.log,
+            reference.log, sim.log,
             "two same-built worlds match pre-save"
         );
 

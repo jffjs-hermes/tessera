@@ -176,11 +176,7 @@ fn death_emitted_once_and_delivered_to_scripts() {
         "player must be dead after goblin bites"
     );
 
-    let died: Vec<&String> = sim
-        .log
-        .iter()
-        .filter(|l| l.starts_with("died "))
-        .collect();
+    let died: Vec<&String> = sim.log.iter().filter(|l| l.starts_with("died ")).collect();
     assert_eq!(
         died.len(),
         1,
@@ -193,11 +189,7 @@ fn death_emitted_once_and_delivered_to_scripts() {
     for _ in 0..10 {
         sim.submit_action(PlayerAction::Wait).expect("wait");
     }
-    let died_after: Vec<&String> = sim
-        .log
-        .iter()
-        .filter(|l| l.starts_with("died "))
-        .collect();
+    let died_after: Vec<&String> = sim.log.iter().filter(|l| l.starts_with("died ")).collect();
     assert_eq!(
         died_after.len(),
         1,

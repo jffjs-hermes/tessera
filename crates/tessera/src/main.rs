@@ -221,7 +221,7 @@ fn load_content(data: &std::path::Path, mods: &std::path::Path) -> Result<Conten
     // Discover mods: directory + zip sources under the mods root. A missing /
     // empty mods() directory is not an error — the demo loads base-only then.
     let sources = if mods.is_dir() {
-        tessera::mods::discover_sources(&mods)?
+        tessera::mods::discover_sources(mods)?
     } else {
         Vec::new()
     };

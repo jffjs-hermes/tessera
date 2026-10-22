@@ -39,8 +39,8 @@ use thiserror::Error;
 use crate::blueprints::BlueprintLibrary;
 use crate::ecs::{EntityBroker, PartError, PartRegistry, PartTypeId};
 use crate::events::{
-    ApplyStatus, DamageSource, HandlerAction, LATE, Move, NORMAL, Point, SimContext,
-    StatusApplied, StatusExpired, TakeDamage, TileEntry, UseAbility,
+    ApplyStatus, DamageSource, HandlerAction, LATE, Move, NORMAL, Point, SimContext, StatusApplied,
+    StatusExpired, TakeDamage, TileEntry, UseAbility,
 };
 use crate::kinds::Stacking;
 

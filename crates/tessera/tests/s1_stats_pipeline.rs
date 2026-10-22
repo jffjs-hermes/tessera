@@ -36,7 +36,7 @@ use tessera_core::world::{RenderTile, World};
 use tessera_core::zone::Zone;
 
 const BASE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/base");
-const MODS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/mods()");
+const MODS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/mods");
 
 fn register_parts(world: &mut World) {
     world
@@ -65,7 +65,7 @@ fn load_real_content(
     Arc<RwLock<EntityBroker>>,
     ScriptBridge,
 ) {
-    let sources = discover_sources(mods_root).expect("discover mods()");
+    let sources = discover_sources(mods_root).expect("discover mods");
     let registry = tessera_mods::ModRegistry::build(sources).expect("mod registry");
     let base_vfs = DirVfs::new(PathBuf::from(BASE));
     let overlay = Overlay::new(Box::new(base_vfs), &registry);
@@ -151,7 +151,7 @@ fn mods_pct(pct: i64) -> Modifiers {
         .expect("modifiers")
 }
 
-/// The baseline player: Actor attributes (T 13, A 9, L 1) — the exact 
+/// The baseline player: Actor attributes (T 13, A 9, L 1) — the exact
 /// HP table's Knight L1 row (`10 + 2*13 + 0 = 36`) with the speed/accuracy/
 /// dodge values for Agility 9.
 #[test]
@@ -273,11 +273,7 @@ fn console_stat_writes_recompute_exact_vectors() {
         &std::collections::BTreeMap::from([("level".to_string(), 10)]),
     )
     .expect("setpart level");
-    assert_eq!(
-        derived_map(&sim, player)["max_hp"],
-        99,
-        " Knight L10 row"
-    );
+    assert_eq!(derived_map(&sim, player)["max_hp"], 99, " Knight L10 row");
 
     // Agility 9 -> 20: speed base 120 (the  speed table row).
     sim.set_part_console(
@@ -362,7 +358,12 @@ fn status_application_fires_recompute_in_deterministic_order() {
         .skip(status_idx + 1)
         .position(|l| l.starts_with("EVENT RecomputeDerived "))
         .map(|i| i + status_idx + 1)
-        .unwrap_or_else(|| panic!("no recompute after StatusApplied; log tail: {:?}", &log[status_idx.saturating_sub(2)..]));
+        .unwrap_or_else(|| {
+            panic!(
+                "no recompute after StatusApplied; log tail: {:?}",
+                &log[status_idx.saturating_sub(2)..]
+            )
+        });
     assert!(
         status_idx < recompute_idx,
         "RecomputeDerived fires after StatusApplied: {log:?}"
@@ -396,7 +397,7 @@ fn tuning_reload_rebuilds_caches_from_the_new_table() {
 
     // Content B: same broker, hp_base raised to 20 (max_hp 46 for T 13).
     let base_vfs = DirVfs::new(PathBuf::from(BASE));
-    let sources = discover_sources(Path::new(MODS)).expect("discover mods()");
+    let sources = discover_sources(Path::new(MODS)).expect("discover mods");
     let registry = tessera_mods::ModRegistry::build(sources).expect("mod registry");
     let overlay = Overlay::new(Box::new(base_vfs), &registry);
     let bridge_b = ScriptBridge::new(broker.clone());

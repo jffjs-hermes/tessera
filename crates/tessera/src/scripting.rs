@@ -88,6 +88,7 @@ pub struct SharedSim {
     stats_armed: AtomicBool,
 }
 
+#[allow(dead_code)] // spec seams (stats_armed/scheduler accessors)
 impl SharedSim {
     pub fn new() -> Self {
         Self::default()
@@ -623,7 +624,12 @@ impl WorldAccess for SimWorldAccess {
             if let Some(ae) = b.typed_part::<tessera_core::turns::ActorEnergy>(
                 entity,
                 &PartTypeId::new(tessera_core::turns::PART_ENERGY),
-            ) && let Some(sched) = self.shared.scheduler.read().unwrap_or_else(|p| p.into_inner()).as_ref()
+            ) && let Some(sched) = self
+                .shared
+                .scheduler
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
                 && let Ok(mut s) = sched.lock()
             {
                 s.add_actor(entity, ae.clone());
@@ -641,7 +647,12 @@ impl WorldAccess for SimWorldAccess {
             .map_err(|er| ScriptError::Internal(format!("despawn: {er}")))?;
         // Keep the scheduler in lockstep: a despawned scheduled actor must not
         // remain on the clock.
-        if let Some(sched) = self.shared.scheduler.read().unwrap_or_else(|p| p.into_inner()).as_ref()
+        if let Some(sched) = self
+            .shared
+            .scheduler
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
             && let Ok(mut s) = sched.lock()
         {
             s.remove_actor(e);
@@ -936,6 +947,7 @@ impl ScriptBridge {
     }
 
     /// Access the wrapped host.
+    #[allow(dead_code)] // documented host-handle accessor (spec §5.2)
     pub fn host(&self) -> &Rc<Mutex<ScriptHost>> {
         &self.host
     }
