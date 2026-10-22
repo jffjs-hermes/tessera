@@ -4,7 +4,7 @@ Events are plain typed structs. Native handlers and script handlers enter the sa
 
 ```mermaid
 flowchart TD
-    Source["Scheduler / native part / ScriptBridge"] --> Event["typed Event\nMove, Attack, TakeDamage, UseAbility"]
+    Source["Scheduler / native part / ScriptBridge"] --> Event["typed Event\nMove, Attack, TakeDamage, UseAbility, RecomputeDerived"]
     Event --> Validate["Event::validate"]
     Validate --> Dispatch["SimContext::dispatch"]
     Dispatch --> Snapshot["snapshot handler list"]
@@ -23,6 +23,7 @@ flowchart TD
     Bus["EventBus\nBTreeMap ordered\nEARLY / NORMAL / LATE"] --> Dispatch
     Scheduler["Scheduler::take_turn"] --> Source
     Effects["effects.rs\nStatusEffects / Charges"] --> Source
+    Dirty["dirtying part/status changes"] --> Source
     Broker["EntityBroker / PartMap"] --> Context
     Context --> Broker
     Dispatch --> Nested["nested follow-up events"]
@@ -30,4 +31,4 @@ flowchart TD
     Guard --> Dispatch
 ```
 
-**Legend:** lower priority values run first; registration sequence breaks ties deterministically. Mutators may modify payloads or cancel; observers run after the mutator phase and cannot cancel. Re-entrant pairs and excessive nesting return errors rather than panicking.
+**Legend:** lower priority values run first; registration sequence breaks ties deterministically. Mutators may modify payloads or cancel; observers run after the mutator phase and cannot cancel. Dirtying changes enqueue `RecomputeDerived`; its script handler writes formula bases and the native finalize seam applies modifiers and clamps to the cache. Re-entrant pairs and excessive nesting return errors rather than panicking.
