@@ -117,9 +117,11 @@ fn spawn_at(world: &World, broker: &mut EntityBroker, bp: &str, x: i32, y: i32) 
 }
 
 /// Read the resolved Goblin blueprint's `Attributes.might` as a raw integer
-/// (the value every creature inherits from the base `Actor` root; patches
-/// operate on raw payloads). Attributes/Level/Bonuses replace the legacy
-/// `Stats` part, which must be gone from the resolved blueprint entirely.
+/// (the value every creature inherits from the base `Actor` root unless the
+/// blueprint overrides it — the stats-slice Goblin carries its own build
+/// (Might 9); patches operate on raw payloads). Attributes/Level/Bonuses
+/// replace the legacy `Stats` part, which must be gone from the resolved
+/// blueprint entirely.
 fn goblin_might(world: &World) -> i64 {
     let lib = world.library().read().unwrap_or_else(|p| p.into_inner());
     let goblin = lib.get("Goblin").expect("Goblin blueprint");
@@ -198,9 +200,9 @@ fn sample_mod_adds_bogling_charge_patches_goblin_and_logs_handler() {
         "sample mod must add a Bogling blueprint"
     );
     // The legacy `Stats` part is gone from the resolved blueprint; every
-    // creature now carries `Attributes` inherited from the base `Actor` root
-    // (the goblin does not restate them, so it gets the defaults).
-    assert_eq!(goblin_might(&world), 14);
+    // creature carries `Attributes`, and the stats-slice Goblin restates its
+    // own build (Might 9) as a blueprint override of the Actor root defaults.
+    assert_eq!(goblin_might(&world), 9);
     {
         let lib = world.library().read().unwrap();
         let goblin = lib.get("Goblin").expect("Goblin blueprint");

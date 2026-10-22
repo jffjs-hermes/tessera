@@ -18,6 +18,7 @@
 //! spawn <blueprint> [x y]           — spawn; default = zone start tile
 //! kill <entity-id> | kill all <blueprint>
 //! print <entity-id>                 — dump an entity's parts (the inspector text path)
+//! stats <entity-id|player>          — read-only derived values + contributing terms
 //! sethp <entity-id> <n>             — write the Health part
 //! setpart <entity-id> <Attributes|Level> <key>=<value> ... — write a stat part (recomputes Derived)
 //! tp <entity-id> <x> <y>            — teleport (writes Position)
@@ -57,6 +58,11 @@ pub enum ConsoleCommand {
     },
     Print {
         id: u64,
+    },
+    /// `stats <entity-id|player>`: the read-only derived-stat readout.
+    /// `None` resolves to the sim's player entity.
+    Stats {
+        id: Option<u64>,
     },
     SetHp {
         id: u64,
@@ -124,6 +130,17 @@ pub fn parse(line: &str) -> Result<ConsoleCommand, String> {
             }
             Ok(ConsoleCommand::Print { id })
         }
+        "stats" => {
+            if toks.len() != 1 {
+                return Err("usage: stats <entity-id|player>".into());
+            }
+            let id = if toks[0] == "player" {
+                None
+            } else {
+                Some(parse_entity_id(toks[0])?)
+            };
+            Ok(ConsoleCommand::Stats { id })
+        }
         "sethp" => {
             if toks.len() != 2 {
                 return Err("usage: sethp <entity-id> <n>".into());
@@ -162,7 +179,7 @@ pub fn parse(line: &str) -> Result<ConsoleCommand, String> {
         }
         other => Err(format!(
             "unknown command '{other}' — try 'help' \
-             (commands: help list entities spawn kill print sethp setpart tp save load clear)"
+             (commands: help list entities spawn kill print stats sethp setpart tp save load clear)"
         )),
     }
 }
@@ -335,6 +352,27 @@ pub fn execute(sim: &mut Sim, ctx: &ConsoleContext<'_>, cmd: ConsoleCommand) -> 
                 None => ConsoleOutcome::Err(format!("no live entity {id}")),
             }
         }
+        ConsoleCommand::Stats { id } => {
+            let tick = sim.ticks();
+            let label = id
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "player".to_string());
+            let entity = match id {
+                Some(id) => sim.entity_from_id(id),
+                None => Some(sim.player_entity()),
+            };
+            match entity {
+                Some(e) => {
+                    let text = stats_text(sim, ctx.world, e);
+                    sim.log_push(format!("CMD stats {label} tick={tick}"));
+                    ConsoleOutcome::Ok(text)
+                }
+                None => ConsoleOutcome::Err(match id {
+                    Some(i) => format!("no live entity {i}"),
+                    None => "no live player entity".to_string(),
+                }),
+            }
+        }
         ConsoleCommand::SetHp { id, n } => {
             let tick = sim.ticks();
             match sim.entity_from_id(id) {
@@ -418,6 +456,7 @@ fn help_text() -> String {
      spawn <blueprint> [x y]           spawn; default = zone start tile\n  \
      kill <entity-id> | kill all <blueprint>\n  \
      print <entity-id>                 dump an entity's parts (the inspector text path)\n  \
+     stats <id|player>                 read-only derived values + contributing terms\n  \
      sethp <entity-id> <n>             write the Health part\n  \
      setpart <entity-id> <part> <k>=<v>... write Attributes/Level (recomputes Derived)\n  \
      tp <entity-id> <x> <y>            teleport (writes Position)\n  \
@@ -491,6 +530,80 @@ fn print_text(sim: &Sim, save_hooks: &SaveHooks, e: Entity) -> String {
     } else {
         lines.join("\n")
     }
+}
+
+/// The read-only `stats` output: the acceptance-style five-value
+/// summary line (`HP 36/99  Acc 4  Dodge 8  Def 21  Spd 106`) plus the
+/// contributing terms — attributes/level, bonuses, and each live status's
+/// modifier contribution — so a tuning session can see *why* a number is
+/// what it is. Reads only: takes the broker read lock, never mutates the
+/// cache. The cache has exactly one writer (the rules script); there is no
+/// `setderived` command and this command cannot become a second one.
+fn stats_text(sim: &Sim, world: &World, e: Entity) -> String {
+    use tessera_core::effects::{Derived, PART_DERIVED, PART_STATUS_EFFECTS, StatusEffects};
+    use tessera_core::stats::{
+        Attributes, Bonuses, Level, PART_ATTRIBUTES, PART_BONUSES, PART_LEVEL,
+    };
+    let b = sim.broker().read().unwrap_or_else(|p| p.into_inner());
+    let id = entity_to_id(e);
+    let bp = blueprint_of(world, &b, e);
+    let hp = b
+        .typed_part::<Health>(e, &PART_HEALTH.into())
+        .map(|h| h.hp)
+        .unwrap_or(0);
+    let Some(derived) = b.typed_part::<Derived>(e, &PartTypeId::new(PART_DERIVED)) else {
+        return format!("#{id} {bp}  (no Derived cache — entity carries no Attributes)");
+    };
+    let max = derived.values.get("max_hp").copied().unwrap_or(0);
+    let v = |k: &str| derived.values.get(k).copied().unwrap_or(0);
+    let mut lines = vec![format!(
+        "#{id} {bp}  HP {hp}/{max}  Acc {}  Dodge {}  Def {}  Spd {}",
+        v("accuracy"),
+        v("dodge"),
+        v("defense"),
+        v("speed")
+    )];
+    if let Some(a) = b.typed_part::<Attributes>(e, &PartTypeId::new(PART_ATTRIBUTES)) {
+        let level = b
+            .typed_part::<Level>(e, &PartTypeId::new(PART_LEVEL))
+            .map(|l| l.level)
+            .unwrap_or(1);
+        lines.push(format!(
+            "  attributes: might={} agility={} toughness={} will={} intellect={}  level={level}",
+            a.might, a.agility, a.toughness, a.will, a.intellect
+        ));
+    }
+    if let Some(bns) = b.typed_part::<Bonuses>(e, &PartTypeId::new(PART_BONUSES)) {
+        lines.push(format!(
+            "  bonuses: accuracy={} dodge={} ac={}",
+            bns.accuracy, bns.dodge, bns.ac
+        ));
+    }
+    if let Some(eff) = b.typed_part::<StatusEffects>(e, &PartTypeId::new(PART_STATUS_EFFECTS)) {
+        for status in eff.statuses() {
+            let n = eff.instances(status).len();
+            let mut terms: Vec<String> = Vec::new();
+            for inst in eff.instances(status) {
+                for (stat, m) in inst.modifiers.entries() {
+                    let mut t = stat.clone();
+                    if m.add != 0 {
+                        t = format!("{t} add={}", m.add);
+                    }
+                    if m.pct != 0 {
+                        t = format!("{t} pct={}", m.pct);
+                    }
+                    terms.push(t);
+                }
+            }
+            if !terms.is_empty() {
+                lines.push(format!("  status {status} x{n}: {}", terms.join(", ")));
+            }
+        }
+    }
+    for stat in ["max_hp", "accuracy", "dodge", "ac", "defense", "speed"] {
+        lines.push(format!("  {stat} = {}", v(stat)));
+    }
+    lines.join("\n")
 }
 
 /// All live entities whose fingerprint blueprint == `bp`, as (id, entity) pairs

@@ -28,7 +28,7 @@
 #![cfg_attr(not(feature = "devtools"), allow(dead_code))]
 
 use hecs::Entity;
-use tessera_core::ecs::EntityBroker;
+use tessera_core::ecs::{EntityBroker, PartTypeId};
 use tessera_core::events::{Health, PART_HEALTH, PART_POSITION, Position};
 use tessera_core::save::SaveHooks;
 use tessera_core::script_part::ScriptPart;
@@ -51,6 +51,14 @@ pub struct EntityRow {
     pub y: i32,
     /// Native `Health` copy (0 when absent).
     pub hp: i32,
+    /// The row summary line shown in the inspector list: the base position
+    /// line plus, for stat-ful entities, `Might/Agility/Toughness/Will/
+    /// Intellect`, `Lv`, and the five live derived values in the acceptance
+    /// style (`HP 36/99  Acc 4  Dodge 8  Def 21  Spd 106`). Built from live
+    /// `Attributes`/`Level`/`Derived` parts by [`summary_line`]; entities
+    /// without `Attributes` keep the plain position line ("where
+    /// applicable").
+    pub summary: String,
     /// Native part `name -> Debug rendering`, in sorted-name order. Script
     /// parts are excluded by design (script-owned state is a non-goal).
     pub parts: Vec<(String, String)>,
@@ -89,6 +97,7 @@ pub fn build_snapshot(b: &EntityBroker, world: &World, hooks: &SaveHooks) -> Ins
 fn build_row(b: &EntityBroker, world: &World, hooks: &SaveHooks, e: Entity) -> EntityRow {
     let id = entity_to_id(e);
     let blueprint = blueprint_of(world, b, e);
+    let summary = summary_line(id, &blueprint, b, e);
     let (x, y, hp) = row_of(b, e);
     let parts = native_part_debug(b, hooks, e);
     EntityRow {
@@ -97,8 +106,45 @@ fn build_row(b: &EntityBroker, world: &World, hooks: &SaveHooks, e: Entity) -> E
         x,
         y,
         hp,
+        summary,
         parts,
     }
+}
+
+/// The read-only row summary: `#<id> <blueprint> (x,y) hp=<n>`
+/// plus, for entities carrying `Attributes`, `Might/Agility/Toughness/Will/
+/// Intellect` + `Lv` and the five live derived values in the acceptance style —
+/// `HP 36/99  Acc 4  Dodge 8  Def 21  Spd 106`. Reads the live
+/// `Attributes`/`Level`/`Derived` parts; entities without them keep just the
+/// position line ("where applicable"). Read-only: snapshot data, no writes.
+fn summary_line(id: u64, blueprint: &str, b: &EntityBroker, e: Entity) -> String {
+    use tessera_core::effects::{Derived, PART_DERIVED};
+    use tessera_core::stats::{Attributes, Level, PART_ATTRIBUTES, PART_LEVEL};
+    let (x, y, hp) = row_of(b, e);
+    let mut s = format!("#{id} {blueprint} ({x},{y}) hp={hp}");
+    let Some(attrs) = b.typed_part::<Attributes>(e, &PartTypeId::new(PART_ATTRIBUTES)) else {
+        return s;
+    };
+    let level = b
+        .typed_part::<Level>(e, &PartTypeId::new(PART_LEVEL))
+        .map(|l| l.level)
+        .unwrap_or(1);
+    s.push_str(&format!(
+        "  Might {}  Agility {}  Toughness {}  Will {}  Intellect {}  Lv {}",
+        attrs.might, attrs.agility, attrs.toughness, attrs.will, attrs.intellect, level
+    ));
+    if let Some(d) = b.typed_part::<Derived>(e, &PartTypeId::new(PART_DERIVED)) {
+        let max = d.values.get("max_hp").copied().unwrap_or(0);
+        let v = |k: &str| d.values.get(k).copied().unwrap_or(0);
+        s.push_str(&format!(
+            "  HP {hp}/{max}  Acc {}  Dodge {}  Def {}  Spd {}",
+            v("accuracy"),
+            v("dodge"),
+            v("defense"),
+            v("speed")
+        ));
+    }
+    s
 }
 
 /// Read-only `Position`/`Health` copies for the row summary line.
@@ -187,10 +233,7 @@ mod window {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for row in &snap.entities {
-                            let line = format!(
-                                "#{} {} ({}, {}) hp={}",
-                                row.id, row.blueprint, row.x, row.y, row.hp
-                            );
+                            let line = row.summary.clone();
                             let is_selected = *selected == Some(row.id);
                             if ui.selectable_label(is_selected, line).clicked() {
                                 *selected = Some(row.id);

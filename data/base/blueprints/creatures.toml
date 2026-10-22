@@ -30,4 +30,12 @@ inherits = "Humanoid"
 parts.Render = { tile = "creature.goblin" }
 parts.GoblinBrain = { detect = 10 }
 parts.Health = { hp = 3 }
+# The S1 goblin fixture (s1-stats §4.6, from prototype_class_sim.py's ENEMY
+# table: L2, M9/A13/T9/W6/I7, ac 2): its own attributes/level override the
+# Actor root, and `Bonuses.ac` stands in for the not-yet-existing leather
+# armor (S2 gear). Derived: HP 34, Acc 8, Dodge 8, Def 12, Spd 106 — the
+# demo's goblin speed visibly reflects Agility (13 -> 106), not a flat 100.
+parts.Attributes = { might = 9, agility = 13, toughness = 9, will = 6, intellect = 7 }
+parts.Level = { level = 2 }
+parts.Bonuses = { ac = 2 }
 scripts = ["scripts/goblin_ai.luau"]

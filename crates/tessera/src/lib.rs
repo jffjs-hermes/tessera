@@ -6,6 +6,7 @@
 //! can drive the Zapper demo without a window. Keeping these out of the binary
 //! means `--headless` CI can exercise them from `cargo test`.
 
+pub mod devtools;
 pub mod mods;
 pub mod scripting;
 pub mod sim;
