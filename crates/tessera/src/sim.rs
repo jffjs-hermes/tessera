@@ -114,7 +114,7 @@ pub struct Sim {
     stats_armed: bool,
 }
 
-#[allow(dead_code)] // S1 contract seams: actor_speed/reload_rules/log
+#[allow(dead_code)] // console/devtools accessors: actor_speed/reload_rules/log
 impl Sim {
     // ---- console/devtools support -------------------------------------
     //

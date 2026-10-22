@@ -562,7 +562,7 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(feature = "devtools")]
         {
             let devtools =
-                devtools::Devtools::new(&window, renderer.device, renderer.surface_format);
+                devtools::Devtools::new(&window, renderer.device(), renderer.surface_format());
             self.devtools = Some(devtools);
         }
         window.request_redraw();
