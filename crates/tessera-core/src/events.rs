@@ -220,6 +220,13 @@ pub struct SimContext {
     pub rng: SimRng,
     /// The typed handler store and dispatch bookkeeping.
     bus: EventBus,
+    /// Deferred `RecomputeDerived` targets: dirtying observers queue here
+    /// instead of dispatching inline, and [`SimContext::dispatch`] flushes
+    /// them once the dispatch stack unwinds to depth 0 — so the recompute
+    /// (and its headless log line) lands *after* the dirtying dispatch and
+    /// its own observer lines, matching the declared ordering.
+    /// Entities are flushed in queue order (deterministic).
+    pending_recompute: Vec<Entity>,
 }
 
 impl SimContext {
@@ -238,7 +245,15 @@ impl SimContext {
             map,
             rng,
             bus: EventBus::default(),
+            pending_recompute: Vec::new(),
         }
+    }
+
+    /// Queue a derivable entity for recompute once the current dispatch
+    /// stack fully unwinds (the dirtying-event deferral instead of a nested
+    /// dispatch; see [`Self::pending_recompute`]).
+    pub fn defer_recompute(&mut self, entity: Entity) {
+        self.pending_recompute.push(entity);
     }
 
     /// Write (upsert) an entity's `Position` part.
@@ -400,6 +415,17 @@ impl SimContext {
 
         self.bus.depth -= 1;
         self.bus.in_flight.remove(&(name, entity));
+
+        // Flush deferred recomputes once the dispatch stack fully unwinds:
+        // status dirtying queues them (instead of a nested dispatch) so the
+        // recompute — and its headless log line — lands after the dirtying
+        // event's own observers.
+        if self.bus.depth == 0 {
+            let deferred = std::mem::take(&mut self.pending_recompute);
+            for entity in deferred {
+                let _ = self.dispatch(RecomputeDerived { entity });
+            }
+        }
 
         if let Some(err) = failed {
             return Err(err);
@@ -606,6 +632,32 @@ impl Event for StatusExpired {
 
     fn entity(&self) -> Entity {
         self.target
+    }
+}
+
+/// Internal event: recompute the cached `Derived` part of `entity` (the
+/// declared stat-pipeline invalidation point). Dispatched after every
+/// dirtying event in the declared set — spawn completion,
+/// `StatusApplied`/`StatusExpired`, writes to `Attributes`/`Level`, and a
+/// `Tuning_*` content reload — so the recomputation always sees settled
+/// inputs.
+///
+/// The native handler clears the cache first (the `invalidate_derived` hook,
+/// absent is detectable), the engine forwards the event to the registered
+/// `rules/stats.luau` handler (which recomputes the five formula bases and
+/// writes them via the whitelisted `set_part` path), and a native finalize
+/// seam applies live status modifiers, the invariant clamps and the
+/// `Health.hp <= max_hp` clamp before control returns to the scheduler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecomputeDerived {
+    pub entity: Entity,
+}
+
+impl Event for RecomputeDerived {
+    const NAME: &'static str = "RecomputeDerived";
+
+    fn entity(&self) -> Entity {
+        self.entity
     }
 }
 

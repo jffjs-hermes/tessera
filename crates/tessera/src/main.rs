@@ -1,5 +1,5 @@
 //! Tessera demo: a data-driven `@` spawned from `[Player]` (a blueprint with
-//! `parts.Render = { tile = "creature.player" }`), drawn from the tile registry.
+//! `parts.Render = { tile = "creature.player()" }`), drawn from the tile registry.
 //! Edit `data/base/blueprints/` while running and the blueprint library reloads
 //! (new spawns use the new library; existing entities keep their parts).
 //!
@@ -53,9 +53,9 @@ enum UserEvent {
 
 struct Args {
     data: PathBuf,
-    /// Mods root (`--mods <dir>`), where local directory / zip mods are
+    /// Mods root (`--mods() <dir>`), where local directory / zip mods() are
     /// discovered. The shipped layout keeps the base pack at `data/base` and
-    /// mods at `data/mods`, so the default matches when `--data` is unchanged.
+    /// mods() at `data/mods()`, so the default matches when `--data` is unchanged.
     mods: PathBuf,
     /// Which zone to load (`--zone <id>`); the pack must have exactly one zone
     /// when omitted (fail-closed, no silent pick).
@@ -83,11 +83,11 @@ fn parse_args() -> Result<Args> {
     let mut save_dir = PathBuf::from("saves");
     let mut load = None;
     let mut exec = Vec::new();
-    let mut it = std::env::args().skip(1);
+    let mut it = std::env::args.skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--data" => data = it.next().context("--data needs a path")?.into(),
-            "--mods" => mods = it.next().context("--mods needs a path")?.into(),
+            "--mods()" => mods() = it.next().context("--mods() needs a path")?.into(),
             "--zone" => zone = Some(it.next().context("--zone needs an id")?.to_string()),
             "--frames" => frames = Some(it.next().context("--frames needs a number")?.parse()?),
             "--save-dir" => save_dir = it.next().context("--save-dir needs a path")?.into(),
@@ -102,7 +102,7 @@ fn parse_args() -> Result<Args> {
             }
             "-h" | "--help" => {
                 println!(
-                    "tessera [--data <dir>] [--mods <dir>] [--zone <id>] [--frames <n>] [--headless <n>]\n\
+                    "tessera [--data <dir>] [--mods() <dir>] [--zone <id>] [--frames <n>] [--headless <n>]\n\
                      \n\
                      Interactive: arrow keys / WASD / hjklyubn or numpad to move (all 8\n\
                      directions, numpad 5 = wait), `.` / Space = wait,\n\
@@ -112,7 +112,7 @@ fn parse_args() -> Result<Args> {
                      The headless script includes one Bash step, so the event log shows the\n\
                      declarative ability path in order: UseAbility -> TakeDamage(blunt) -> ApplyStatus.\n\
                      `--zone <id>`: load the named zone (defaults to the single zone in the pack).\n\
-                     `--mods <dir>`: discover local directory / zip mods (default data/mods);\n\
+                     `--mods() <dir>`: discover local directory / zip mods() (default data/mods());\n\
                      base data loads first, then each mod in deterministic load order.\n\
                      `--save-dir <dir>`: save directory for save/load and --load (default ./saves).\n\
                      `--load <name>`: load the named save at startup, replacing live state.\n\
@@ -147,7 +147,7 @@ struct Content {
     broker: Arc<RwLock<EntityBroker>>,
     /// Script host bridge (loads + dispatches scripts against `broker`).
     bridge: ScriptBridge,
-    /// Deterministic load order of the loaded mods (empty for a base-only
+    /// Deterministic load order of the loaded mods() (empty for a base-only
     /// pack). Kept so the headless demo can report what a mod run exercised.
     mod_ids: Vec<String>,
     /// Whitelist save hooks for this world (native + script parts), built once
@@ -158,12 +158,12 @@ struct Content {
 
 /// Build the world: register the engine's known part types and the dynamic
 /// parts (Position / ActorEnergy / Health; the native stat parts Attributes/
-/// Level/Bonuses are registered centrally by `World::new`), load every script
+/// Level/Bonuses are registered centrally by `World::new()`), load every script
 /// in the content set (registering their `define_part` schemas via the host)
 /// and sync those schemas into the world registry so blueprint
 /// `parts.<ScriptPart>` keys validate — THEN load the blueprint set. On any
 /// error returns an anyhow error carrying `file + id` diagnostics. `vfs` is
-/// the composed overlay (base + mods), so scripts and blueprints resolve
+/// the composed overlay (base + mods()), so scripts and blueprints resolve
 /// across all of them in one pass.
 fn build_world(vfs: &dyn Vfs, bridge: &ScriptBridge) -> Result<World> {
     let mut world = World::new();
@@ -215,20 +215,20 @@ fn build_world(vfs: &dyn Vfs, bridge: &ScriptBridge) -> Result<World> {
 /// plus every discovered local directory / zip mod, layered in deterministic
 /// load order. The composed overlay Vfs feeds the tile, script and blueprint
 /// loaders, and each mod's `patches/*.toml` are applied to the blueprint library
-/// afterwards. `mods` may be a missing or empty directory (base-only load).
+/// afterwards. `mods()` may be a missing or empty directory (base-only load).
 fn load_content(data: &std::path::Path, mods: &std::path::Path) -> Result<Content> {
     let base_vfs = DirVfs::new(data);
     // Discover mods: directory + zip sources under the mods root. A missing /
-    // empty mods directory is not an error — the demo loads base-only then.
+    // empty mods() directory is not an error — the demo loads base-only then.
     let sources = if mods.is_dir() {
-        tessera::mods::discover_sources(mods)?
+        tessera::mods::discover_sources(&mods)?
     } else {
         Vec::new()
     };
     let registry = match tessera_mods::ModRegistry::build(sources) {
         Ok(reg) => reg,
         Err(errors) => {
-            let joined = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>();
+            let joined = errors.iter().map(|e| e.to_string()).collect()::<Vec<_>>;
             anyhow::bail!("mod loading errors: {}", joined.join("; "));
         }
     };
@@ -277,7 +277,7 @@ fn load_content(data: &std::path::Path, mods: &std::path::Path) -> Result<Conten
 /// spawns.
 fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
     let mut broker = content
-        .broker
+        .broker()
         .write()
         .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
 
@@ -292,13 +292,29 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
     // start tile.
     let start_bp = zone.spawns.start.as_deref().unwrap_or(PLAYER_BLUEPRINT);
     let mut broker = content
-        .broker
+        .broker()
         .write()
         .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
     let player = content
         .world
         .spawn_blueprint(start_bp, &mut broker)
         .with_context(|| format!("spawning {start_bp:?}"))?;
+    // Fail-closed spawn : a stat-ful entity without the
+    // registered rules script is a spawn error.
+    if broker
+        .typed_part::<tessera_core::stats::Attributes>(
+            player,
+            &tessera_core::ecs::PartTypeId::new(tessera_core::stats::PART_ATTRIBUTES),
+        )
+        .is_some()
+        && !content.bridge.has_event_handler("RecomputeDerived")
+    {
+        drop(broker);
+        anyhow::bail!(
+            "spawning {start_bp:?}: entity carries parts.Attributes but no \
+             rules/stats.luau handler is registered (fail-closed)"
+        );
+    }
     broker.insert_part(
         player,
         PART_POSITION,
@@ -314,7 +330,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
     for bp in &zone.spawns.random {
         let e = {
             let mut broker = content
-                .broker
+                .broker()
                 .write()
                 .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
             content
@@ -322,8 +338,26 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
                 .spawn_blueprint(bp, &mut broker)
                 .with_context(|| format!("spawning {bp:?}"))?
         };
+        // Fail-closed spawn : a stat-ful entity without the
+        // registered rules script is a spawn error.
+        if content
+            .broker()
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .typed_part::<tessera_core::stats::Attributes>(
+                e,
+                &tessera_core::ecs::PartTypeId::new(tessera_core::stats::PART_ATTRIBUTES),
+            )
+            .is_some()
+            && !content.bridge.has_event_handler("RecomputeDerived")
+        {
+            anyhow::bail!(
+                "spawning {bp:?}: entity carries parts.Attributes but no \
+                 rules/stats.luau handler is registered (fail-closed)"
+            );
+        }
         let to = {
-            let b = content.broker.read().unwrap_or_else(|p| p.into_inner());
+            let b = content.broker().read().unwrap_or_else(|p| p.into_inner());
             let occupied = |cx: i32, cy: i32| {
                 b.entities_with_part(PART_POSITION).iter().any(|e| {
                     b.typed_part::<Position>(*e, &PART_POSITION.into())
@@ -336,7 +370,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
         };
         {
             let mut broker = content
-                .broker
+                .broker()
                 .write()
                 .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
             broker.insert_part(e, PART_POSITION, Box::new(Position::from_point(to)))?;
@@ -353,7 +387,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
     // (this only fires when the blueprint is present).
     if content
         .world
-        .library()
+        .library
         .read()
         .unwrap_or_else(|p| p.into_inner())
         .contains("Bogling")
@@ -361,7 +395,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
         const BOGLING_BP: &str = "Bogling";
         let e = {
             let mut broker = content
-                .broker
+                .broker()
                 .write()
                 .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
             content
@@ -370,7 +404,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
                 .with_context(|| format!("spawning {BOGLING_BP:?}"))?
         };
         let to = {
-            let b = content.broker.read().unwrap_or_else(|p| p.into_inner());
+            let b = content.broker().read().unwrap_or_else(|p| p.into_inner());
             let occupied = |cx: i32, cy: i32| {
                 b.entities_with_part(PART_POSITION).iter().any(|e| {
                     b.typed_part::<Position>(*e, &PART_POSITION.into())
@@ -383,7 +417,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
         };
         {
             let mut broker = content
-                .broker
+                .broker()
                 .write()
                 .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
             broker.insert_part(e, PART_POSITION, Box::new(Position::from_point(to)))?;
@@ -391,7 +425,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
     }
 
     Ok(Sim::from_shared(
-        content.broker.clone(),
+        content.broker().clone(),
         Some(content.bridge.clone()),
         zone.clone(),
         player,
@@ -477,7 +511,7 @@ impl App {
     fn build_cells(&self) -> Vec<Cell> {
         let targets = self.sim.renderables();
         sim::build_cells(
-            self.sim.map(),
+            self.sim.map,
             &self.content.tiles,
             &self.content.atlas,
             &targets,
@@ -528,7 +562,7 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(feature = "devtools")]
         {
             let devtools =
-                devtools::Devtools::new(&window, renderer.device(), renderer.surface_format());
+                devtools::Devtools::new(&window, renderer.device, renderer.surface_format);
             self.devtools = Some(devtools);
         }
         window.request_redraw();
@@ -614,7 +648,7 @@ impl ApplicationHandler<UserEvent> for App {
                             let window = self.window.clone().expect("window exists");
                             let cc = console::ConsoleContext {
                                 world: &self.content.world,
-                                save_hooks: &self.content.save_hooks,
+                                save_hooks: &self.content.save_hooks(),
                                 save_dir: &self.args.save_dir,
                             };
                             r.render_with(&cells, |device, queue, view, enc| {
@@ -655,14 +689,14 @@ fn startup_console(sim: &mut Sim, content: &Content, args: &Args) {
     }
     let ctx = ConsoleContext {
         world: &content.world,
-        save_hooks: &content.save_hooks,
+        save_hooks: &content.save_hooks(),
         save_dir: &args.save_dir,
     };
     // "--load" first so it becomes the base state the --exec lines act on.
     if let Some(name) = &args.load {
         let path = args.save_dir.join(format!("{name}.tess"));
         match tessera_core::save::load(&path) {
-            Ok(data) => match sim.restore_from_save(data, ctx.save_hooks) {
+            Ok(data) => match sim.restore_from_save(data, ctx.save_hooks()) {
                 Ok(()) => println!("[console] loaded {name} from {}", path.display()),
                 Err(e) => println!("[console] error: load {name}: {e}"),
             },
@@ -684,7 +718,7 @@ fn startup_console(sim: &mut Sim, content: &Content, args: &Args) {
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -694,7 +728,7 @@ fn main() -> Result<()> {
     let args = parse_args()?;
     let content = load_content(&args.data, &args.mods).with_context(|| {
         format!(
-            "loading content from {} (mods {})",
+            "loading content from {} (mods() {})",
             args.data.display(),
             args.mods.display()
         )
@@ -722,7 +756,7 @@ fn main() -> Result<()> {
 
         let map_text = sim.run_headless(&content.tiles, n);
         print!("{map_text}");
-        for line in sim.log() {
+        for line in sim.log {
             println!("{line}");
         }
         // One-line status readout: hp + player-turn clock (the combat / death
@@ -739,10 +773,10 @@ fn main() -> Result<()> {
         if !content.mod_ids.is_empty() {
             let lib = content
                 .world
-                .library()
+                .library
                 .read()
                 .unwrap_or_else(|p| p.into_inner());
-            println!("mods loaded: {}", content.mod_ids.join(", "));
+            println!("mods() loaded: {}", content.mod_ids.join(", "));
             if lib.contains("Bogling") {
                 println!("mod demo: Bogling spawned with sample-mod Charge; Goblin tile patched");
             }
@@ -763,17 +797,17 @@ fn main() -> Result<()> {
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    let proxy = event_loop.create_proxy();
+    let proxy = event_loop.create_proxy()?;
 
-    // Dev hot reload: any change under the data dir — base *or* mods — triggers
-    // a reload (a single miss keeps the whole previous content, mods included,
-    // fail-closed). Watch the mods root too when it exists, so edits to local
-    // directory / zip mods are picked up like base edits.
+    // Dev hot reload: any change under the data dir — base *or* mods() — triggers
+    // a reload (a single miss keeps the whole previous content, mods() included,
+    // fail-closed). Watch the mods() root too when it exists, so edits to local
+    // directory / zip mods() are picked up like base edits.
     let watcher = {
         let p = proxy.clone();
         let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(ev) = res
-                && !ev.kind.is_access()
+                && !ev.kind.is_access
             {
                 let _ = p.send_event(UserEvent::ContentChanged);
             }
@@ -871,19 +905,19 @@ mod tests {
     #[test]
     fn arrow_keys_still_move() {
         assert_eq!(
-            key_to_action(other(), &Key::Named(NamedKey::ArrowLeft)),
+            key_to_action(other, &Key::Named(NamedKey::ArrowLeft)),
             mv(-1, 0)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Named(NamedKey::ArrowRight)),
+            key_to_action(other, &Key::Named(NamedKey::ArrowRight)),
             mv(1, 0)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Named(NamedKey::ArrowUp)),
+            key_to_action(other, &Key::Named(NamedKey::ArrowUp)),
             mv(0, -1)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Named(NamedKey::ArrowDown)),
+            key_to_action(other, &Key::Named(NamedKey::ArrowDown)),
             mv(0, 1)
         );
     }
@@ -891,35 +925,35 @@ mod tests {
     #[test]
     fn vi_keys_still_move() {
         assert_eq!(
-            key_to_action(other(), &Key::Character("h".into())),
+            key_to_action(other, &Key::Character("h".into())),
             mv(-1, 0)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Character("j".into())),
+            key_to_action(other, &Key::Character("j".into())),
             mv(0, 1)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Character("k".into())),
+            key_to_action(other, &Key::Character("k".into())),
             mv(0, -1)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Character("l".into())),
+            key_to_action(other, &Key::Character("l".into())),
             mv(1, 0)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Character("y".into())),
+            key_to_action(other, &Key::Character("y".into())),
             mv(-1, -1)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Character("u".into())),
+            key_to_action(other, &Key::Character("u".into())),
             mv(1, -1)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Character("b".into())),
+            key_to_action(other, &Key::Character("b".into())),
             mv(-1, 1)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Character("n".into())),
+            key_to_action(other, &Key::Character("n".into())),
             mv(1, 1)
         );
     }
@@ -927,19 +961,19 @@ mod tests {
     #[test]
     fn wasd_keys_still_move() {
         assert_eq!(
-            key_to_action(other(), &Key::Character("a".into())),
+            key_to_action(other, &Key::Character("a".into())),
             mv(-1, 0)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Character("d".into())),
+            key_to_action(other, &Key::Character("d".into())),
             mv(1, 0)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Character("w".into())),
+            key_to_action(other, &Key::Character("w".into())),
             mv(0, -1)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Character("s".into())),
+            key_to_action(other, &Key::Character("s".into())),
             mv(0, 1)
         );
     }
@@ -947,15 +981,15 @@ mod tests {
     #[test]
     fn wait_and_zap_still_map() {
         assert_eq!(
-            key_to_action(other(), &Key::Character(".".into())),
+            key_to_action(other, &Key::Character(".".into())),
             Some(PlayerAction::Wait)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Character(" ".into())),
+            key_to_action(other, &Key::Character(" ".into())),
             Some(PlayerAction::Wait)
         );
         assert_eq!(
-            key_to_action(other(), &Key::Character("e".into())),
+            key_to_action(other, &Key::Character("e".into())),
             Some(PlayerAction::Zap)
         );
     }
@@ -965,14 +999,14 @@ mod tests {
         // X = Bash: use the first granted ability on the reference enemy
         // (the declarative Shield Bash path).
         assert_eq!(
-            key_to_action(other(), &Key::Character("x".into())),
+            key_to_action(other, &Key::Character("x".into())),
             Some(PlayerAction::Bash)
         );
     }
 
     #[test]
     fn unmapped_keys_are_none() {
-        assert_eq!(key_to_action(other(), &Key::Character("z".into())), None);
+        assert_eq!(key_to_action(other, &Key::Character("z".into())), None);
         assert_eq!(
             key_to_action(
                 PhysicalKey::Code(KeyCode::KeyQ),

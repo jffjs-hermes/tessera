@@ -90,7 +90,12 @@ fn base_sim(script_source: Option<&str>, enemy: bool) -> (Sim, Arc<RwLock<Entity
                     due = { kind = "int", default = -1, min = -1, max = 1000000000 },
                     blueprint = { kind = "string", default = "" },
                   },
-                })"#,
+                })
+                -- stats: a stub rules handler arms the engine (the fail-closed
+                -- spawn gate requires the RecomputeDerived handler for
+                -- stat-ful entities); this fixture() is about the script seam,
+                -- not stats, so the stub computes nothing.
+                engine.on("RecomputeDerived", engine.NORMAL, function(ev) end)"#,
         )
         .expect("register charge + goblin schemas");
     if let Some(src) = script_source {
@@ -160,7 +165,7 @@ fn death_emitted_once_and_delivered_to_scripts() {
     for _ in 0..120 {
         sim.submit_action(PlayerAction::Wait).expect("wait");
         if sim.player_health() == 0
-            && sim.log().iter().filter(|l| l.starts_with("died ")).count() >= 1
+            && sim.log.iter().filter(|l| l.starts_with("died ")).count() >= 1
         {
             break;
         }
@@ -172,7 +177,7 @@ fn death_emitted_once_and_delivered_to_scripts() {
     );
 
     let died: Vec<&String> = sim
-        .log()
+        .log
         .iter()
         .filter(|l| l.starts_with("died "))
         .collect();
@@ -181,7 +186,7 @@ fn death_emitted_once_and_delivered_to_scripts() {
         1,
         "Death must be emitted exactly once, got {:?} (log={:?})",
         died,
-        sim.log()
+        sim.log
     );
 
     // A handful more bites on the dead player must not re-emit Death.
@@ -189,7 +194,7 @@ fn death_emitted_once_and_delivered_to_scripts() {
         sim.submit_action(PlayerAction::Wait).expect("wait");
     }
     let died_after: Vec<&String> = sim
-        .log()
+        .log
         .iter()
         .filter(|l| l.starts_with("died "))
         .collect();
@@ -235,9 +240,9 @@ fn player_respawn_script_respawns_player_on_death() {
         sim.player_health()
     );
     assert!(
-        sim.log().iter().any(|l| l.contains("player respawned at")),
+        sim.log.iter().any(|l| l.contains("player respawned at")),
         "player_respawn.luau must log the respawn, got {:?}",
-        sim.log()
+        sim.log
     );
 }
 
@@ -260,7 +265,7 @@ fn actor_turn_start_is_delivered_to_scripts() {
     sim.submit_action(PlayerAction::Wait).expect("wait");
 
     let turns: Vec<&String> = sim
-        .log()
+        .log
         .iter()
         .filter(|l| l.starts_with("turn_start "))
         .collect();
@@ -268,7 +273,7 @@ fn actor_turn_start_is_delivered_to_scripts() {
         turns.len() >= 2,
         "ActorTurnStart must be delivered every actor turn, got {:?} (log={:?})",
         turns,
-        sim.log()
+        sim.log
     );
 }
 
@@ -298,7 +303,7 @@ fn spawn_at_registers_blueprint_position_and_scheduler() {
     sim.submit_action(PlayerAction::Wait).expect("wait");
 
     let spawned_lines: Vec<&String> = sim
-        .log()
+        .log
         .iter()
         .filter(|l| l.starts_with("spawned_at "))
         .collect();
@@ -306,7 +311,7 @@ fn spawn_at_registers_blueprint_position_and_scheduler() {
         spawned_lines.len(),
         1,
         "one spawn_at per turn: {:?}",
-        sim.log()
+        sim.log
     );
 
     // The spawned entity: live under the script-facing id, with a Position part
@@ -373,7 +378,7 @@ fn player_turns_increments_even_on_cancelled_actions() {
     // exactly three submit_action calls => player_turns reached 3, and the
     // cancelled left-move still contributed (its handler saw a positive clock).
     let seen: Vec<i64> = sim
-        .log()
+        .log
         .iter()
         .filter_map(|l| l.strip_prefix("ptur ").map(|s| s.trim().parse().unwrap()))
         .collect();
@@ -381,6 +386,6 @@ fn player_turns_increments_even_on_cancelled_actions() {
         seen,
         vec![1, 2, 3],
         "player_turns must count every submitted player action, got {seen:?} (log={:?})",
-        sim.log()
+        sim.log
     );
 }

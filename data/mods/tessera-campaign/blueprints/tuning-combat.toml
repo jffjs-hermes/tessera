@@ -7,5 +7,9 @@
 # vertical-slice checks. `bash_lo`/`bash_hi` mirror `Ability_ShieldBash`'s
 # `parts.Damage`, and `goblin_hp` mirrors the Goblin patch; keep them in sync
 # when tuning the demo numbers.
+#
+# S1: this file RESTATES the full base key set (M2 whole-part replace would
+# otherwise drop every base key — s1-stats §4.1), then adds the campaign's
+# own keys. The base table is `data/base/blueprints/tuning-combat.toml`.
 [Tuning_Combat]
-parts.Tuning = { base_hit = 50, ac_factor = 2, crit_percent = { pct = 150 }, goblin_hp = 20, bash_lo = 3, bash_hi = 6 }
+parts.Tuning = { hp_base = 10, hp_per_toughness = 2, hp_level_base = 3, hp_toughness_divisor = 3, acc_per_agility = 2, level_bonus = 1, base_hit = 50, hit_min = 5, hit_max = 95, ac_factor = 2, ac_cap = 30, speed_slope = 2, speed_min = 50, speed_max = 140, untrained_penalty = 15, goblin_hp = 20, bash_lo = 3, bash_hi = 6 }

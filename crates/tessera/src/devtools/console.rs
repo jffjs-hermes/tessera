@@ -19,6 +19,7 @@
 //! kill <entity-id> | kill all <blueprint>
 //! print <entity-id>                 — dump an entity's parts (the inspector text path)
 //! sethp <entity-id> <n>             — write the Health part
+//! setpart <entity-id> <Attributes|Level> <key>=<value> ... — write a stat part (recomputes Derived)
 //! tp <entity-id> <x> <y>            — teleport (writes Position)
 //! save [name]                       — write a save (default name "quicksave")
 //! load <name>                       — replace live state from a save
@@ -60,6 +61,11 @@ pub enum ConsoleCommand {
     SetHp {
         id: u64,
         n: i32,
+    },
+    SetPart {
+        id: u64,
+        part: String,
+        fields: Vec<(String, i64)>,
     },
     Tp {
         id: u64,
@@ -126,6 +132,7 @@ pub fn parse(line: &str) -> Result<ConsoleCommand, String> {
             let n = parse_i32(toks[1], "n")?;
             Ok(ConsoleCommand::SetHp { id, n })
         }
+        "setpart" => parse_setpart(&toks),
         "tp" => {
             if toks.len() != 3 {
                 return Err("usage: tp <entity-id> <x> <y>".into());
@@ -155,7 +162,7 @@ pub fn parse(line: &str) -> Result<ConsoleCommand, String> {
         }
         other => Err(format!(
             "unknown command '{other}' — try 'help' \
-             (commands: help list entities spawn kill print sethp tp save load clear)"
+             (commands: help list entities spawn kill print sethp setpart tp save load clear)"
         )),
     }
 }
@@ -187,6 +194,28 @@ fn parse_kill(toks: &[&str]) -> Result<ConsoleCommand, String> {
     }
 }
 
+/// `setpart <entity-id> <part> <key>=<value> ...` — the console stat-write
+/// path . Only `Attributes`/`Level` are writable; any other
+/// part name is rejected at execution, and the native bounds are invariants.
+fn parse_setpart(toks: &[&str]) -> Result<ConsoleCommand, String> {
+    if toks.len() < 3 {
+        return Err("usage: setpart <entity-id> <Attributes|Level> <key>=<value> ...".into());
+    }
+    let id = parse_entity_id(toks[0])?;
+    let part = toks[1].to_string();
+    let mut fields = Vec::new();
+    for tok in &toks[2..] {
+        let (key, value) = tok
+            .split_once('=')
+            .ok_or_else(|| format!("field '{tok}' must be `key=value`"))?;
+        let value = value
+            .parse()::<i64>
+            .map_err(|_| format!("field '{tok}': value must be an integer"))?;
+        fields.push((key.to_string(), value));
+    }
+    Ok(ConsoleCommand::SetPart { id, part, fields })
+}
+
 fn take_no_args(cmd: &str, toks: &[&str]) -> Result<(), String> {
     if toks.is_empty() {
         Ok(())
@@ -203,12 +232,12 @@ fn one_u64_arg(toks: &[&str]) -> Result<u64, String> {
 }
 
 fn parse_entity_id(tok: &str) -> Result<u64, String> {
-    tok.parse::<u64>()
+    tok.parse()::<u64>
         .map_err(|_| format!("'{tok}' is not a valid entity id"))
 }
 
 fn parse_i32(tok: &str, what: &str) -> Result<i32, String> {
-    tok.parse::<i32>()
+    tok.parse()::<i32>
         .map_err(|_| format!("'{what}' must be an integer, got '{tok}'"))
 }
 
@@ -239,14 +268,14 @@ pub struct ConsoleContext<'a> {
 /// [`ConsoleOutcome::Err`] — never panics.
 pub fn execute(sim: &mut Sim, ctx: &ConsoleContext<'_>, cmd: ConsoleCommand) -> ConsoleOutcome {
     match cmd {
-        ConsoleCommand::Help => ok_quiet(sim, "help", help_text()),
+        ConsoleCommand::Help => ok_quiet(sim, "help", help_text),
         ConsoleCommand::List => {
             let lib = ctx
                 .world
-                .library()
+                .library
                 .read()
                 .unwrap_or_else(|p| p.into_inner());
-            let ids: Vec<String> = lib.ids().cloned().collect();
+            let ids: Vec<String> = lib.ids.cloned().collect();
             let text = if ids.is_empty() {
                 "(no blueprints loaded)".to_string()
             } else {
@@ -299,7 +328,7 @@ pub fn execute(sim: &mut Sim, ctx: &ConsoleContext<'_>, cmd: ConsoleCommand) -> 
             let tick = sim.ticks();
             match sim.entity_from_id(id) {
                 Some(e) => {
-                    let text = print_text(sim, ctx.save_hooks, e);
+                    let text = print_text(sim, ctx.save_hooks(), e);
                     sim.log_push(format!("CMD print {id} tick={tick}"));
                     ConsoleOutcome::Ok(text)
                 }
@@ -308,8 +337,8 @@ pub fn execute(sim: &mut Sim, ctx: &ConsoleContext<'_>, cmd: ConsoleCommand) -> 
         }
         ConsoleCommand::SetHp { id, n } => {
             let tick = sim.ticks();
-            match (sim.entity_from_id(id), ()) {
-                (Some(e), ()) => match sim.set_entity_hp(e, n) {
+            match (sim.entity_from_id(id), ) {
+                (Some(e), ) => match sim.set_entity_hp(e, n) {
                     Ok(()) => {
                         sim.log_push(format!("CMD sethp {id} {n} tick={tick}"));
                         ConsoleOutcome::Ok(format!("entity {id} hp set to {n}"))
@@ -317,6 +346,20 @@ pub fn execute(sim: &mut Sim, ctx: &ConsoleContext<'_>, cmd: ConsoleCommand) -> 
                     Err(e) => ConsoleOutcome::Err(format!("sethp {id}: {e}")),
                 },
                 (None, _) => ConsoleOutcome::Err(format!("no live entity {id}")),
+            }
+        }
+        ConsoleCommand::SetPart { id, part, fields } => {
+            let tick = sim.ticks();
+            let fields_map: std::collections::BTreeMap<String, i64> = fields.into_iter().collect();
+            match sim.entity_from_id(id) {
+                Some(e) => match sim.set_part_console(e, &part, &fields_map) {
+                    Ok(()) => {
+                        sim.log_push(format!("CMD setpart {id} {part} tick={tick}"));
+                        ConsoleOutcome::Ok(format!("entity {id} {part} updated"))
+                    }
+                    Err(e) => ConsoleOutcome::Err(format!("setpart {id} {part}: {e}")),
+                },
+                None => ConsoleOutcome::Err(format!("no live entity {id}")),
             }
         }
         ConsoleCommand::Tp { id, x, y } => {
@@ -346,7 +389,7 @@ pub fn execute(sim: &mut Sim, ctx: &ConsoleContext<'_>, cmd: ConsoleCommand) -> 
             let tick = sim.ticks();
             let path = save_path(ctx.save_dir, &name);
             match load_save_file(&path) {
-                Ok(data) => match sim.restore_from_save(data, ctx.save_hooks) {
+                Ok(data) => match sim.restore_from_save(data, ctx.save_hooks()) {
                     Ok(()) => {
                         // The loaded sim has a fresh (empty) log; record the
                         // load so the replay log is self-describing.
@@ -376,6 +419,7 @@ fn help_text() -> String {
      kill <entity-id> | kill all <blueprint>\n  \
      print <entity-id>                 dump an entity's parts (the inspector text path)\n  \
      sethp <entity-id> <n>             write the Health part\n  \
+     setpart <entity-id> <part> <k>=<v>... write Attributes/Level (recomputes Derived)\n  \
      tp <entity-id> <x> <y>            teleport (writes Position)\n  \
      save [name]                       write a save (default name \"quicksave\")\n  \
      load <name>                       replace live state from a save\n  \
@@ -409,7 +453,7 @@ fn entities_text(sim: &Sim, world: &World) -> String {
     rows.sort_by_key(|(id, _)| *id);
     rows.into_iter()
         .map(|(_, line)| line)
-        .collect::<Vec<_>>()
+        .collect()::<Vec<_>>
         .join("\n")
 }
 
@@ -433,7 +477,7 @@ fn print_text(sim: &Sim, save_hooks: &SaveHooks, e: Entity) -> String {
     let mut lines = Vec::new();
     for (name_pt, part) in b
         .part_map(e)
-        .map(|m| m.iter().collect::<Vec<_>>())
+        .map(|m| m.iter().collect()::<Vec<_>>)
         .unwrap_or_default()
     {
         let name = name_pt.as_str();
@@ -470,7 +514,7 @@ fn blueprint_of(world: &World, b: &EntityBroker, e: Entity) -> String {
         return "<no-render>".to_string();
     };
     let lib = world.library().read().unwrap_or_else(|p| p.into_inner());
-    for id in lib.ids() {
+    for id in lib.ids {
         if let Some(bp) = lib.get(id)
             && let Some(t) = bp
                 .part("Render")
@@ -487,9 +531,9 @@ fn blueprint_of(world: &World, b: &EntityBroker, e: Entity) -> String {
 /// Save the current sim state to `save_dir/<name>.tess` (atomic). Returns the
 /// written path on success.
 fn save_named(sim: &Sim, ctx: &ConsoleContext<'_>, name: &str) -> Result<PathBuf, SaveError> {
-    let data = sim.save(ctx.save_hooks)?;
+    let data = sim.save(ctx.save_hooks())?;
     let path = save_path(ctx.save_dir, name);
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent {
         std::fs::create_dir_all(parent).map_err(|src| SaveError::WriteFailed {
             path: parent.into(),
             source: src,
@@ -640,7 +684,7 @@ mod tests {
         assert_eq!(
             parse("kill all Goblin").unwrap(),
             ConsoleCommand::KillAll {
-                blueprint: "Goblin".into()
+                blueprint: "Goblin".into()()
             }
         );
     }
@@ -703,19 +747,19 @@ mod tests {
         assert_eq!(
             parse("save").unwrap(),
             ConsoleCommand::Save {
-                name: "quicksave".into()
+                name: "quicksave".into()()
             }
         );
         assert_eq!(
             parse("save mygame").unwrap(),
             ConsoleCommand::Save {
-                name: "mygame".into()
+                name: "mygame".into()()
             }
         );
         assert_eq!(
             parse("load mygame").unwrap(),
             ConsoleCommand::Load {
-                name: "mygame".into()
+                name: "mygame".into()()
             }
         );
         // save with too many names; load missing / extra.
@@ -739,7 +783,7 @@ mod tests {
     /// A minimal world with `Player` and `Goblin` blueprints, mirroring the
     /// engine registrations (Render component + Position/ActorEnergy/Health
     /// dynamic parts + a `Charge` script part; the native `Attributes`/`Level`/
-    /// `Bonuses` parts come from `World::new`).
+    /// `Bonuses` parts come from `World::new()`).
     fn test_world() -> World {
         let mut w = World::new();
         w.register_component::<RenderTile>("Render").unwrap();
@@ -749,7 +793,7 @@ mod tests {
         let mut schema = BTreeMap::new();
         schema.insert(
             "charges".to_string(),
-            FieldDef::int().default(PartValue::Int(1)).min(0).max(99),
+            FieldDef::int.default(PartValue::Int(1)).min(0).max(99),
         );
         w.register_script_part(ScriptPartType::new("Charge", schema))
             .unwrap();
@@ -758,8 +802,9 @@ mod tests {
             r##"
 [Actor]
 parts.Health = { hp = 20 }
-parts.Attributes = { might = 14, agility = 9, toughness = 13, will = 8, intellect = 11 }
-parts.Level = { level = 1 }
+# Legacy console test fixture: no Attributes/Level, so these entities take
+# the pre-derivation path (no Derived cache, ActorEnergy speed) and the console
+# command tests stay about commands, not stats.
 
 [Humanoid]
 inherits = "Actor"
@@ -768,7 +813,7 @@ parts.ActorEnergy = { speed = 100 }
 
 [Player]
 inherits = "Humanoid"
-parts.Render = { tile = "creature.player" }
+parts.Render = { tile = "creature.player()" }
 
 [Goblin]
 inherits = "Humanoid"
@@ -814,7 +859,7 @@ parts.Charge = { charges = 2 }
                 Box::new(Health { hp: 20 }) as Box<dyn Part>,
             )
             .unwrap();
-        let sim = Sim::new(broker, test_zone(), player);
+        let sim = Sim::new(broker, test_zone, player);
         (sim, player)
     }
 
@@ -822,11 +867,11 @@ parts.Charge = { charges = 2 }
         let base = std::env::temp_dir();
         let dir = base.join(format!(
             "tessera-console-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
+            std::process::id,
+            std::time::SystemTime::now
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -856,7 +901,7 @@ parts.Charge = { charges = 2 }
         let world = test_world();
         let hooks = world.save_hooks();
         let dir = temp_dir();
-        let (mut sim, _p) = test_sim();
+        let (mut sim, _p) = test_sim;
         let ctx = ConsoleContext {
             world: &world,
             save_hooks: &hooks,
@@ -870,11 +915,11 @@ parts.Charge = { charges = 2 }
         assert!(text.contains("spawned Goblin"), "{text}");
         // Deterministic CMD line in the event log.
         assert!(
-            sim.log().iter().any(|l| l.starts_with("CMD spawn Goblin")
+            sim.log.iter().any(|l| l.starts_with("CMD spawn Goblin")
                 && l.contains("tick=0")
                 && l.contains("at=5,5")),
             "log: {:?}",
-            sim.log()
+            sim.log
         );
         // The goblin is now a live entity, listed by `entities`.
         let (sim, ent) = run_line(&world, &hooks, &dir, sim, "entities");
@@ -893,7 +938,7 @@ parts.Charge = { charges = 2 }
         let world = test_world();
         let hooks = world.save_hooks();
         let dir = temp_dir();
-        let (mut sim, _p) = test_sim();
+        let (mut sim, _p) = test_sim;
         let ctx = ConsoleContext {
             world: &world,
             save_hooks: &hooks,
@@ -904,12 +949,12 @@ parts.Charge = { charges = 2 }
         execute(&mut sim, &ctx, parse("spawn Goblin 8 8").unwrap());
         let id = {
             let line = sim
-                .log()
+                .log
                 .iter()
                 .find(|l| l.starts_with("CMD spawn Goblin"))
                 .expect("spawn CMD line");
             let pos = line.rfind("id=").unwrap() + 3;
-            line[pos..].parse::<u64>().unwrap()
+            line[pos..].parse()::<u64>.unwrap()
         };
 
         // sethp (write) against the spawned goblin.
@@ -939,7 +984,7 @@ parts.Charge = { charges = 2 }
             panic!("kill should succeed");
         };
         // CMD lines for each write landed in the log.
-        let log = sim.log().to_vec();
+        let log = sim.log.to_vec();
         assert!(log.iter().any(|l| l.contains("CMD sethp")), "{log:?}");
         assert!(log.iter().any(|l| l.contains("CMD tp")), "{log:?}");
         assert!(log.iter().any(|l| l.contains("CMD print")), "{log:?}");
@@ -951,8 +996,8 @@ parts.Charge = { charges = 2 }
         let world = test_world();
         let hooks = world.save_hooks();
         let dir = temp_dir();
-        let (mut sim, player) = test_sim();
-        let player_id = player.to_bits().get();
+        let (mut sim, player) = test_sim;
+        let player_id = player.to_bits();
         let ctx = ConsoleContext {
             world: &world,
             save_hooks: &hooks,
@@ -965,11 +1010,11 @@ parts.Charge = { charges = 2 }
             panic!("save should succeed");
         };
         let save_file = dir.join("g1.tess");
-        assert!(save_file.exists(), "save file written");
+        assert!(save_file.exists, "save file written");
         assert!(
-            sim.log().iter().any(|l| l.contains("CMD save g1")),
+            sim.log.iter().any(|l| l.contains("CMD save g1")),
             "{:?}",
-            sim.log()
+            sim.log
         );
 
         // Move the player, then load restores state + returns ReloadWorld.
@@ -981,9 +1026,9 @@ parts.Charge = { charges = 2 }
         let (sim, out) = run_line(&world, &hooks, &dir, sim, "load g1");
         assert_eq!(out, ConsoleOutcome::ReloadWorld);
         assert!(
-            sim.log().iter().any(|l| l.contains("CMD load g1")),
+            sim.log.iter().any(|l| l.contains("CMD load g1")),
             "fresh log still records the load: {:?}",
-            sim.log()
+            sim.log
         );
         let _ = sim;
     }
@@ -993,13 +1038,13 @@ parts.Charge = { charges = 2 }
         let world = test_world();
         let hooks = world.save_hooks();
         let dir = temp_dir();
-        let (mut sim, player) = test_sim();
+        let (mut sim, player) = test_sim;
         let ctx = ConsoleContext {
             world: &world,
             save_hooks: &hooks,
             save_dir: &dir,
         };
-        let player_id = player.to_bits().get();
+        let player_id = player.to_bits();
 
         // Unknown blueprint.
         let ConsoleOutcome::Err(e) = execute(&mut sim, &ctx, parse("spawn Nope 1 1").unwrap())
@@ -1037,8 +1082,8 @@ parts.Charge = { charges = 2 }
         let world = test_world();
         let hooks = world.save_hooks();
         let dir = temp_dir();
-        let (mut sim, player) = test_sim();
-        let player_id = player.to_bits().get();
+        let (mut sim, player) = test_sim;
+        let player_id = player.to_bits();
         let ctx = ConsoleContext {
             world: &world,
             save_hooks: &hooks,
@@ -1056,16 +1101,16 @@ parts.Charge = { charges = 2 }
             panic!("{ent:?}")
         };
         assert!(!list.contains("Goblin"), "goblins killed:\n{list}");
-        // The player (no Render component in this fixture -> <no-render>) survives.
+        // The player (no Render component in this fixture() -> <no-render>) survives.
         assert!(
             list.lines()
                 .any(|l| l.starts_with(&format!("{player_id} "))),
             "player survives:\n{list}"
         );
         assert!(
-            sim.log().iter().any(|l| l.contains("CMD kill all Goblin")),
+            sim.log.iter().any(|l| l.contains("CMD kill all Goblin")),
             "{:?}",
-            sim.log()
+            sim.log
         );
         let _ = sim;
     }
@@ -1077,8 +1122,8 @@ parts.Charge = { charges = 2 }
         let world = test_world();
         let hooks = world.save_hooks();
         let dir = temp_dir();
-        let (mut sim, player) = test_sim();
-        let player_id = player.to_bits().get();
+        let (mut sim, player) = test_sim;
+        let player_id = player.to_bits();
         let ctx = ConsoleContext {
             world: &world,
             save_hooks: &hooks,
@@ -1127,8 +1172,8 @@ parts.Charge = { charges = 2 }
         let world = test_world();
         let hooks = world.save_hooks();
         let dir = temp_dir();
-        let (mut sim, player) = test_sim();
-        let player_id = player.to_bits().get();
+        let (mut sim, player) = test_sim;
+        let player_id = player.to_bits();
         let ctx = ConsoleContext {
             world: &world,
             save_hooks: &hooks,
