@@ -278,7 +278,7 @@ impl BlueprintLibrary {
         })
     }
 
-    /// Validate the S0 kind-prefix / kind-part pairing of every resolved
+    /// Validate the kind-prefix / kind-part pairing of every resolved
     /// blueprint, in sorted id order (deterministic diagnostics). Two rules,
     /// both fail-closed:
     ///
@@ -816,9 +816,9 @@ parts.Render = { tile = "child" }
         );
     }
 
-    // --- S0 kind parts: registration through the loader and naming lint ---
+    // --- Kind parts: registration through the loader and naming lint ---
 
-    /// A registry carrying just the six S0 kind parts (kinds::register_all).
+    /// A registry carrying just the six content kind parts (kinds::register_all).
     fn kind_registry() -> PartRegistry {
         let mut r = PartRegistry::new();
         crate::kinds::register_all(&mut r).unwrap();

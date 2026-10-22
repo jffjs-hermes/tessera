@@ -821,7 +821,7 @@ mod tests {
 
     // ---- the UseAbility turn action -----------------------------------
 
-    /// A library with a charged, damaging Shield Bash (the S0 fixture shape
+    /// A library with a charged, damaging Shield Bash (the fixture shape
     /// shared with the effect runtime tests).
     fn ability_library() -> std::sync::Arc<std::sync::RwLock<crate::blueprints::BlueprintLibrary>> {
         use crate::blueprints::BlueprintLibrary;

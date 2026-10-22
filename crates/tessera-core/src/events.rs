@@ -481,8 +481,8 @@ impl Event for Attack {
 /// Damage applied to `target`. Mutators may modify `amount` (armor,
 /// resistances) before the final mutation phase reads it. Negative `amount`
 /// is rejected at the boundary. `dtype` is the damage-type tag carried from
-/// declarative content (`"blunt"`, ...); S0 only names the field — its
-/// role in hit resolution is later work.
+/// declarative content (`"blunt"`, ...); only the tag itself is fixed now —
+/// its role in hit resolution is later work.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TakeDamage {
     pub target: Entity,
@@ -552,7 +552,7 @@ impl Event for Death {
     }
 }
 
-/// S0's minimal ability-use event: `user` spends the resource for the named
+/// The minimal ability-use event: `user` spends the resource for the named
 /// ability (a blueprint id) aimed at `target`. The native resource path
 /// (declarative effect resolution) decrements the user's charge pool; the
 /// targeting pipeline that *selects* ability/target is later work.
@@ -605,7 +605,7 @@ impl Event for StatusApplied {
 }
 
 /// Fired when an applied `status` on `target` expires (duration elapses past
-/// zero). The scheduler consumes the seam later; S0 fires it once per
+/// zero). The scheduler consumes the seam later; it currently fires once per
 /// expiration in deterministic order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatusExpired {

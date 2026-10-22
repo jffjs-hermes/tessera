@@ -967,7 +967,7 @@ mod tests {
     #[test]
     fn bash_key_maps_to_the_ability_action() {
         // X = Bash: use the first granted ability on the reference enemy
-        // (the S0 declarative Shield Bash path).
+        // (the declarative Shield Bash path).
         assert_eq!(
             key_to_action(other(), &Key::Character("x".into())),
             Some(PlayerAction::Bash)

@@ -24,9 +24,10 @@ Execution order: M4, M6 (world slice and demo), M5 (mod loader), M7, M8. M8 may 
 
 ### S0 — Schema spike
 
+- [x] **S0 complete (2026-10-21):** the schema spike shipped as four builder increments — typed content kind parts with a kind-prefix naming lint; a typed tuning store with overrides and `engine.tuning` binding; a native effect/status runtime with the rebuild-only Derived cache and `UseAbility`; and a Shield Bash vertical slice from TOML (campaign mod) through Luau to a headless assertion (UseAbility → blunt TakeDamage → Status_Staggered, deterministic per seed, hot-reloadable). Next milestone: S1 — stats and derived values; M8 may run alongside S1–S6 per the execution order above.
 - **Gap and surface:** M5 makes the campaign mod possible, but the loader currently has no agreed conventions for tuning, skills, abilities, statuses, classes, items, or quests. Validate the proposal that all are inherited/patchable blueprints, with typed parts and one Shield Bash path from TOML through Luau to a headless assertion; do not create parallel loader kinds without evidence.
 - **Subsystems and boundary:** extend `tessera-core` dynamic parts/events and `tessera-script` bindings, plus campaign mod directories and hot reload. Keep data declarations in TOML; expose typed tuning lookup, effect dispatch, and deterministic RNG handles to scripts. This is a schema experiment, not a full content import.
-- **Dependencies and missing capability:** M5 is required; S0 must finish before S3. Typed tuning, ability/status reload, and content validation do not exist today and are explicit gaps. Record save tags/version implications before new persistent parts land.
+- **Dependencies and missing capability:** M5 is required; S0 must finish before S3. Typed tuning, ability/status reload, and content validation were the explicit gaps this spike closed. Record save tags/version implications before new persistent parts land.
 - **Decomposition hint:** one schema/loader validation increment, one script API and Shield Bash vertical slice, and one headless fixture/test increment.
 
 ### S1 — Stats and derived values
