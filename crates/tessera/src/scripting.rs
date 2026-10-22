@@ -373,7 +373,7 @@ impl SimWorldAccess {
     /// The cell of an entity, if it carries a `Position` part.
     fn cell_of(&self, entity: u64) -> Option<(i32, i32)> {
         let e = self.resolve(entity)?;
-        let b = self.broker().read().unwrap_or_else(|p| p.into_inner());
+        let b = self.broker.read().unwrap_or_else(|p| p.into_inner());
         let pos = b.typed_part::<tessera_core::events::Position>(
             e,
             &PartTypeId::new(tessera_core::events::PART_POSITION),
@@ -387,7 +387,7 @@ impl WorldAccess for SimWorldAccess {
         let Some(e) = self.resolve(entity) else {
             return false;
         };
-        self.broker()
+        self.broker
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .is_alive(e)
@@ -396,7 +396,7 @@ impl WorldAccess for SimWorldAccess {
     fn snapshot_part(&self, entity: u64, part: &str) -> Option<BTreeMap<String, PartValue>> {
         let e = self.resolve(entity)?;
         let id = PartTypeId::new(part);
-        let p = self.broker().read().unwrap_or_else(|p| p.into_inner());
+        let p = self.broker.read().unwrap_or_else(|p| p.into_inner());
         let part_obj = p.part_map(e)?.get(&id)?;
         Self::serialize(part_obj)
     }
@@ -405,7 +405,7 @@ impl WorldAccess for SimWorldAccess {
         let Some(e) = self.resolve(entity) else {
             return Vec::new();
         };
-        let p = self.broker().read().unwrap_or_else(|p| p.into_inner());
+        let p = self.broker.read().unwrap_or_else(|p| p.into_inner());
         p.part_map(e)
             .map(|m| m.names().map(|n| n.to_string()).collect())
             .unwrap_or_default()
@@ -420,7 +420,7 @@ impl WorldAccess for SimWorldAccess {
         let e = self
             .resolve(entity)
             .ok_or(ScriptError::UnknownEntity { entity })?;
-        let mut b = self.broker().write().unwrap_or_else(|p| p.into_inner());
+        let mut b = self.broker.write().unwrap_or_else(|p| p.into_inner());
         let id = PartTypeId::new(name);
         if let Some(sp) = b.typed_part_mut::<ScriptPart>(e, &id) {
             sp.0 = fields;
@@ -547,7 +547,7 @@ impl WorldAccess for SimWorldAccess {
             .read_world()
             .ok_or_else(|| ScriptError::Internal("no blueprint world loaded".into()))?;
         let entity = {
-            let mut b = self.broker().write().unwrap_or_else(|p| p.into_inner());
+            let mut b = self.broker.write().unwrap_or_else(|p| p.into_inner());
             // Create a real broker entity (its own sequential low id — hecs ids
             // cannot be forced high) and stamp the blueprint onto it.
             let e = b.spawn();
@@ -572,7 +572,7 @@ impl WorldAccess for SimWorldAccess {
         // by respawn policy). A full-map fallback is `None`, which the caller
         // retries on the next player turn.
         if let (Some(x), Some(y)) = (x, y) {
-            let mut b = self.broker().write().unwrap_or_else(|p| p.into_inner());
+            let mut b = self.broker.write().unwrap_or_else(|p| p.into_inner());
             b.insert_part(
                 entity,
                 tessera_core::events::PART_POSITION,
@@ -583,12 +583,12 @@ impl WorldAccess for SimWorldAccess {
             use tessera_core::path;
             let zone = self.shared.read_zone();
             let to = {
-                let b = self.broker().read().unwrap_or_else(|p| p.into_inner());
+                let b = self.broker.read().unwrap_or_else(|p| p.into_inner());
                 let occupied = |cx: i32, cy: i32| self.shared.occupied(&b, cx, cy);
                 path::random_walkable_empty(&zone, &occupied, &mut new_spawn_rng(&zone.id))
             };
             if let Some(p) = to {
-                let mut b = self.broker().write().unwrap_or_else(|p| p.into_inner());
+                let mut b = self.broker.write().unwrap_or_else(|p| p.into_inner());
                 b.insert_part(
                     entity,
                     tessera_core::events::PART_POSITION,
@@ -601,7 +601,7 @@ impl WorldAccess for SimWorldAccess {
         // registered rules script is a spawn error — a formula-less stat is
         // an unrepresentable state, not a silently slow goblin.
         let statful = {
-            let b = self.broker().read().unwrap_or_else(|p| p.into_inner());
+            let b = self.broker.read().unwrap_or_else(|p| p.into_inner());
             tessera_core::recompute::carries_attributes(&b, entity)
         };
         if statful && !self.shared.stats_armed.load(Ordering::SeqCst) {
@@ -619,7 +619,7 @@ impl WorldAccess for SimWorldAccess {
         // Register with the scheduler if the new entity carries `ActorEnergy`
         // (spawning with an energy part makes it schedulable).
         {
-            let b = self.broker().read().unwrap_or_else(|p| p.into_inner());
+            let b = self.broker.read().unwrap_or_else(|p| p.into_inner());
             if let Some(ae) = b.typed_part::<tessera_core::turns::ActorEnergy>(
                 entity,
                 &PartTypeId::new(tessera_core::turns::PART_ENERGY),
@@ -636,7 +636,7 @@ impl WorldAccess for SimWorldAccess {
         let e = self
             .resolve(entity)
             .ok_or(ScriptError::UnknownEntity { entity })?;
-        let mut b = self.broker().write().unwrap_or_else(|p| p.into_inner());
+        let mut b = self.broker.write().unwrap_or_else(|p| p.into_inner());
         b.despawn(e)
             .map_err(|er| ScriptError::Internal(format!("despawn: {er}")))?;
         // Keep the scheduler in lockstep: a despawned scheduled actor must not
@@ -665,7 +665,7 @@ impl WorldRead for SimWorldAccess {
     }
 
     fn is_occupied(&self, x: i32, y: i32) -> bool {
-        let b = self.broker().read().unwrap_or_else(|p| p.into_inner());
+        let b = self.broker.read().unwrap_or_else(|p| p.into_inner());
         self.shared.occupied(&b, x, y)
     }
 
@@ -707,14 +707,14 @@ impl WorldRead for SimWorldAccess {
     fn nearest_walkable(&self, x: i32, y: i32) -> Option<(i32, i32)> {
         use tessera_core::path;
         let zone = self.shared.read_zone();
-        let b = self.broker().read().unwrap_or_else(|p| p.into_inner());
+        let b = self.broker.read().unwrap_or_else(|p| p.into_inner());
         let occupied = |cx: i32, cy: i32| self.shared.occupied(&b, cx, cy);
         path::nearest_walkable_empty(&zone, &occupied, x, y).map(|p| (p.x, p.y))
     }
 
     fn random_walkable_tile(&self, rng: &mut HostRng) -> Option<(i32, i32)> {
         let zone = self.shared.read_zone();
-        let b = self.broker().read().unwrap_or_else(|p| p.into_inner());
+        let b = self.broker.read().unwrap_or_else(|p| p.into_inner());
         let occupied = |cx: i32, cy: i32| self.shared.occupied(&b, cx, cy);
         let mut cells: Vec<(i32, i32)> = Vec::new();
         for y in 0..zone.height as i32 {
@@ -814,12 +814,12 @@ impl ScriptBridge {
 
     /// Return the broker handle used by script world access.
     pub fn broker(&self) -> Arc<RwLock<EntityBroker>> {
-        self.broker().clone()
+        self.broker.clone()
     }
 
     /// Replace broker contents without changing the shared handle.
     pub fn replace_broker(&self, broker: EntityBroker) {
-        *self.broker().write().unwrap_or_else(|p| p.into_inner()) = broker;
+        *self.broker.write().unwrap_or_else(|p| p.into_inner()) = broker;
     }
 
     /// Install the blueprint `World` (once loaded) for `engine.spawn_at`.

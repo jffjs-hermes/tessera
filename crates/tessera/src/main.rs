@@ -83,11 +83,11 @@ fn parse_args() -> Result<Args> {
     let mut save_dir = PathBuf::from("saves");
     let mut load = None;
     let mut exec = Vec::new();
-    let mut it = std::env::args.skip(1);
+    let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--data" => data = it.next().context("--data needs a path")?.into(),
-            "--mods()" => mods() = it.next().context("--mods() needs a path")?.into(),
+            "--mods" => mods = it.next().context("--mods needs a path")?.into(),
             "--zone" => zone = Some(it.next().context("--zone needs an id")?.to_string()),
             "--frames" => frames = Some(it.next().context("--frames needs a number")?.parse()?),
             "--save-dir" => save_dir = it.next().context("--save-dir needs a path")?.into(),
@@ -228,7 +228,7 @@ fn load_content(data: &std::path::Path, mods: &std::path::Path) -> Result<Conten
     let registry = match tessera_mods::ModRegistry::build(sources) {
         Ok(reg) => reg,
         Err(errors) => {
-            let joined = errors.iter().map(|e| e.to_string()).collect()::<Vec<_>>;
+            let joined = errors.iter().map(|e| e.to_string()).collect::<Vec<_>>();
             anyhow::bail!("mod loading errors: {}", joined.join("; "));
         }
     };
@@ -277,7 +277,7 @@ fn load_content(data: &std::path::Path, mods: &std::path::Path) -> Result<Conten
 /// spawns.
 fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
     let mut broker = content
-        .broker()
+        .broker
         .write()
         .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
 
@@ -292,7 +292,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
     // start tile.
     let start_bp = zone.spawns.start.as_deref().unwrap_or(PLAYER_BLUEPRINT);
     let mut broker = content
-        .broker()
+        .broker
         .write()
         .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
     let player = content
@@ -330,7 +330,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
     for bp in &zone.spawns.random {
         let e = {
             let mut broker = content
-                .broker()
+                .broker
                 .write()
                 .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
             content
@@ -341,7 +341,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
         // Fail-closed spawn : a stat-ful entity without the
         // registered rules script is a spawn error.
         if content
-            .broker()
+            .broker
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .typed_part::<tessera_core::stats::Attributes>(
@@ -357,7 +357,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
             );
         }
         let to = {
-            let b = content.broker().read().unwrap_or_else(|p| p.into_inner());
+            let b = content.broker.read().unwrap_or_else(|p| p.into_inner());
             let occupied = |cx: i32, cy: i32| {
                 b.entities_with_part(PART_POSITION).iter().any(|e| {
                     b.typed_part::<Position>(*e, &PART_POSITION.into())
@@ -370,7 +370,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
         };
         {
             let mut broker = content
-                .broker()
+                .broker
                 .write()
                 .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
             broker.insert_part(e, PART_POSITION, Box::new(Position::from_point(to)))?;
@@ -387,7 +387,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
     // (this only fires when the blueprint is present).
     if content
         .world
-        .library
+        .library()
         .read()
         .unwrap_or_else(|p| p.into_inner())
         .contains("Bogling")
@@ -395,7 +395,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
         const BOGLING_BP: &str = "Bogling";
         let e = {
             let mut broker = content
-                .broker()
+                .broker
                 .write()
                 .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
             content
@@ -404,7 +404,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
                 .with_context(|| format!("spawning {BOGLING_BP:?}"))?
         };
         let to = {
-            let b = content.broker().read().unwrap_or_else(|p| p.into_inner());
+            let b = content.broker.read().unwrap_or_else(|p| p.into_inner());
             let occupied = |cx: i32, cy: i32| {
                 b.entities_with_part(PART_POSITION).iter().any(|e| {
                     b.typed_part::<Position>(*e, &PART_POSITION.into())
@@ -417,7 +417,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
         };
         {
             let mut broker = content
-                .broker()
+                .broker
                 .write()
                 .map_err(|_| anyhow::anyhow!("broker lock poisoned"))?;
             broker.insert_part(e, PART_POSITION, Box::new(Position::from_point(to)))?;
@@ -425,7 +425,7 @@ fn build_sim(content: &Content, zone: &Zone) -> Result<Sim> {
     }
 
     Ok(Sim::from_shared(
-        content.broker().clone(),
+        content.broker.clone(),
         Some(content.bridge.clone()),
         zone.clone(),
         player,
@@ -511,7 +511,7 @@ impl App {
     fn build_cells(&self) -> Vec<Cell> {
         let targets = self.sim.renderables();
         sim::build_cells(
-            self.sim.map,
+            self.sim.map(),
             &self.content.tiles,
             &self.content.atlas,
             &targets,
@@ -648,7 +648,7 @@ impl ApplicationHandler<UserEvent> for App {
                             let window = self.window.clone().expect("window exists");
                             let cc = console::ConsoleContext {
                                 world: &self.content.world,
-                                save_hooks: &self.content.save_hooks(),
+                                save_hooks: &self.content.save_hooks,
                                 save_dir: &self.args.save_dir,
                             };
                             r.render_with(&cells, |device, queue, view, enc| {
@@ -689,14 +689,14 @@ fn startup_console(sim: &mut Sim, content: &Content, args: &Args) {
     }
     let ctx = ConsoleContext {
         world: &content.world,
-        save_hooks: &content.save_hooks(),
+        save_hooks: &content.save_hooks,
         save_dir: &args.save_dir,
     };
     // "--load" first so it becomes the base state the --exec lines act on.
     if let Some(name) = &args.load {
         let path = args.save_dir.join(format!("{name}.tess"));
         match tessera_core::save::load(&path) {
-            Ok(data) => match sim.restore_from_save(data, ctx.save_hooks()) {
+            Ok(data) => match sim.restore_from_save(data, ctx.save_hooks) {
                 Ok(()) => println!("[console] loaded {name} from {}", path.display()),
                 Err(e) => println!("[console] error: load {name}: {e}"),
             },
@@ -756,7 +756,7 @@ fn main() -> anyhow::Result<()> {
 
         let map_text = sim.run_headless(&content.tiles, n);
         print!("{map_text}");
-        for line in sim.log {
+        for line in &sim.log {
             println!("{line}");
         }
         // One-line status readout: hp + player-turn clock (the combat / death
@@ -773,7 +773,7 @@ fn main() -> anyhow::Result<()> {
         if !content.mod_ids.is_empty() {
             let lib = content
                 .world
-                .library
+                .library()
                 .read()
                 .unwrap_or_else(|p| p.into_inner());
             println!("mods() loaded: {}", content.mod_ids.join(", "));
@@ -797,7 +797,7 @@ fn main() -> anyhow::Result<()> {
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
-    let proxy = event_loop.create_proxy()?;
+    let proxy = event_loop.create_proxy();
 
     // Dev hot reload: any change under the data dir — base *or* mods() — triggers
     // a reload (a single miss keeps the whole previous content, mods() included,
@@ -807,7 +807,7 @@ fn main() -> anyhow::Result<()> {
         let p = proxy.clone();
         let mut w = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(ev) = res
-                && !ev.kind.is_access
+                && !ev.kind.is_access()
             {
                 let _ = p.send_event(UserEvent::ContentChanged);
             }
@@ -905,19 +905,19 @@ mod tests {
     #[test]
     fn arrow_keys_still_move() {
         assert_eq!(
-            key_to_action(other, &Key::Named(NamedKey::ArrowLeft)),
+            key_to_action(other(), &Key::Named(NamedKey::ArrowLeft)),
             mv(-1, 0)
         );
         assert_eq!(
-            key_to_action(other, &Key::Named(NamedKey::ArrowRight)),
+            key_to_action(other(), &Key::Named(NamedKey::ArrowRight)),
             mv(1, 0)
         );
         assert_eq!(
-            key_to_action(other, &Key::Named(NamedKey::ArrowUp)),
+            key_to_action(other(), &Key::Named(NamedKey::ArrowUp)),
             mv(0, -1)
         );
         assert_eq!(
-            key_to_action(other, &Key::Named(NamedKey::ArrowDown)),
+            key_to_action(other(), &Key::Named(NamedKey::ArrowDown)),
             mv(0, 1)
         );
     }
@@ -925,35 +925,35 @@ mod tests {
     #[test]
     fn vi_keys_still_move() {
         assert_eq!(
-            key_to_action(other, &Key::Character("h".into())),
+            key_to_action(other(), &Key::Character("h".into())),
             mv(-1, 0)
         );
         assert_eq!(
-            key_to_action(other, &Key::Character("j".into())),
+            key_to_action(other(), &Key::Character("j".into())),
             mv(0, 1)
         );
         assert_eq!(
-            key_to_action(other, &Key::Character("k".into())),
+            key_to_action(other(), &Key::Character("k".into())),
             mv(0, -1)
         );
         assert_eq!(
-            key_to_action(other, &Key::Character("l".into())),
+            key_to_action(other(), &Key::Character("l".into())),
             mv(1, 0)
         );
         assert_eq!(
-            key_to_action(other, &Key::Character("y".into())),
+            key_to_action(other(), &Key::Character("y".into())),
             mv(-1, -1)
         );
         assert_eq!(
-            key_to_action(other, &Key::Character("u".into())),
+            key_to_action(other(), &Key::Character("u".into())),
             mv(1, -1)
         );
         assert_eq!(
-            key_to_action(other, &Key::Character("b".into())),
+            key_to_action(other(), &Key::Character("b".into())),
             mv(-1, 1)
         );
         assert_eq!(
-            key_to_action(other, &Key::Character("n".into())),
+            key_to_action(other(), &Key::Character("n".into())),
             mv(1, 1)
         );
     }
@@ -961,19 +961,19 @@ mod tests {
     #[test]
     fn wasd_keys_still_move() {
         assert_eq!(
-            key_to_action(other, &Key::Character("a".into())),
+            key_to_action(other(), &Key::Character("a".into())),
             mv(-1, 0)
         );
         assert_eq!(
-            key_to_action(other, &Key::Character("d".into())),
+            key_to_action(other(), &Key::Character("d".into())),
             mv(1, 0)
         );
         assert_eq!(
-            key_to_action(other, &Key::Character("w".into())),
+            key_to_action(other(), &Key::Character("w".into())),
             mv(0, -1)
         );
         assert_eq!(
-            key_to_action(other, &Key::Character("s".into())),
+            key_to_action(other(), &Key::Character("s".into())),
             mv(0, 1)
         );
     }
@@ -981,15 +981,15 @@ mod tests {
     #[test]
     fn wait_and_zap_still_map() {
         assert_eq!(
-            key_to_action(other, &Key::Character(".".into())),
+            key_to_action(other(), &Key::Character(".".into())),
             Some(PlayerAction::Wait)
         );
         assert_eq!(
-            key_to_action(other, &Key::Character(" ".into())),
+            key_to_action(other(), &Key::Character(" ".into())),
             Some(PlayerAction::Wait)
         );
         assert_eq!(
-            key_to_action(other, &Key::Character("e".into())),
+            key_to_action(other(), &Key::Character("e".into())),
             Some(PlayerAction::Zap)
         );
     }
@@ -999,14 +999,14 @@ mod tests {
         // X = Bash: use the first granted ability on the reference enemy
         // (the declarative Shield Bash path).
         assert_eq!(
-            key_to_action(other, &Key::Character("x".into())),
+            key_to_action(other(), &Key::Character("x".into())),
             Some(PlayerAction::Bash)
         );
     }
 
     #[test]
     fn unmapped_keys_are_none() {
-        assert_eq!(key_to_action(other, &Key::Character("z".into())), None);
+        assert_eq!(key_to_action(other(), &Key::Character("z".into())), None);
         assert_eq!(
             key_to_action(
                 PhysicalKey::Code(KeyCode::KeyQ),

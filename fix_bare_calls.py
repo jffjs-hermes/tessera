@@ -33,7 +33,7 @@ METHODS = [
     "is_quarantinable", "known_events", "map_size", "next_u32", "pairs",
     "pending_mut", "sandbox", "snapshot",
     "sort_unstable", "trim_start", "zone_start", "is_dir", "is_file",
-    "glyph_chars", "save_hooks", "as_deref", "renderables", "request_redraw",
+    "glyph_chars", "as_deref", "renderables", "request_redraw",
     "exit", "reload", "build_cells", "player_health", "player_turns_public",
     "display", "init", "create_proxy",
     "downcast_ref", "read_zone", "ticks", "read_world", "try_lock",

@@ -1263,7 +1263,7 @@ parts.Modifiers = { skip_turns = 1 }
         let target = spawn_at(&mut ctx, 6, 5);
 
         let pool_before = ctx
-            .broker()
+            .broker
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .typed_part::<Charges>(user, &PartTypeId::new(PART_CHARGES))
@@ -1281,7 +1281,7 @@ parts.Modifiers = { skip_turns = 1 }
         assert!(!matches!(out, EventOutcome::Cancelled { .. }));
 
         let after = ctx
-            .broker()
+            .broker
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .typed_part::<Charges>(user, &PartTypeId::new(PART_CHARGES))
@@ -1306,7 +1306,7 @@ parts.Modifiers = { skip_turns = 1 }
             .unwrap();
         assert!(matches!(out, EventOutcome::Cancelled { .. }));
         let last = ctx
-            .broker()
+            .broker
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .typed_part::<Charges>(user, &PartTypeId::new(PART_CHARGES))
@@ -1422,7 +1422,7 @@ parts.Modifiers = { skip_turns = 1 }
         assert_eq!((pos.x, pos.y), (7, 5));
         // the status is applied on the target with its declared duration
         let store = ctx
-            .broker()
+            .broker
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .typed_part::<StatusEffects>(target, &PartTypeId::new(PART_STATUS_EFFECTS))
@@ -1561,7 +1561,7 @@ parts.Modifiers = { skip_turns = 1 }
             )
             .unwrap();
         let cached = ctx
-            .broker()
+            .broker
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .typed_part::<Derived>(e, &id)
@@ -1680,7 +1680,7 @@ parts.Modifiers = { skip_turns = 1 }
         let user = spawn(&mut ctx);
         grant(&mut ctx, user, "Ability_ShieldBash");
         let pool = ctx
-            .broker()
+            .broker
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .typed_part::<Charges>(user, &PartTypeId::new(PART_CHARGES))

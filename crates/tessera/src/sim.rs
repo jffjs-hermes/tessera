@@ -125,7 +125,7 @@ impl Sim {
     /// `entities`). The executor holds the read lock only for the duration of
     /// one command — it never spans turns or event dispatch.
     pub fn broker(&self) -> &Arc<RwLock<EntityBroker>> {
-        &self.ctx.broker()
+        &self.ctx.broker
     }
 
     /// The scheduler's current tick count (for `CMD ... tick=..` lines).
@@ -156,7 +156,7 @@ impl Sim {
         let entity = {
             let mut broker = self
                 .ctx
-                .broker()
+                .broker
                 .write()
                 .map_err(|_| "broker poisoned".to_string())?;
             let e = world
@@ -176,7 +176,7 @@ impl Sim {
         // registered rules script — a formula-less stat is an
         // unrepresentable state, not a silently slow goblin.
         let statful = {
-            let broker = self.ctx.broker().read().unwrap_or_else(|p| p.into_inner());
+            let broker = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
             tessera_core::recompute::carries_attributes(&broker, entity)
         };
         if statful && !self.stats_armed {
@@ -188,7 +188,7 @@ impl Sim {
         }
         let speed = self
             .ctx
-            .broker()
+            .broker
             .read()
             .map_err(|_| "broker poisoned".to_string())?
             .typed_part::<ActorEnergy>(entity, &PART_ENERGY.into())
@@ -222,7 +222,7 @@ impl Sim {
         {
             let mut broker = self
                 .ctx
-                .broker()
+                .broker
                 .write()
                 .map_err(|_| "broker poisoned".to_string())?;
             match name {
@@ -298,7 +298,7 @@ impl Sim {
     pub fn entity_from_id(&self, id: u64) -> Option<hecs::Entity> {
         let e = hecs::Entity::from_bits(id)?;
         self.ctx
-            .broker()
+            .broker
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .is_alive(e)
@@ -311,7 +311,7 @@ impl Sim {
         {
             let mut broker = self
                 .ctx
-                .broker()
+                .broker
                 .write()
                 .map_err(|_| "broker poisoned".to_string())?;
             broker.despawn(entity).map_err(|e| e.to_string())?;
@@ -329,7 +329,7 @@ impl Sim {
     pub fn set_entity_hp(&mut self, entity: hecs::Entity, hp: i32) -> Result<(), String> {
         let mut broker = self
             .ctx
-            .broker()
+            .broker
             .write()
             .map_err(|_| "broker poisoned".to_string())?;
         let h = broker
@@ -349,7 +349,7 @@ impl Sim {
     ) -> Result<(), String> {
         let mut broker = self
             .ctx
-            .broker()
+            .broker
             .write()
             .map_err(|_| "broker poisoned".to_string())?;
         let pos = broker
@@ -402,7 +402,7 @@ impl Sim {
         install_default_handlers(&mut ctx, bridge.as_ref(), event_lines.clone());
 
         let speed = ctx
-            .broker()
+            .broker
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .typed_part::<ActorEnergy>(player, &PART_ENERGY.into())
@@ -412,7 +412,7 @@ impl Sim {
         scheduler.add_actor(player, ActorEnergy::at_threshold(speed));
         if let Some(e) = enemy {
             let espeed = ctx
-                .broker()
+                .broker
                 .read()
                 .unwrap_or_else(|p| p.into_inner())
                 .typed_part::<ActorEnergy>(e, &PART_ENERGY.into())
@@ -464,7 +464,7 @@ impl Sim {
     /// part writes) are wired separately.
     pub fn recompute_live(&mut self) {
         let entities = {
-            let broker = self.ctx.broker().read().unwrap_or_else(|p| p.into_inner());
+            let broker = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
             broker.entities_with_part(PART_ATTRIBUTES)
         };
         for entity in entities {
@@ -480,7 +480,7 @@ impl Sim {
     /// before the next scheduled action; entity-id order, deterministic.
     fn sync_derived_speeds(&mut self) {
         let entities = {
-            let broker = self.ctx.broker().read().unwrap_or_else(|p| p.into_inner());
+            let broker = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
             broker.entities_with_part(PART_ATTRIBUTES)
         };
         for entity in entities {
@@ -554,7 +554,7 @@ impl Sim {
     /// stays a pure reader — this never dispatches events or mutates state.
     pub fn renderables(&self) -> Vec<RenderTarget> {
         use tessera_core::events::{PART_POSITION, Position};
-        let b = self.ctx.broker().read().unwrap_or_else(|p| p.into_inner());
+        let b = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
         let mut targets: Vec<(Entity, RenderTarget)> = Vec::new();
         for e in b.entities_with_part(PART_POSITION) {
             let Some(pos) = b.typed_part::<Position>(e, &PART_POSITION.into()) else {
@@ -592,7 +592,7 @@ impl Sim {
     pub fn player_health(&self) -> i32 {
         use tessera_core::events::PART_HEALTH;
         self.ctx
-            .broker()
+            .broker
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .typed_part::<tessera_core::events::Health>(self.player, &PART_HEALTH.into())
@@ -628,7 +628,7 @@ impl Sim {
         };
         use tessera_core::events::PART_HEALTH;
         self.ctx
-            .broker()
+            .broker
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .typed_part::<tessera_core::events::Health>(enemy, &PART_HEALTH.into())
@@ -642,7 +642,7 @@ impl Sim {
         let enemy = self.enemy?;
         use tessera_core::ecs::PartTypeId;
         use tessera_core::script_part::PartValue;
-        let b = self.ctx.broker().read().unwrap_or_else(|p| p.into_inner());
+        let b = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
         let part = b.get_part(enemy, &PartTypeId::new("Charge"))?;
         let sp = part
             .as_any()
@@ -662,7 +662,7 @@ impl Sim {
     // example; the CLI --save binding lands with the headless console work.
     #[allow(dead_code)]
     pub fn save(&self, hooks: &SaveHooks) -> Result<SaveData, SaveError> {
-        let broker = self.ctx.broker().read().unwrap_or_else(|p| p.into_inner());
+        let broker = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
         let snapshot = snapshot_entities(&broker, hooks)?;
         let scheduler = self.scheduler.lock().unwrap_or_else(|p| p.into_inner());
         let actors = scheduler
@@ -931,7 +931,7 @@ impl Sim {
     /// All live entities carrying a `Position` at the given cell.
     fn entities_at(&self, cell: Point) -> Vec<(Entity, Point)> {
         use tessera_core::events::PART_POSITION;
-        let b = self.ctx.broker().read().unwrap_or_else(|p| p.into_inner());
+        let b = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
         let mut out = Vec::new();
         for entity in {
             let sched = self.scheduler.lock().unwrap_or_else(|p| p.into_inner());
@@ -1111,7 +1111,7 @@ impl Sim {
             if !zone.is_walkable(nx, ny) {
                 continue;
             }
-            let b = self.ctx.broker().read().unwrap_or_else(|p| p.into_inner());
+            let b = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
             let occ = b
                 .entities_with_part(tessera_core::events::PART_POSITION)
                 .iter()
@@ -1516,7 +1516,7 @@ fn install_recompute_derived(
         // Legacy entities (no `Attributes`) recompute nothing: absent cache,
         // `ActorEnergy.speed` fallback — exactly the pre-derivation behavior.
         let statful = {
-            let broker = ctx.broker().read().unwrap_or_else(|p| p.into_inner());
+            let broker = ctx.broker.read().unwrap_or_else(|p| p.into_inner());
             tessera_core::recompute::carries_attributes(&broker, entity)
         };
         if !statful {
@@ -1569,7 +1569,7 @@ fn install_base_combat(ctx: &mut SimContext) {
     ctx.register::<TakeDamage>(NORMAL, |ctx, ev| {
         let mut reduce = false;
         {
-            let b = ctx.broker().read().unwrap_or_else(|p| p.into_inner());
+            let b = ctx.broker.read().unwrap_or_else(|p| p.into_inner());
             if let Some(h) = b.typed_part::<Health>(ev.target, &PART_HEALTH.into())
                 && h.hp > 0
             {
@@ -1578,7 +1578,7 @@ fn install_base_combat(ctx: &mut SimContext) {
         }
         if reduce {
             if let Some(h) = ctx
-                .broker()
+                .broker
                 .write()
                 .unwrap_or_else(|p| p.into_inner())
                 .typed_part_mut::<Health>(ev.target, &PART_HEALTH.into())
@@ -1590,7 +1590,7 @@ fn install_base_combat(ctx: &mut SimContext) {
             // not reject it; a second reducing hit on an already-dead entity
             // never reaches here (reduce requires hp > 0 at entry).
             let dead = ctx
-                .broker()
+                .broker
                 .read()
                 .unwrap_or_else(|p| p.into_inner())
                 .typed_part::<Health>(ev.target, &PART_HEALTH.into())
@@ -1686,8 +1686,8 @@ mod tests {
             let map = sim.run_headless(&tiles, 12);
             (map, sim.log.to_vec())
         };
-        let (map_a, log_a) = run;
-        let (map_b, log_b) = run;
+        let (map_a, log_a) = run();
+        let (map_b, log_b) = run();
         assert_eq!(map_a, map_b, "final map identical across runs");
         assert_eq!(log_a, log_b, "event log identical across runs");
 
@@ -1869,7 +1869,7 @@ mod tests {
         let mut schema = BTreeMap::new();
         schema.insert(
             "charges".to_string(),
-            FieldDef::int.default(PartValue::Int(1)),
+            FieldDef::int().default(PartValue::Int(1)),
         );
         reg.register_script_part(ScriptPartType::new("Charge", schema))
             .unwrap();
@@ -1903,7 +1903,7 @@ mod tests {
             )
             .unwrap();
         broker
-            .world_mut
+            .world_mut()
             .insert_one(
                 player,
                 RenderTile {
@@ -1930,7 +1930,7 @@ mod tests {
             )
             .unwrap();
         broker
-            .world_mut
+            .world_mut()
             .insert_one(
                 goblin,
                 RenderTile {
@@ -1953,7 +1953,7 @@ mod tests {
 
     #[test]
     fn save_load_round_trip_preserves_state_and_continues_identically() {
-        let hooks = roundtrip_hooks;
+        let hooks = roundtrip_hooks();
         let (mut sim, _player, _goblin) = populated_sim(3);
 
         // Play a deterministic prefix: a couple of player moves (some wall
@@ -1996,7 +1996,7 @@ mod tests {
         // State restored: same entity ids in same (deterministic) order.
         let orig_ids: Vec<u64> = sim
             .ctx
-            .broker()
+            .broker
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .entities()
@@ -2005,7 +2005,7 @@ mod tests {
             .collect();
         let loaded_ids: Vec<u64> = loaded
             .ctx
-            .broker()
+            .broker
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .entities()
@@ -2046,7 +2046,7 @@ mod tests {
 
     #[test]
     fn zone_mismatch_is_rejected() {
-        let hooks = roundtrip_hooks;
+        let hooks = roundtrip_hooks();
         let (mut sim, _p, _g) = populated_sim(3);
         for a in [PlayerAction::Wait, PlayerAction::Move { dx: 1, dy: 0 }] {
             sim.submit_action(a).unwrap();
@@ -2077,7 +2077,7 @@ mod tests {
     #[test]
     fn save_fails_closed_on_unknown_part() {
         use tessera_core::ecs::Part;
-        let hooks = roundtrip_hooks;
+        let hooks = roundtrip_hooks();
         let mut broker = EntityBroker::new();
         let player = broker.spawn();
         broker
@@ -2103,7 +2103,7 @@ mod tests {
 
     #[test]
     fn rng_state_round_trips_after_save() {
-        let hooks = roundtrip_hooks;
+        let hooks = roundtrip_hooks();
         let (mut sim, _p, _g) = populated_sim(5);
         for a in [
             PlayerAction::Wait,
