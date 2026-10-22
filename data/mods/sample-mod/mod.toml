@@ -1,6 +1,6 @@
 # Sample mod shipping with the demo: adds a "Bogling" creature (a new blueprint
 # that inherits the base Goblin and carries a mod-defined Charge part) and
-# patches the base Goblin's tile and strength in place.
+# patches the base Goblin's tile in place.
 #
 # `id` and `version` are required; `api` must equal the engine's api version.
 # Base is the implicit first mod and is *not* declared as a dependency (naming

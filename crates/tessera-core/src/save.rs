@@ -25,14 +25,19 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::ecs::{EntityBroker, Part, PartError, PartRegistry, PartTypeId};
-use crate::events::{Health, PART_HEALTH, PART_POSITION, PART_STATS, Position, Stats};
+use crate::effects::PART_DERIVED;
+use crate::events::{Health, PART_HEALTH, PART_POSITION, Position};
 use crate::rng::SimRng;
 use crate::script_part::{PartValue, ScriptPart};
+use crate::stats::{Attributes, Bonuses, Level, PART_ATTRIBUTES, PART_BONUSES, PART_LEVEL};
 use crate::turns::{ActorEnergy, PART_ENERGY};
 use crate::world::RenderTile;
 
 /// Current save format version. Public so callers and the console can name it.
-pub const SAVE_FORMAT_VERSION: u32 = 1;
+/// 1 → 2: the stats parts are the first new persistent parts, and the legacy
+/// `Stats` part left the whitelist in the same increment (a v1 save would
+/// fail closed on the removed part anyway), so the bump lands here.
+pub const SAVE_FORMAT_VERSION: u32 = 2;
 
 /// Four-byte magic that identifies a Tessera save file.
 const MAGIC: &[u8; 4] = b"TESS";
@@ -183,8 +188,8 @@ impl SaveHooks {
 }
 
 /// Build the whitelist hook registry used by the demo: the engine-native parts
-/// `Position`, `Health`, `ActorEnergy`, `Stats`, plus every script part
-/// registered in `registry`. Returns `(hooks, script_names)`.
+/// `Position`, `Health`, `ActorEnergy`, `Attributes`, `Level`, `Bonuses`, plus
+/// every script part registered in `registry`. Returns `(hooks, script_names)`.
 pub fn build_save_hooks(registry: &PartRegistry) -> (SaveHooks, BTreeSet<String>) {
     let mut hooks = SaveHooks::new();
     let mut script_names = BTreeSet::new();
@@ -247,22 +252,54 @@ pub fn build_save_hooks(registry: &PartRegistry) -> (SaveHooks, BTreeSet<String>
     );
 
     hooks.register(
-        PART_STATS,
+        PART_ATTRIBUTES,
         |part| {
             let p = part
                 .as_any()
-                .downcast_ref::<Stats>()
-                .ok_or_else(|| not_a(PART_STATS, "Stats"))?;
+                .downcast_ref::<Attributes>()
+                .ok_or_else(|| not_a(PART_ATTRIBUTES, "Attributes"))?;
+            Ok(toml::Value::Table(toml::map::Map::from_iter([
+                ("might".into(), toml::Value::Integer(p.might)),
+                ("agility".into(), toml::Value::Integer(p.agility)),
+                ("toughness".into(), toml::Value::Integer(p.toughness)),
+                ("will".into(), toml::Value::Integer(p.will)),
+                ("intellect".into(), toml::Value::Integer(p.intellect)),
+            ])))
+        },
+        |v| typed_restore::<Attributes>(PART_ATTRIBUTES, v),
+    );
+
+    hooks.register(
+        PART_LEVEL,
+        |part| {
+            let p = part
+                .as_any()
+                .downcast_ref::<Level>()
+                .ok_or_else(|| not_a(PART_LEVEL, "Level"))?;
             Ok(toml::Value::Table(toml::map::Map::from_iter([(
-                "strength".into(),
-                toml::Value::Integer(p.strength as i64),
+                "level".into(),
+                toml::Value::Integer(p.level),
             )])))
         },
-        |v| {
-            Ok(Box::new(Stats {
-                strength: table_i32(v, "strength")?,
-            }))
+        |v| typed_restore::<Level>(PART_LEVEL, v),
+    );
+
+    hooks.register(
+        PART_BONUSES,
+        |part| {
+            let p = part
+                .as_any()
+                .downcast_ref::<Bonuses>()
+                .ok_or_else(|| not_a(PART_BONUSES, "Bonuses"))?;
+            Ok(toml::Value::Table(toml::map::Map::from_iter([
+                ("accuracy".into(), toml::Value::Integer(p.accuracy)),
+                ("dodge".into(), toml::Value::Integer(p.dodge)),
+                ("ac".into(), toml::Value::Integer(p.ac)),
+                ("damage_flat".into(), toml::Value::Integer(p.damage_flat)),
+                ("block".into(), toml::Value::Integer(p.block)),
+            ])))
         },
+        |v| typed_restore::<Bonuses>(PART_BONUSES, v),
     );
 
     // Script parts: snapshot generically through the closed PartValue map, and
@@ -282,6 +319,24 @@ fn not_a(part: &str, ty: &str) -> PartError {
         name: part.to_string(),
         msg: format!("snapshot expected a {ty}, found another part type"),
     }
+}
+
+/// Restore a typed native part from its canonical TOML value through the same
+/// typed deserialization the blueprint loader uses. Restore thereby enforces
+/// every load-time invariant of the part (`deny_unknown_fields`, bounds) —
+/// a malformed or out-of-range payload fails closed like any other hook.
+fn typed_restore<T>(name: &str, v: &toml::Value) -> Result<Box<dyn Part>, PartError>
+where
+    T: serde::de::DeserializeOwned + std::fmt::Debug + Send + Sync + 'static,
+{
+    let t: T = v
+        .clone()
+        .try_into()
+        .map_err(|e: toml::de::Error| PartError::BuildFailed {
+            name: name.to_string(),
+            msg: e.to_string(),
+        })?;
+    Ok(Box::new(t))
 }
 
 /// Snapshot any `ScriptPart` into a TOML table of its closed `PartValue` fields.
@@ -373,9 +428,17 @@ pub struct Snapshot {
     pub entities: Vec<SavedEntity>,
 }
 
+/// Parts the snapshot silently excludes rather than failing on. `Derived` is
+/// Rebuilt-class: it is genuinely cache, not state, so a present cache is
+/// skipped (an absent/stale `Derived` on disk would otherwise make every save
+/// of a stat-ful entity fail with `UnserializablePart`).
+pub const NON_PERSISTENT_PARTS: &[&str] = &[PART_DERIVED];
+
 /// Snapshot every live entity in `broker` into [`SavedEntity`]s via `hooks`,
 /// in deterministic entity-id order. Any part not whitelisted fails closed
-/// with [`SaveError::UnserializablePart`] (the name so the gap is obvious).
+/// with [`SaveError::UnserializablePart`] (the name so the gap is obvious),
+/// except the explicit skip-list [`NON_PERSISTENT_PARTS`], which is silently
+/// excluded.
 pub fn snapshot_entities(broker: &EntityBroker, hooks: &SaveHooks) -> Result<Snapshot, SaveError> {
     let mut next_entity_bits = Vec::new();
     let mut entities = Vec::new();
@@ -387,6 +450,9 @@ pub fn snapshot_entities(broker: &EntityBroker, hooks: &SaveHooks) -> Result<Sna
         };
         let mut parts = Vec::new();
         for (id, part) in map.iter() {
+            if NON_PERSISTENT_PARTS.contains(&id.as_str()) {
+                continue;
+            }
             let value = hooks.snapshot(id, part)?;
             parts.push((id.as_str().to_string(), toml_value_to_text(&value)?));
         }
@@ -852,8 +918,8 @@ mod tests {
     // ---- snapshot hooks + broker snapshot/restore ----------------------
 
     /// A PartRegistry with the engine-native parts plus a script part schema,
-    /// mirroring the shipped demo (Position/Health/ActorEnergy/Stats native;
-    /// `Charge` a script part).
+    /// mirroring the shipped demo (Position/Health/ActorEnergy/Attributes/
+    /// Level/Bonuses native; `Charge` a script part).
     fn demo_registry() -> PartRegistry {
         use crate::ecs::StorageClass;
         use crate::script_part::{PartValue, ScriptPartType};
@@ -877,7 +943,11 @@ mod tests {
             .unwrap();
         reg.register(PART_ENERGY, StorageClass::Dynamic, build::<ActorEnergy>)
             .unwrap();
-        reg.register(PART_STATS, StorageClass::Dynamic, build::<Stats>)
+        reg.register(PART_ATTRIBUTES, StorageClass::Dynamic, build::<Attributes>)
+            .unwrap();
+        reg.register(PART_LEVEL, StorageClass::Dynamic, build::<Level>)
+            .unwrap();
+        reg.register(PART_BONUSES, StorageClass::Dynamic, build::<Bonuses>)
             .unwrap();
         let mut schema = BTreeMap::new();
         schema.insert(
@@ -931,6 +1001,190 @@ mod tests {
                 energy: -500
             })
         );
+    }
+
+    #[test]
+    fn whitelist_hooks_round_trip_stat_parts_and_enforce_bounds() {
+        use crate::stats::DerivedStat;
+        let hooks = demo_hooks();
+
+        // Attributes round-trip exactly.
+        let id = PartTypeId::new(PART_ATTRIBUTES);
+        let attrs: Box<dyn Part> = Box::new(Attributes {
+            might: 14,
+            agility: 9,
+            toughness: 13,
+            will: 8,
+            intellect: 11,
+        });
+        let v = hooks.snapshot(&id, attrs.as_ref()).unwrap();
+        assert_eq!(
+            v.as_table()
+                .unwrap()
+                .get("might")
+                .and_then(|f| f.as_integer()),
+            Some(14),
+            "snapshot is the canonical table shape"
+        );
+        let restored = hooks.restore(&id, &v).unwrap();
+        assert_eq!(
+            restored.as_ref().as_any().downcast_ref::<Attributes>(),
+            Some(&Attributes {
+                might: 14,
+                agility: 9,
+                toughness: 13,
+                will: 8,
+                intellect: 11
+            })
+        );
+
+        // Restore enforces the load-time bounds: an out-of-range payload fails
+        // closed rather than being clamped or accepted silently.
+        let bad: toml::Value =
+            toml::from_str("might = 14\nagility = 9\ntoughness = 99\nwill = 8\nintellect = 11\n")
+                .unwrap();
+        let err = match hooks.restore(&id, &bad) {
+            Ok(_) => panic!("expected restore to fail closed on out-of-range toughness"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("toughness"),
+            "bounds error names the field: {err}"
+        );
+
+        // Level round-trips and rejects out-of-range restores.
+        let id = PartTypeId::new(PART_LEVEL);
+        let lvl: Box<dyn Part> = Box::new(Level { level: 3 });
+        let v = hooks.snapshot(&id, lvl.as_ref()).unwrap();
+        let restored = hooks.restore(&id, &v).unwrap();
+        assert_eq!(
+            restored.as_ref().as_any().downcast_ref::<Level>(),
+            Some(&Level { level: 3 })
+        );
+        let bad: toml::Value = toml::from_str("level = 0\n").unwrap();
+        assert!(hooks.restore(&id, &bad).is_err());
+
+        // Bonuses round-trips; missing fields restore to defaults (0).
+        let id = PartTypeId::new(PART_BONUSES);
+        let b: Box<dyn Part> = Box::new(Bonuses {
+            accuracy: 3,
+            dodge: 0,
+            ac: 2,
+            damage_flat: 0,
+            block: 0,
+        });
+        let v = hooks.snapshot(&id, b.as_ref()).unwrap();
+        let restored = hooks.restore(&id, &v).unwrap();
+        assert_eq!(
+            restored.as_ref().as_any().downcast_ref::<Bonuses>(),
+            Some(&Bonuses {
+                accuracy: 3,
+                dodge: 0,
+                ac: 2,
+                damage_flat: 0,
+                block: 0
+            })
+        );
+        // The canonical snapshot spells all five keys; a partial payload is a
+        // legal authored shape (zeros fill in) but the engine writes the full
+        // table.
+        let partial: toml::Value = toml::from_str("accuracy = 4\n").unwrap();
+        let restored = hooks.restore(&id, &partial).unwrap();
+        assert_eq!(
+            restored.as_ref().as_any().downcast_ref::<Bonuses>(),
+            Some(&Bonuses {
+                accuracy: 4,
+                dodge: 0,
+                ac: 0,
+                damage_flat: 0,
+                block: 0
+            })
+        );
+
+        // The stat vocabularies parse the names the fixtures carry.
+        assert_eq!(DerivedStat::from_str("max_hp"), Some(DerivedStat::MaxHp));
+        assert_eq!(
+            DerivedStat::from_str("accuracy"),
+            Some(DerivedStat::Accuracy)
+        );
+        assert_eq!(DerivedStat::from_str("hp"), None, "not a stat name");
+    }
+
+    #[test]
+    fn legacy_stats_part_is_not_whitelisted_and_rejected() {
+        // The removed part: a save carrying `Stats` must fail closed on restore
+        // (the whitelist no longer knows the name), never silently truncate.
+        let hooks = demo_hooks();
+        let stale: toml::Value = toml::from_str("strength = 18\n").unwrap();
+        match hooks.restore(&PartTypeId::new("Stats"), &stale) {
+            Err(SaveError::UnserializablePart { name }) => assert_eq!(name, "Stats"),
+            Ok(_) => panic!("expected UnserializablePart for legacy Stats, got Ok with a part",),
+            Err(other) => panic!("expected UnserializablePart, got {other:?}"),
+        }
+        // And the demo registry no longer declares the name at all.
+        let reg = demo_registry();
+        assert_eq!(
+            reg.storage(&PartTypeId::new("Stats")),
+            None,
+            "legacy Stats must not be a registered part"
+        );
+    }
+
+    #[test]
+    fn derived_cache_is_excluded_from_snapshots() {
+        // An entity carrying a live `Derived` cache snapshots cleanly, with the
+        // cache silently skipped (never UnserializablePart, never persisted).
+        let hooks = demo_hooks();
+        let mut broker = EntityBroker::new();
+        let e = broker.spawn();
+        broker
+            .insert_part(
+                e,
+                PART_POSITION,
+                Box::new(Position { x: 1, y: 1 }) as Box<dyn Part>,
+            )
+            .unwrap();
+        broker
+            .insert_part(
+                e,
+                PART_DERIVED,
+                Box::new(crate::effects::Derived {
+                    values: BTreeMap::from([("max_hp".to_string(), 36)]),
+                }) as Box<dyn Part>,
+            )
+            .unwrap();
+
+        let snapshot = snapshot_entities(&broker, &hooks).unwrap();
+        let saved_parts = &snapshot.entities[0].parts;
+        assert!(
+            saved_parts.iter().any(|(n, _)| n == PART_POSITION),
+            "position survives the snapshot"
+        );
+        assert!(
+            !saved_parts.iter().any(|(n, _)| n == "Derived"),
+            "Derived cache must be silently excluded, got {saved_parts:?}"
+        );
+        assert!(
+            NON_PERSISTENT_PARTS.contains(&"Derived"),
+            "skip-list is the explicit record of non-persistent parts"
+        );
+    }
+
+    #[test]
+    fn v1_save_is_rejected_as_unsupported() {
+        // The first format bump: a format-1 save (pre-stats) loads as
+        // UnsupportedVersion { found: 1, supported: 2 } — rejected, not
+        // guessed at.
+        let mut bytes = save_to_bytes(&sample_data()).expect("save");
+        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        match load_from_bytes(&bytes) {
+            Err(SaveError::UnsupportedVersion { found, supported }) => {
+                assert_eq!(found, 1);
+                assert_eq!(supported, SAVE_FORMAT_VERSION);
+                assert_eq!(supported, 2, "the constant is the named bump");
+            }
+            other => panic!("expected UnsupportedVersion for v1, got {other:?}"),
+        }
     }
 
     #[test]

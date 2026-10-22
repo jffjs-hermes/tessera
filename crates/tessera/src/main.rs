@@ -157,12 +157,14 @@ struct Content {
 }
 
 /// Build the world: register the engine's known part types and the dynamic
-/// parts (Position / ActorEnergy / Health / Stats), load every script in the
-/// content set (registering their `define_part` schemas via the host) and sync
-/// those schemas into the world registry so blueprint `parts.<ScriptPart>` keys
-/// validate — THEN load the blueprint set. On any error returns an anyhow
-/// error carrying `file + id` diagnostics. `vfs` is the composed overlay (base
-/// + mods), so scripts and blueprints resolve across all of them in one pass.
+/// parts (Position / ActorEnergy / Health; the native stat parts Attributes/
+/// Level/Bonuses are registered centrally by `World::new`), load every script
+/// in the content set (registering their `define_part` schemas via the host)
+/// and sync those schemas into the world registry so blueprint
+/// `parts.<ScriptPart>` keys validate — THEN load the blueprint set. On any
+/// error returns an anyhow error carrying `file + id` diagnostics. `vfs` is
+/// the composed overlay (base + mods), so scripts and blueprints resolve
+/// across all of them in one pass.
 fn build_world(vfs: &dyn Vfs, bridge: &ScriptBridge) -> Result<World> {
     let mut world = World::new();
     // Engine component seam: `parts.Render` deserializes into a `RenderTile`
@@ -171,8 +173,7 @@ fn build_world(vfs: &dyn Vfs, bridge: &ScriptBridge) -> Result<World> {
         .register_component::<RenderTile>("Render")
         .map_err(|e| anyhow::anyhow!("registering engine part 'Render': {e}"))?;
     // Dynamic parts: Position is the event-facing
-    // grid cell, ActorEnergy drives the scheduler, Health backs minimal combat,
-    // Stats carries the mod-patched strength attributes.
+    // grid cell, ActorEnergy drives the scheduler, Health backs minimal combat.
     world
         .register_part::<Position>(PART_POSITION)
         .map_err(|e| anyhow::anyhow!("registering part 'Position': {e}"))?;
@@ -182,9 +183,6 @@ fn build_world(vfs: &dyn Vfs, bridge: &ScriptBridge) -> Result<World> {
     world
         .register_part::<Health>(PART_HEALTH)
         .map_err(|e| anyhow::anyhow!("registering part 'Health': {e}"))?;
-    world
-        .register_part::<tessera_core::events::Stats>(tessera_core::events::PART_STATS)
-        .map_err(|e| anyhow::anyhow!("registering part 'Stats': {e}"))?;
 
     // Load scripts (deterministic, lexicographic) BEFORE the blueprint library
     // so their `define_part` schemas are in the world registry when
@@ -244,7 +242,7 @@ fn load_content(data: &std::path::Path, mods: &std::path::Path) -> Result<Conten
     let bridge = ScriptBridge::new(broker.clone());
     let world = build_world(&overlay, &bridge)?;
     // Apply each mod's blueprint patches in load order (sample mod patches the
-    // base Goblin's tile + strength). Base content is untouched on disk.
+    // base Goblin's tile). Base content is untouched on disk.
     tessera::mods::apply_mod_patches(&world, &registry)
         .map_err(|e| anyhow::anyhow!("applying mod patches: {e}"))?;
     // Expose the blueprint world to the script host so `engine.spawn_at` can
@@ -746,9 +744,7 @@ fn main() -> Result<()> {
                 .unwrap_or_else(|p| p.into_inner());
             println!("mods loaded: {}", content.mod_ids.join(", "));
             if lib.contains("Bogling") {
-                println!(
-                    "mod demo: Bogling spawned with sample-mod Charge; Goblin tile+strength patched"
-                );
+                println!("mod demo: Bogling spawned with sample-mod Charge; Goblin tile patched");
             }
             if lib.contains("Ability_ShieldBash") {
                 println!(

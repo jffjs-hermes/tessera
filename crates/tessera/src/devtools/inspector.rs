@@ -216,8 +216,8 @@ mod tests {
 
     use super::*;
     use tessera_core::ecs::Part;
-    use tessera_core::events::{PART_STATS, Stats};
     use tessera_core::script_part::{FieldDef, PartValue, ScriptPartType};
+    use tessera_core::stats::{Attributes, PART_ATTRIBUTES};
     use tessera_core::turns::{ActorEnergy, PART_ENERGY};
     use tessera_core::vfs::MemVfs;
 
@@ -230,7 +230,6 @@ mod tests {
         w.register_part::<Position>(PART_POSITION).unwrap();
         w.register_part::<ActorEnergy>(PART_ENERGY).unwrap();
         w.register_part::<Health>(PART_HEALTH).unwrap();
-        w.register_part::<Stats>(PART_STATS).unwrap();
         let mut schema = BTreeMap::new();
         schema.insert(
             "charges".to_string(),
@@ -243,6 +242,8 @@ mod tests {
             r##"
 [Actor]
 parts.Health = { hp = 20 }
+parts.Attributes = { might = 14, agility = 9, toughness = 13, will = 8, intellect = 11 }
+parts.Level = { level = 1 }
 
 [Humanoid]
 inherits = "Actor"
@@ -257,7 +258,6 @@ parts.Render = { tile = "creature.player" }
 inherits = "Humanoid"
 parts.Render = { tile = "creature.goblin" }
 parts.Health = { hp = 3 }
-parts.Stats = { strength = 18 }
 parts.Charge = { charges = 2 }
 "##,
         );
@@ -290,8 +290,14 @@ parts.Charge = { charges = 2 }
         broker
             .insert_part(
                 goblin,
-                PART_STATS,
-                Box::new(Stats { strength: 18 }) as Box<dyn Part>,
+                PART_ATTRIBUTES,
+                Box::new(Attributes {
+                    might: 14,
+                    agility: 9,
+                    toughness: 13,
+                    will: 8,
+                    intellect: 11,
+                }) as Box<dyn Part>,
             )
             .unwrap();
         broker
@@ -374,7 +380,7 @@ parts.Charge = { charges = 2 }
         // Native parts are present; the script `Charge` part is excluded.
         assert!(names.contains(&"Position"), "{names:?}");
         assert!(names.contains(&"Health"), "{names:?}");
-        assert!(names.contains(&"Stats"), "{names:?}");
+        assert!(names.contains(&"Attributes"), "{names:?}");
         assert!(
             !names.contains(&"Charge"),
             "script-owned state must not be exposed, got {names:?}"

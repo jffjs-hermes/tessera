@@ -5,7 +5,7 @@
 //!   - the sample mod adds a new "Bogling" blueprint (inherits base Goblin,
 //!     carries a mod-defined `Charge` part) — spawns and carries Charge;
 //!   - the sample mod patches the base Goblin: tile becomes
-//!     `creature.goblin.angry` and strength 18 -> 22;
+//!     `creature.goblin.angry`;
 //!   - the mod's script handler fires on Attack and its shot appears in the
 //!     deterministic event log (proof a mod script shares the engine dispatch);
 //!   - all of the above is identical whether the same mod loads from a directory
@@ -29,8 +29,9 @@ use tessera_core::zone::Zone;
 const BASE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/base");
 const MODS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/mods");
 
-/// Register the engine part set exactly as the binary does (including `Stats`,
-/// which the base Goblin now carries and the sample patch modifies).
+/// Register the engine part set exactly as the binary does: the event-facing
+/// parts the binary registers by hand (the native `Attributes`/`Level`/
+/// `Bonuses` parts are registered centrally by `World::new`).
 fn register_parts(world: &mut World) {
     world
         .register_component::<RenderTile>("Render")
@@ -44,9 +45,6 @@ fn register_parts(world: &mut World) {
     world
         .register_part::<tessera_core::events::Health>(tessera_core::events::PART_HEALTH)
         .expect("register Health");
-    world
-        .register_part::<tessera_core::events::Stats>(tessera_core::events::PART_STATS)
-        .expect("register Stats");
 }
 
 /// Load content exactly as the binary does: base under one overlay with every
@@ -82,7 +80,7 @@ fn load_content_world(
     }
     bridge.sync_schemas(&mut world).expect("sync schemas");
     world.load(&overlay).expect("load blueprints");
-    // Apply the sample mod's Goblin patch (tile + strength) in load order.
+    // Apply the sample mod's Goblin patch (tile) in load order.
     apply_mod_patches(&world, &registry).expect("apply mod patches");
 
     let world = Arc::new(world);
@@ -118,18 +116,20 @@ fn spawn_at(world: &World, broker: &mut EntityBroker, bp: &str, x: i32, y: i32) 
     e
 }
 
-/// Read the patched Goblin blueprint's `Stats.strength` as a raw integer from
-/// the resolved library (patches operate on raw payloads).
-fn goblin_strength(world: &World) -> i64 {
+/// Read the resolved Goblin blueprint's `Attributes.might` as a raw integer
+/// (the value every creature inherits from the base `Actor` root; patches
+/// operate on raw payloads). Attributes/Level/Bonuses replace the legacy
+/// `Stats` part, which must be gone from the resolved blueprint entirely.
+fn goblin_might(world: &World) -> i64 {
     let lib = world.library().read().unwrap_or_else(|p| p.into_inner());
     let goblin = lib.get("Goblin").expect("Goblin blueprint");
     goblin
-        .part("Stats")
-        .expect("Goblin has a Stats part after the patch")
-        .get("strength")
-        .expect("Stats.strength key")
+        .part("Attributes")
+        .expect("Goblin inherits the base Attributes part")
+        .get("might")
+        .expect("Attributes.might key")
         .as_integer()
-        .expect("strength is an integer")
+        .expect("might is an integer")
 }
 
 /// Read a spawned GoBogli/Charge part's integer field.
@@ -197,8 +197,18 @@ fn sample_mod_adds_bogling_charge_patches_goblin_and_logs_handler() {
         world.library().read().unwrap().contains("Bogling"),
         "sample mod must add a Bogling blueprint"
     );
-    // The Goblin is patched: strength 18 -> 22.
-    assert_eq!(goblin_strength(&world), 22);
+    // The legacy `Stats` part is gone from the resolved blueprint; every
+    // creature now carries `Attributes` inherited from the base `Actor` root
+    // (the goblin does not restate them, so it gets the defaults).
+    assert_eq!(goblin_might(&world), 14);
+    {
+        let lib = world.library().read().unwrap();
+        let goblin = lib.get("Goblin").expect("Goblin blueprint");
+        assert!(
+            goblin.part("Stats").is_none(),
+            "legacy Stats part must be removed from the resolved blueprint"
+        );
+    }
     // Its resolved tile is the mod's recolor.
     let lib = world.library().read().unwrap();
     let goblin = lib.get("Goblin").unwrap();
@@ -228,7 +238,20 @@ fn base_blueprint_files_patch_in_memory_only() {
     // Snapshot base blueprint bytes, load with mods, confirm disk files unchanged.
     let creatures = std::fs::read(format!("{BASE}/blueprints/creatures.toml")).unwrap();
     let (world, _t, _b, _bridge) = load_content_world(Path::new(MODS));
-    assert_eq!(goblin_strength(&world), 22, "patched in memory");
+    // The patch is applied in memory: the goblin's resolved tile is the mod's
+    // recolor (the sample patch's only effect now that Stats is gone).
+    {
+        let lib = world.library().read().unwrap();
+        let goblin = lib.get("Goblin").unwrap();
+        let tile = goblin
+            .part("Render")
+            .unwrap()
+            .get("tile")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(tile, "creature.goblin.angry", "patched in memory");
+    }
     let after = std::fs::read(format!("{BASE}/blueprints/creatures.toml")).unwrap();
     assert_eq!(
         creatures, after,

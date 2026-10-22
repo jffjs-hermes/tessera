@@ -166,10 +166,43 @@ pub struct Abilities {
 /// computes values here — it stores whatever the rules script wrote through
 /// the whitelisted `set_part` path and clears the part on invalidation (see
 /// [`invalidate_derived`]). Reads (native or script) never recompute.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+///
+/// Deserialization validates every key against [`DerivedStat`]: keys that
+/// are not stat names, or stat names outside the computed set, are load
+/// errors (fail closed), so the cache is typed at the boundary even though
+/// scripts write it through the generic part path.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Derived {
     pub values: BTreeMap<String, i64>,
+}
+
+impl<'de> Deserialize<'de> for Derived {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct RawDerived {
+            #[serde(default)]
+            values: BTreeMap<String, i64>,
+        }
+        let raw = RawDerived::deserialize(deserializer)?;
+        for key in raw.values.keys() {
+            let stat = crate::stats::DerivedStat::from_str(key).ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "unknown derived stat key '{key}' (expected one of the stat names)"
+                ))
+            })?;
+            if !stat.is_computed() {
+                return Err(serde::de::Error::custom(format!(
+                    "derived stat '{key}' is reserved and not yet computed; \
+                     the cache may not carry it"
+                )));
+            }
+        }
+        Ok(Derived { values: raw.values })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1440,6 +1473,8 @@ parts.Modifiers = { skip_turns = 1 }
         let id = PartTypeId::new(PART_DERIVED);
 
         // a rules script wrote values through the whitelisted set_part path
+        // (direct construction bypasses serde; key validity is enforced only
+        // on load, see the custom `Deserialize` impl above)
         ctx.broker
             .write()
             .unwrap_or_else(|p| p.into_inner())
@@ -1505,6 +1540,65 @@ parts.Modifiers = { skip_turns = 1 }
                 .is_none(),
             "Derived cache must be invalidated on StatusExpired"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Derived payload validation (typed at the load boundary)
+    // ------------------------------------------------------------------
+
+    /// Deserialize an inline `Derived` payload table (`{ ... }`) through the
+    /// same `toml::Value` round-trip the loader's `part_typed` seam performs,
+    /// so the custom `Deserialize` impl validates every key.
+    fn parse_derived(toml_text: &str) -> Result<Derived, toml::de::Error> {
+        let anchored = format!("payload = {toml_text}");
+        let value: toml::Value = toml::from_str(&anchored)?;
+        let payload = value
+            .get("payload")
+            .expect("anchored document always carries the payload key")
+            .clone();
+        payload.try_into()
+    }
+
+    #[test]
+    fn derived_payload_validates_keys_on_load() {
+        // (a) every computed stat name loads and is carried through
+        let d: Derived =
+            parse_derived(
+                r#"{ values = { max_hp = 100, accuracy = 80, dodge = 10, ac = 2, defense = 3, speed = 20 } }"#,
+            )
+                .unwrap();
+        assert_eq!(d.values["max_hp"], 100);
+        assert_eq!(d.values["speed"], 20);
+        assert_eq!(d.values.len(), 6);
+
+        // an absent/empty table is a valid empty cache
+        let d: Derived = parse_derived(r#"{}"#).unwrap();
+        assert_eq!(d.values.len(), 0);
+
+        // (b) an unknown key fails closed: "hp" is not a stat name at all
+        let text = parse_derived(r#"{ values = { hp = 100 } }"#)
+            .unwrap_err()
+            .to_string();
+        assert!(text.contains("unknown derived stat key"), "{text}");
+        assert!(text.contains("hp"), "{text}");
+
+        // (c) reserved-not-computed names are real stat names, but the cache
+        // may not carry them yet — also fail closed
+        for (key, value) in [
+            ("damage_dealt", 12i64),
+            ("damage_taken", 3),
+            ("healing", 4),
+            ("block", 1),
+        ] {
+            let text = parse_derived(&format!("{{ values = {{ {key} = {value} }} }}"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                text.contains("reserved and not yet computed"),
+                "{key}: {text}"
+            );
+            assert!(text.contains(key), "{key}: {text}");
+        }
     }
 
     // ------------------------------------------------------------------
