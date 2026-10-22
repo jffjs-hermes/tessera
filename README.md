@@ -138,7 +138,7 @@ Content lives in `data/base/`, which is meant to use the same format as mods.
 - **Determinism.** See [docs/determinism.md](docs/determinism.md).
 - **All content loads through `Vfs`** (directory now; zip/in-memory for mods and tests).
 
-See [docs/architecture.md](docs/architecture.md) for the full plan and [docs/roadmap.md](docs/roadmap.md) for milestone status.
+See [docs/architecture.md](docs/architecture.md) for the full plan, [docs/design/](docs/design/README.md) for implementation diagrams, and [docs/roadmap.md](docs/roadmap.md) for milestone status.
 
 ## License
 

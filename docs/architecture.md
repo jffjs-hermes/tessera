@@ -79,6 +79,19 @@ docs/
 
 Crates are split when a second consumer or a dependency boundary justifies it, not up front.
 
+### Design diagrams
+
+The implementation-level diagrams live in [`docs/design/`](design/README.md):
+
+- [System boundaries](design/system.md)
+- [Runtime turn loop](design/runtime.md)
+- [Entity broker and persistence](design/ecs.md)
+- [Typed event bus](design/events.md)
+- [Script bridge](design/script-bridge.md)
+- [World, zones, generation, and spatial queries](design/world.md)
+
+They use the current Rust identifiers and mark planned boundaries explicitly.
+
 ## 5. Core model
 
 - **Blueprints.** A data file defines an entity: `inherits`, a list of parts and their
