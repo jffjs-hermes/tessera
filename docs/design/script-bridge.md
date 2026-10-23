@@ -18,9 +18,11 @@ flowchart LR
     Shared --> Access
     Host --> Handlers["script event handlers"]
     Handlers --> Bus["same SimContext::dispatch\nas native handlers"]
+    Rules["data/base/scripts/rules/stats.luau\nformula + tuning policy"] --> Handlers
     Bus <--> Broker
     Native["native core\nRNG, path queries, event invariants,
 serialization, hot loops"] --> Bus
+    Cache["effects::Derived\ncached read model"] --> Native
 
     subgraph Boundary[Determinism boundary]
         Read["reads return owned snapshots"]
@@ -32,4 +34,4 @@ serialization, hot loops"] --> Bus
     Zone --> OneCall
 ```
 
-**Legend:** the sandbox limits capabilities, while native core owns deterministic primitives and invariants. Scripts choose policy and tuning; they do not receive `&mut World`, broker guards, or unrestricted iteration. Script-facing ids from `spawn_at` are translated by `SharedSim` to live `hecs::Entity` ids.
+**Legend:** the sandbox limits capabilities, while native core owns deterministic primitives, integer arithmetic, clamps, and invariants. `rules/stats.luau` chooses stats formulas and tuning policy; its writes are finalized into `effects::Derived`. Native hot loops read that cache and never call scripts. Scripts do not receive `&mut World`, broker guards, or unrestricted iteration. Script-facing ids from `spawn_at` are translated by `SharedSim` to live `hecs::Entity` ids.

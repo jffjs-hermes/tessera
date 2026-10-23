@@ -20,8 +20,10 @@ flowchart TD
     Zone --> Path["path.rs\nA* / random_walkable_empty"]
     Occupied --> Path
     Path --> Native["native one-call navigation\nused by bridge and sim"]
+    Derived["effects::Derived\ncached speed"] --> Native
+    Native -->|hot-loop speed read| Derived
     Zone --> Render["Sim::map / renderables\nread-only presentation"]
     WorldMap -.-> Planned["multi-zone traversal / portals — planned"]
 ```
 
-**Legend:** terrain is separate from occupancy: a cell can be walkable yet occupied by an entity. `WorldMap` already supports multiple named zones, while the demo simulates one zone. The dashed portal/traversal node is explicitly planned rather than a current connection.
+**Legend:** terrain is separate from occupancy: a cell can be walkable yet occupied by an entity. `WorldMap` already supports multiple named zones, while the demo simulates one zone. Scheduler/hot-loop speed reads use cached `Derived.speed` and never invoke Luau. The dashed portal/traversal node is explicitly planned rather than a current connection.

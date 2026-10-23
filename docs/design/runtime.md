@@ -22,6 +22,12 @@ flowchart TD
     Native --> Effects["effects.rs\nStatusEffects / Charges\nexpiry and stagger seams"]
     Script --> Broker
     Effects --> Bus
+    Dirty["declared dirtying events\nspawn / part change / status"] --> Recompute["RecomputeDerived event"]
+    Recompute --> Bus
+    Bus --> Rules["rules/stats.luau\nformula bases"]
+    Rules --> Finalize["recompute::finalize_derived\nmods + clamps + HP invariant"]
+    Finalize --> Cache["effects::Derived\nreplace cached values"]
+    Cache --> Native
     Bus --> Outcome["EventOutcome\nhandled / modified / cancelled"]
     Outcome --> Charge["Scheduler charges energy\nunless action cancelled"]
     Charge --> Next["next ready actor"]
@@ -37,4 +43,4 @@ flowchart TD
     RendererOwner -.-> Renderer
 ```
 
-**Legend:** `Move`, `Attack`, `UseAbility`, and `ActorTurnStart` are typed events. The renderer is downstream of state reads; it never dispatches events or mutates the broker. Effects are native parts and event handlers in `effects.rs`, not a separate `StatusStore` type.
+**Legend:** `Move`, `Attack`, `UseAbility`, `RecomputeDerived`, and `ActorTurnStart` are typed events. `rules/stats.luau` owns formula/tuning policy; `recompute::finalize_derived` owns native status modifiers, clamps, and the HP invariant. The renderer is downstream of state reads; it never dispatches events or mutates the broker. Effects are native parts and event handlers in `effects.rs`, not a separate `StatusStore` type. Native hot-loop reads use the cache and do not call scripts.

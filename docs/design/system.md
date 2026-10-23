@@ -19,6 +19,8 @@ flowchart LR
         Events["SimContext / EventBus"]
         Scheduler["Scheduler\nenergy clock"]
         Effects["effects.rs\nStatusEffects, Charges"]
+        Stats["stats.rs\nAttributes, Level, Bonuses"]
+        Derived["effects::Derived\ncached derived values"]
         Vfs --> World
         Vfs --> Zone
         World --> Broker
@@ -26,6 +28,8 @@ flowchart LR
         Broker <--> Events
         Scheduler --> Events
         Effects --> Events
+        Stats --> Events
+        Events --> Derived
     end
 
     subgraph Script["tessera-script — Luau host"]
@@ -39,6 +43,7 @@ flowchart LR
     Bridge["tessera::scripting::ScriptBridge\nWorldAccess + SharedSim"]
     Sim["tessera::sim::Sim\nheadless sim owner"]
     Render["tessera-render\nread-only cells"]
+    Inspector["devtools::inspector\nread-only snapshot"]
     Binary["tessera binary\ninput / window / CLI"]
 
     World --> Bridge
@@ -49,6 +54,8 @@ flowchart LR
     Sim --> Scheduler
     Sim --> Events
     Sim --> Render
+    Broker --> Inspector
+    Derived --> Inspector
     Render --> Binary
     Binary --> Sim
 

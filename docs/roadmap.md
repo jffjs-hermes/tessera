@@ -32,6 +32,7 @@ Execution order: M4, M6 (world slice and demo), M5 (mod loader), M7, M8. M8 may 
 
 ### S1 — Stats and derived values
 
+- [x] **S1 complete (2026-10-22):** typed `Attributes`/`Level`/`Bonuses` parts, integer-only `rules/stats.luau` formulas, eager dirty-event recompute with native status finalization and cached `Derived`, save v2 rebuild semantics, deterministic fixtures, and read-only inspector/console visibility shipped. Native hot-loop reads use `Derived`; no script calls occur on those paths. Next milestone: S2 — melee combat, gear, and Knight.
 - **Gap and surface:** add Attributes, Level, HP, Accuracy, Dodge, Defense, and Speed as typed parts/derived values. Add a tuning blueprint readable by Luau and overridable by sim sweeps; values must not be scattered constants. Extend spawn/change hooks and the entity inspector/console enough to inspect derived values.
 - **Subsystems and boundary:** `tessera-core` parts and deterministic event hooks; `tessera-script` `rules/stats.luau`; UI only for read-only visibility. Native owns integer arithmetic, clamping, and invariant checks; scripts own formulas and tuning policy.
 - **Dependencies and missing capability:** follows S0 and can run beside M8. The engine has no attribute model, derived-stat invalidation, or typed tuning table. Save schema must version persistent attributes/level while derived values can be rebuilt.
