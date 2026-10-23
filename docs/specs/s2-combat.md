@@ -208,7 +208,7 @@ bit-for-bit; the second pins the blueprint-level values that differ (§8 explain
 | Attack | Cached inputs | Expected |
 |---|---|---|
 | Knight → goblin | acc 4, def 12; longsword 4-8, Might 14 (mod 2), flat +1 | hit **42**; damage **7–11**; crit **10–16** (`7*150//100=10` … `11*150//100=16`) |
-| Goblin → Knight (mail, round shield) | goblin acc 8; Knight dodge 1, AC 10 ⇒ def 21; block 19; mail slash res 30 | hit **37**; block roll ≤19; damage 3-6 slash → **2–4 after mail** (3→2, 4→2, 5→3, 6→4) |
+| Goblin → Knight (mail, round shield, half-helm) | goblin acc 8; Knight dodge 1, AC 12 ⇒ def 25; block 19; mail slash res 30 | hit **33**; block roll ≤19; damage 3-6 slash → **2–4 after mail** (3→2, 4→2, 5→3, 6→4). The Combat Formulas example runs at the doc's pre-Half-Helm gear (AC 10 ⇒ def 21 ⇒ hit **37**) — same chain, recorded for provenance; the blueprint row matches `prototype_class_sim.py` (`mk_knight` ac 12) |
 | Goblin → Wizard (robes) | def 5, no resist/threshold | hit **53**; damage **3–6** |
 | Rogue → goblin | acc 16, def 12; shortsword 3-6, Agility 15 (mod 2) | hit **54**; damage **5–8** |
 | Mend (recorded, S5) | Will 13 | `40 * 109 // 100` = **43**% — pinned here so the heal formula's integer shape is fixed before S5 |
@@ -268,6 +268,10 @@ parts.Armor = { ac = 2, block = 15, resist = { slash = 0, pierce = 0, blunt = 0 
 [Item_MailHauberk]   # body piece of the mail set
 parts.Item  = { name = "Mail hauberk", slot = "body", weight = 14, tier = "common", price = 90 }
 parts.Armor = { ac = 4, block = 0, resist = { slash = 30, pierce = 20, blunt = 0 }, threshold = {} }
+
+[Item_HalfHelm]      # head piece of the Knight kit (owner decision, PR #63 2026-10-23)
+parts.Item  = { name = "Half-helm", slot = "head", weight = 5, tier = "common", price = 15 }
+parts.Armor = { ac = 2, block = 0, resist = { slash = 0, pierce = 0, blunt = 0 }, threshold = {} }
 ```
 
 - `Weapon`/`Armor` are native typed parts (serde, `deny_unknown_fields`) registered beside
@@ -278,7 +282,7 @@ parts.Armor = { ac = 4, block = 0, resist = { slash = 30, pierce = 20, blunt = 0
 - Tiers (`common/fine/masterwork/rare`) are a string field in S2 with **no affix
   resolution** (affixes are S8/loot); `tier` exists so saves and loot rolls keep the axis.
 - The slice ships exactly the kits the design tables name: Knight (longsword, round
-  shield, mail set: hauberk/open helm/boots-in-legs), Rogue (shortsword + dagger, leather
+  shield, mail set: hauberk/half-helm/boots-in-legs), Rogue (shortsword + dagger, leather
   set), Cleric (mace, brigandine set), Wizard (quarterstaff, robes) — plus the goblin's
   short blade. All are data; only the Knight + goblin are *required* by the acceptance.
 
@@ -401,7 +405,7 @@ the current numbers); the deltas are recorded, not hidden:
 
 | Value | Design doc | `prototype_class_sim.py` | S2 blueprint uses | Note |
 |---|---|---|---|---|
-| Knight AC | mail set + round shield = 8 + 2 = **10** (Items and Gear + Combat Formulas example) | `mk_knight`: `ac = 12` | **12** | the class sim's bands were produced at 12; adopting 10 would move every Knight result. Owner-review item (§11): either update the gear tables to sum to 12 or retune the sim — the blueprint pins 12 so the engine reproduces the bands either way |
+| Knight AC | mail set + round shield = 8 + 2 = **10** (Items and Gear + Combat Formulas example) | `mk_knight`: `ac = 12` | **12** | RESOLVED by owner decision (PR #63, 2026-10-23): the Knight kit ships a real **Half-Helm (AC 2, §4.2)** in place of the AC-less open helm, so the gear itself sums to 12 and the engine reproduces the bands at the sim's calibration — no synthetic reconciliation remains |
 | Goblin damage | "Short blade 2-5 slash" (Creatures and Enemies) | `T["gob_lo"]=2, T["gob_hi"]=5` | **2–5** | sources agree |
 | Goblin HP | L2, T9 ⇒ 34 | `gob_hp_T = 9` | **34** | agree |
 | Knight block | round 15 + (Might−10) | `block = 19` | **19** | agree |
@@ -420,16 +424,17 @@ parts.Attributes = { might = 14, agility = 9, toughness = 13, will = 8, intellec
 parts.Level      = { level = 3 }
 parts.Bonuses    = { accuracy = 3, damage_flat = 1 }   # Blade I stand-in (S3 owns the skill)
 parts.Equipment  = { main_hand = "Item_Longsword", off_hand = "Item_RoundShield",
-                     body = "Item_MailHauberk", head = "Item_OpenHelm", legs = "Item_SimpleBoots" }
+                     body = "Item_MailHauberk", head = "Item_HalfHelm", legs = "Item_SimpleBoots" }
 scripts = ["scripts/policies/knight_expert.luau"]
 ```
 
 The Knight's **AC 12** and **block 19** are script-computed from gear + Might (§3.4).
-Since the shipped armor pieces sum to AC 10 + block 15+4 = 19, the kit carries one
-authored `Bonuses.ac = 2` increment (a "gambeson under hauberk" line item) so the
-computed total is the prototype's 12 without inventing a new item — the mapping table
-records this explicitly as the concrete reconciliation and as the thing to clean up when
-the AC table is retuned.
+The owner decision on PR #63 (2026-10-23) puts a real **Half-Helm (AC 2, §4.2)** on the
+head slot in place of the AC-less open helm the design tables named: the shipped pieces
+(mail set 8 + round shield 2 + half-helm 2) sum to AC 12, matching `mk_knight`
+(`ac = 12`) — no authored `Bonuses.ac` increment is needed (the §6.1 mapping table
+records the reconciliation; the earlier "gambeson under hauberk" +2 line item is
+withdrawn).
 
 ```toml
 # --- creatures.toml (Goblin Raider, from the authoritative T dict + ENEMY table)
@@ -627,9 +632,10 @@ Cards 1 and 2 are independent; 3 depends on both.
 
 ## 11. Recorded decisions, residual risks, out of scope
 
-- **Knight AC 12 vs the gear tables' 10** (§6.1): reconciled by an authored +2 line item;
-  the owner decides whether the item tables or the sim total moves. This is the one
-  number in the spec with a live discrepancy, recorded here and in the card comment.
+- **Knight AC 12 vs the gear tables' 10** (§6.1): RESOLVED by owner decision (PR #63,
+  2026-10-23) — the Knight kit ships a Half-Helm (AC 2, §4.2) in place of the AC-less
+  open helm, so the gear sums to 12 and matches `prototype_class_sim.py`; the authored
+  +2 line item is withdrawn.
 - **Armor-load penalty vs prototype**: the rule ships ON (design-authoritative); band
   drift, if any, is handled by §9.3's policy.
 - **Phase 1 excludes Dirty Trick, Riposte/Counterweight triggers, Raise Shield, statuses,
