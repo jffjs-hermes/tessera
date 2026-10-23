@@ -485,7 +485,9 @@ band-flag added before suites exist would be untestable surface).
 [scenario]
 id = "doorway_3_goblins"
 map = "zone.sim_doorway"          # a fixed blueprint zone: room, one-tile doorway, guard room
-turn_cap = 30000                  # game-time units (the prototype's stalemate cap in GT)
+turn_cap = 30000                  # game-time units — Combat Sim Spec §4's example cap; the
+                                  # prototype's own stalemate cap is max_turns = 120 (= 12000 GT,
+                                  # §7.4), which binds first in phase 1
 player_spawn = [3, 8]
 
 [[enemies]]
@@ -520,11 +522,16 @@ question: hand-made arenas for phase 1, generated later).
 ### 7.3 Bots (Q7)
 
 - `data/mods/tessera-campaign/scripts/policies/knight_expert.luau`: the ordered rule list
-  transcribed from `knight_act` in `prototype_class_sim.py`, phase-1 subset (no
-  abilities exist yet): if no enemy is adjacent, move toward the nearest enemy along the
-  native path (this is the prototype's implicit approach logic, made explicit: goblins
-  start at distance 8 and walk in); otherwise attack the lowest-HP adjacent enemy
-  (`tkey = (−prio, hp)` with all priorities 0 in phase 1 ⇒ lowest HP, ties by entity id).
+  transcribed from `knight_act` in `prototype_class_sim.py`, phase-1 subset (no abilities
+  exist yet — charge, standfast, raise shield, and the windup-tripping bash target rule are
+  all ability-gated and arrive in S3). Transcribed exactly: **when no enemy is adjacent
+  the Knight waits** (`knight_act` returns the idle cost `100` and never advances); only
+  the goblins approach, starting at distance 8 and walking in under their own policy
+  (below). An earlier draft gave the expert bot "move toward the nearest enemy"; that was
+  an invented implicit-approach reading of the prototype and is withdrawn — the band check
+  must run against the waiting Knight. When an enemy IS adjacent: attack the lowest-HP
+  adjacent enemy (`tkey = (−prio, hp)` with all priorities 0 in phase 1 ⇒ lowest HP, ties
+  by entity id).
 - `policies/knight_naive.luau`: attack if adjacent, else move toward the nearest enemy;
   no HP awareness, no tactics. This is the Combat Sim Spec §6 "naive" tier and it is what
   the *phase-1 acceptance* uses for the band rows — the approved bands are expert-bot
@@ -540,6 +547,10 @@ question: hand-made arenas for phase 1, generated later).
   named stream `"sim:<scenario>:<build>:<i>"` forked once from the master (Combat Sim Spec
   §3's derivation, verbatim). Run *i* is reproducible alone; adding scenarios shifts
   nothing.
+- Cap: the prototype's stalemate cap `max_turns = 120` (12000 GT) is the binding cap — a
+  run reaching it is scored `win = 0` (the prototype's `now > T["max_turns"]*100` branch).
+  The scenario TOML's `turn_cap = 30000` (Combat Sim Spec §4's example) is headroom and
+  never reached in phase 1.
 - Output: one JSON line per run
   `{"run": i, "win": true, "turns": 31.4, "hp_left_pct": 0.42, "damage_dealt": 118,
     "damage_taken": 41, "kills": 3}` — the §7 metrics subset phase 1 can actually
