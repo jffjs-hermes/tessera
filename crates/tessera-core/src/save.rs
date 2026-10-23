@@ -303,7 +303,7 @@ pub fn build_save_hooks(registry: &PartRegistry) -> (SaveHooks, BTreeSet<String>
     );
 
     // The declarative ability ownership stub and its runtime charge pool:
-    // persistent state (the s0 save contract records charges as
+    // persistent state (the save contract records charges as
     // persistent), snapshotted/restored like any native part so the
     // campaign-patched demo player survives a save/load with its granted
     // abilities and spent pool intact. Without these hooks every save of a

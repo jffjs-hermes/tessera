@@ -110,7 +110,7 @@ fn demo_zone() -> Zone {
             }
         }
     }
-    Zone::from_cells("s1", 12, 12, Point::new(1, 1), cells)
+    Zone::from_cells("arena", 12, 12, Point::new(1, 1), cells)
 }
 
 fn derived_map(sim: &Sim, e: hecs::Entity) -> BTreeMap<String, i64> {
@@ -257,7 +257,7 @@ fn save_load_round_trip_preserves_stat_parts_and_rebuilds_derived() {
         .expect("Bonuses restored");
     assert_eq!(bns.accuracy, 3);
     // The campaign's granted ability + full charge pool survive too (the
-    // s0 save contract records charges as persistent; without the
+    // save contract records charges as persistent; without the
     // Abilities/Charges hooks every save of a campaign-loaded demo failed
     // with UnserializablePart).
     let ab = b

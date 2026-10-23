@@ -1558,7 +1558,7 @@ pub const RULES_RECOMPUTE_EVENT: &str = "RecomputeDerived";
 /// Register the stats recompute pipeline's native handling of `RecomputeDerived`
 /// on `ctx` (called at sim install alongside `install_native_effects`):
 ///
-/// 1. **invalidate first** — the native `invalidate_derived` hook (s0 )
+/// 1. **invalidate first** — the native `invalidate_derived` hook
 ///    clears the cache so a failed recompute leaves an absent cache, never a
 ///    stale one ( step 5);
 /// 2. **rules forward** — when a scripted `RecomputeDerived` handler (the
@@ -1583,7 +1583,7 @@ fn install_recompute_derived(
     let sched = scheduler.clone();
     ctx.register::<RecomputeDerived>(NORMAL, move |ctx, ev| {
         let entity = ev.entity;
-        // Step 1: clear the cache first (s0 ). Absent is detectable; stale
+        // Step 1: clear the cache first. Absent is detectable; stale
         // is a lie.
         tessera_core::effects::invalidate_derived(ctx, entity);
 
