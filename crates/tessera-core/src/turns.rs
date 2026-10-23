@@ -574,9 +574,13 @@ mod tests {
         let _ = ticks_seen;
         // Slow never acts before fast within a window where both are ready:
         // check the very first resolution -> fast.
-        let (mut s2, _c2, ents2) = setup(&[100, 200]);
-        s2.advance_until_ready().unwrap();
-        assert_eq!(s2.ready().first(), Some(&ents2[1]), "fast wins the tie-up");
+        let (mut sched_b, _c2, ents2) = setup(&[100, 200]);
+        sched_b.advance_until_ready().unwrap();
+        assert_eq!(
+            sched_b.ready().first(),
+            Some(&ents2[1]),
+            "fast wins the tie-up"
+        );
     }
 
     // ---- Slow actor: speed 50 acts once per two standard turns -----

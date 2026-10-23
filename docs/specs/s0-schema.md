@@ -328,7 +328,7 @@ Flow (all seams named):
 | Artifact | What it proves |
 |---|---|
 | `data/mods/tessera-campaign/` (Shield Bash + Staggered + tuning table) | the content conventions load as a mod |
-| `crates/tessera/tests/s0_shield_bash.rs` (headless integration test, seeded) | the full path: load → spawn → use → declarative resolve → status applied → charges spent → deterministic per seed |
+| `crates/tessera/tests/shield_bash.rs` (headless integration test, seeded) | the full path: load → spawn → use → declarative resolve → status applied → charges spent → deterministic per seed |
 | `--headless n` demo output | the event log shows `UseAbility`, `TakeDamage(blunt)`, `ApplyStatus(Status_Staggered)` in order |
 
 **Acceptance criteria (all required):**

@@ -118,7 +118,7 @@ fn demo_zone() -> Zone {
             }
         }
     }
-    Zone::from_cells("s1", 12, 12, Point::new(1, 1), cells)
+    Zone::from_cells("arena", 12, 12, Point::new(1, 1), cells)
 }
 
 fn derived_map(sim: &Sim, e: hecs::Entity) -> BTreeMap<String, i64> {

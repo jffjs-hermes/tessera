@@ -9,12 +9,13 @@
 //! behavior and constraints instead.
 //!
 //! This test walks every `*.rs` file under the `crates/` directory (the parent
-//! of this crate) and fails if any line references a milestone or card.
+//! of this crate) — checking both the file *name* and every content line — and
+//! fails if any references a milestone or card.
 //!
 //! IMPORTANT: this guard intentionally skips its *own* source file (compared by
 //! canonical path). That is not an allowlist of a milestone — rather, the guard
 //! necessarily contains in its source the very words it detects (its failure
-//! message and its unit tests feed it `M3` / `S0` / `t_84ef789d` samples).
+//! message and its unit tests feed it `M3` / `S0` / `t_1234abcd` samples).
 //! Everything else under `crates/` is scanned with no exemptions.
 
 use std::fs;
@@ -51,18 +52,22 @@ fn has_m_token(line: &str) -> bool {
     false
 }
 
-/// True if `line` contains a standalone `S<digits>` token (e.g. `S0`, `S2`,
-/// `S11`) or the `S<digits><letter>` form (`S4b`), where the characters
-/// immediately before and after the token are not ASCII letters or digits (or
-/// are line boundaries). This mirrors [`has_m_token`] for the S-labelled
-/// milestone names. So `S2`, `(S0)`, and `S4b:` match, while `SITEM` and
-/// `Slot2` do not (no digit run after the `S`).
+/// True if `line` contains a standalone `S<digits>`/`s<digits>` token (e.g.
+/// `S0`, `S2`, `s1`) or the `S<digits><letter>` form (`S4b`), where the
+/// characters immediately before and after the token are not ASCII letters or
+/// digits (or are line boundaries). Matching is case-insensitive because the
+/// slice labels leak as lowercase in practice (`s1` zone names, `s0` comment
+/// refs). So `S2`, `(S0)`, `s1`, and `S4b:` match, while `SITEM` and `Slot2`
+/// do not (no digit run after the `S`). The `M`-family matcher stays
+/// uppercase-only on purpose: M-milestones were always written `M0`–`M8` and
+/// lowercase `m<digit>` is a common identifier prefix, so matching it would
+/// add false positives for a label family that has never leaked lowercase.
 fn has_s_token(line: &str) -> bool {
     let bytes = line.as_bytes();
     let len = bytes.len();
     let mut i = 0;
     while i < len {
-        if bytes[i] == b'S' {
+        if bytes[i] == b'S' || bytes[i] == b's' {
             let mut j = i + 1;
             let digits_start = j;
             while j < len && bytes[j].is_ascii_digit() {
@@ -152,8 +157,8 @@ fn has_spec_word(line: &str) -> bool {
 /// True if `line` contains a kanban card id: a whole-word `t_` run followed
 /// by at least 6 hex characters (case-insensitive). The characters immediately
 /// before and after the run must not be ASCII letters or digits (or are line
-/// boundaries). So `t_84ef789d` matches, while `t_matrix` (not hex), `t_a` (too
-/// short) and `item_84ef789d` (no `t_` word boundary) do not.
+/// boundaries). So `t_1a2b3c4d` matches, while `t_matrix` (not hex), `t_a` (too
+/// short) and `item_1a2b3c4d` (no `t_` word boundary) do not.
 fn has_kanban_id(line: &str) -> bool {
     let bytes = line.as_bytes();
     let len = bytes.len();
@@ -229,6 +234,14 @@ fn scan_dir(dir: &Path, self_path: &Path, hits: &mut Vec<String>) {
             if canonical == *self_path {
                 continue; // the guard's own file (see module docs).
             }
+            // A milestone/card label in the file *name* is just as much a leak
+            // as one in its content (`s1_stats_pipeline.rs`, `t_4b2f9c1e.rs`),
+            // so check the basename too.
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && line_has_milestone_ref(name)
+            {
+                hits.push(format!("{} (file name): {}", path.display(), name));
+            }
             let content = match fs::read_to_string(&path) {
                 Ok(content) => content,
                 Err(_) => continue,
@@ -283,14 +296,18 @@ fn matcher_catches_real_milestone_references() {
     assert!(line_has_milestone_ref("see §3.2"));
     // spec tree paths
     assert!(line_has_milestone_ref("see `docs/specs/m2-entities.md`"));
-    // S-labelled milestone names (slice labels), including the S4b sub-form
+    // S-labelled milestone names (slice labels), including the S4b sub-form,
+    // and the lowercase forms the slice labels leak as (`s1` zone names, `s0`
+    // comment refs) — the S matcher is case-insensitive.
     assert!(line_has_milestone_ref("// S0 scope"));
     assert!(line_has_milestone_ref("S2's contract"));
     assert!(line_has_milestone_ref("(S4b) UI shell"));
     assert!(line_has_milestone_ref("per S11: stable"));
+    assert!(line_has_milestone_ref("zone \"s1\""));
+    assert!(line_has_milestone_ref("the s0 save contract"));
     // kanban card ids (whole-word t_ + ≥6 hex)
-    assert!(line_has_milestone_ref("handled in t_84ef789d"));
-    assert!(line_has_milestone_ref("t_84ef789d"));
+    assert!(line_has_milestone_ref("handled in t_1234abcd"));
+    assert!(line_has_milestone_ref("t_1234abcd"));
 }
 
 #[test]
@@ -304,14 +321,15 @@ fn matcher_ignores_lookalikes() {
     assert!(!line_has_milestone_ref("the specification declares it"));
     assert!(!line_has_milestone_ref("discard the bad value"));
     assert!(!line_has_milestone_ref("a cardamom reference"));
-    // S-token lookalikes: no digit run after `S`, or the run is part of a word
+    // S-token lookalikes: no digit run right after the `S`/`s`
     assert!(!line_has_milestone_ref("Slot2"));
     assert!(!line_has_milestone_ref("Slice"));
     assert!(!line_has_milestone_ref("SITEM"));
-    assert!(!line_has_milestone_ref("s0_shield"));
+    assert!(!line_has_milestone_ref("shelf0")); // `s` then a letter: no digit run
+    assert!(!line_has_milestone_ref("step2")); // `s` then a letter: no digit run
     // kanban id lookalikes: `t_` must be followed by ≥6 hex as a whole word
     assert!(!line_has_milestone_ref("t_matrix"));
-    assert!(!line_has_milestone_ref("item_84ef789d"));
+    assert!(!line_has_milestone_ref("item_1234abcd"));
     assert!(!line_has_milestone_ref("t_4b"));
-    assert!(!line_has_milestone_ref("at_84ef789d"));
+    assert!(!line_has_milestone_ref("at_1234abcd"));
 }

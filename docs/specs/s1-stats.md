@@ -495,9 +495,9 @@ future S4 level-up heal policy composes on top.
 | Artifact | What it proves |
 |---|---|
 | `crates/tessera-core/tests/…` unit tests: part bounds, enum validation, `Bonuses` defaults | Q1/Q3 load-time invariants; unknown attribute/derived key fails closed |
-| `crates/tessera/tests/s1_stats_formulas.rs` (headless, seeded) | §4.6 table reproduced exactly: 16 HP values, 4 accuracy/defense/hit% chains, 5 speed points, one status-modified speed; same seed ⇒ byte-identical `Derived` |
-| `crates/tessera/tests/s1_stats_pipeline.rs` | recompute fires on spawn, `StatusApplied`/`StatusExpired`, attribute write via script `set_part`, tuning hot-reload; HP clamp invariant (§5.3); fail-closed spawn without the rules script; cache absent-after-invalidate (s0 §7 behavior preserved) |
-| `crates/tessera/tests/s1_save_roundtrip.rs` | save → load ⇒ identical `Attributes`/`Level`/`Bonuses`, no `Derived` in the snapshot, derived values rebuilt and equal pre-save; v1 save rejected as `UnsupportedVersion` |
+| `crates/tessera/tests/stats_formula_fixtures.rs` (headless, seeded) | §4.6 table reproduced exactly: 16 HP values, 4 accuracy/defense/hit% chains, 5 speed points, one status-modified speed; same seed ⇒ byte-identical `Derived` |
+| `crates/tessera/tests/stats_recompute_pipeline.rs` | recompute fires on spawn, `StatusApplied`/`StatusExpired`, attribute write via script `set_part`, tuning hot-reload; HP clamp invariant (§5.3); fail-closed spawn without the rules script; cache absent-after-invalidate (s0 §7 behavior preserved) |
+| `crates/tessera/tests/stats_save_roundtrip.rs` | save → load ⇒ identical `Attributes`/`Level`/`Bonuses`, no `Derived` in the snapshot, derived values rebuilt and equal pre-save; v1 save rejected as `UnsupportedVersion` |
 | `crates/tessera/src/devtools` tests | inspector snapshot shows live `Derived` after a dirtying event (§7) |
 | `--headless` demo run | the event log shows `RecomputeDerived` after spawn and after the Shield Bash `Status_Staggered` application; the goblin's speed reflects its Agility (no longer a flat 100) |
 

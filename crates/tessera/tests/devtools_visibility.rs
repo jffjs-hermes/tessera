@@ -107,7 +107,7 @@ fn demo_zone() -> Zone {
             }
         }
     }
-    Zone::from_cells("s1", 12, 12, Point::new(1, 1), cells)
+    Zone::from_cells("arena", 12, 12, Point::new(1, 1), cells)
 }
 
 fn demo_sim(
@@ -178,8 +178,7 @@ fn console_ctx<'a>(
 }
 
 fn tmp_save_dir(tag: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("tessera-s1-devtools-{tag}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("tessera-devtools-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp save dir");
     dir

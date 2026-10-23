@@ -440,7 +440,7 @@ impl WorldAccess for SimWorldAccess {
             });
         }
         // stats stat parts: a scripted write to `Attributes`/`Level` mutates the
-        // typed part (whole-part replace, s0 ) and queues a recompute —
+        // typed part (whole-part replace) and queues a recompute —
         // this is the declared "write to Attributes/Level" dirtying event
         // . Bounds stay native load-time invariants; an
         // out-of-range write fails closed here just like a bad load.
