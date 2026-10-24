@@ -692,6 +692,7 @@ impl Sim {
             clock: scheduler.ticks(),
             actors,
             rng: self.ctx.rng.clone(),
+            streams: self.ctx.streams().clone(),
             player_turns: self.player_turns,
             facing: self.facing,
         })
@@ -767,6 +768,9 @@ impl Sim {
         // Live context over the restored broker, re-registering the default
         // handlers (never saved — wiring is re-created at zone start).
         let mut ctx = SimContext::shared(broker.clone(), zone, data.rng);
+        // Restore every named stream exactly where it stood, so a save taken
+        // mid-fight resumes combat draws from the same point.
+        ctx.restore_streams(data.streams.clone());
         let event_lines = Arc::new(Mutex::new(Vec::new()));
         install_default_handlers(&mut ctx, bridge.as_ref(), event_lines.clone());
         let recompute_handler =
@@ -1017,10 +1021,24 @@ impl Sim {
             .position(actor)
             .map(|p| (p.x, p.y))
             .unwrap_or((0, 0));
-        let report = {
+        let mut report = {
             let mut sched = self.scheduler.lock().unwrap_or_else(|p| p.into_inner());
             sched.take_turn(&mut self.ctx, actor, action)?
         };
+        // Progress rule for scheduled actors: an action the native pipeline
+        // rejects (out of weapon reach, a wall, a blocking occupant) charges
+        // no energy, so the scheduler would hand this actor the same turn
+        // again on the next pass and the clock would never advance past it —
+        // the player would never act again. A scheduled turn is always a step
+        // of the clock, so an actor whose action was rejected waits that turn
+        // out instead. (The player's own cancelled actions stay free: the
+        // player is externally driven, so nothing spins on them.)
+        if !report.charged {
+            report = {
+                let mut sched = self.scheduler.lock().unwrap_or_else(|p| p.into_inner());
+                sched.take_turn(&mut self.ctx, actor, TurnAction::Wait)?
+            };
+        }
         // Post-turn derived-speed net (same as the player path).
         self.sync_derived_speeds();
         self.log.push(self.format_log_line(&report, from));
@@ -1483,11 +1501,16 @@ fn install_default_handlers(
             _ => HandlerAction::Cancel,
         }
     });
-    // Reference demo combat: an Attack on a Health-carrying defender
-    // resolves to a base `TakeDamage`, and a TakeDamage always reduces
-    // `Health.hp`. This is the native "base hit" the Zapper's scripted zap
-    // stacks on top of.
-    install_base_combat(ctx);
+    // Reference demo combat: the ordered attack pipeline (legality ->
+    // BeforeHit -> hit/block/damage rolls -> Hit/Missed/Blocked ->
+    // TakeDamage), and a TakeDamage that always reduces `Health.hp`. This is
+    // the native half the Zapper's scripted zap stacks on.
+    let combat_tuning = bridge
+        .and_then(|b| b.world())
+        .and_then(|w| w.tuning_values(tessera_core::combat::TUNING_TABLE))
+        .and_then(|values| tessera_core::combat::CombatTuning::from_values(&values).ok())
+        .unwrap_or_default();
+    install_base_combat(ctx, combat_tuning);
     // The headless event-log mapping: deterministic `EVENT TakeDamage` /
     // `EVENT ApplyStatus` lines for the declarative ability path (the
     // `EVENT UseAbility` turn line is logged by the sim on the action turn).
@@ -1536,6 +1559,49 @@ fn install_event_logging(ctx: &mut SimContext, event_lines: Arc<Mutex<Vec<String
             "EVENT ApplyStatus target={} status={}",
             entity_to_id(ev.target),
             ev.status
+        ));
+    });
+    // The attack-pipeline headless mapping: one line per resolution step, so a
+    // demo run's log shows the ordered pipeline (hit roll and its chance, the
+    // crit flag, a block, a miss) ahead of the damage line.
+    let sink = event_lines.clone();
+    ctx.register_observer::<tessera_core::events::BeforeHit>(LATE, move |_ctx, ev| {
+        sink.lock().unwrap_or_else(|p| p.into_inner()).push(format!(
+            "EVENT BeforeHit attacker={} defender={} hit_pct={}",
+            entity_to_id(ev.attacker),
+            entity_to_id(ev.defender),
+            ev.hit_pct
+        ));
+    });
+    let sink = event_lines.clone();
+    ctx.register_observer::<tessera_core::events::Hit>(LATE, move |_ctx, ev| {
+        sink.lock().unwrap_or_else(|p| p.into_inner()).push(format!(
+            "EVENT Hit attacker={} defender={} roll={} hit_pct={} crit={}",
+            entity_to_id(ev.attacker),
+            entity_to_id(ev.defender),
+            ev.roll,
+            ev.hit_pct,
+            ev.crit
+        ));
+    });
+    let sink = event_lines.clone();
+    ctx.register_observer::<tessera_core::events::Missed>(LATE, move |_ctx, ev| {
+        sink.lock().unwrap_or_else(|p| p.into_inner()).push(format!(
+            "EVENT Missed attacker={} defender={} roll={} hit_pct={}",
+            entity_to_id(ev.attacker),
+            entity_to_id(ev.defender),
+            ev.roll,
+            ev.hit_pct
+        ));
+    });
+    let sink = event_lines.clone();
+    ctx.register_observer::<tessera_core::events::Blocked>(LATE, move |_ctx, ev| {
+        sink.lock().unwrap_or_else(|p| p.into_inner()).push(format!(
+            "EVENT Blocked attacker={} defender={} roll={} block_pct={}",
+            entity_to_id(ev.attacker),
+            entity_to_id(ev.defender),
+            ev.roll,
+            ev.block_pct
         ));
     });
     // The stats headless demo mapping: one deterministic line per recompute, so
@@ -1635,10 +1701,11 @@ fn install_recompute_derived(
 /// When a `TakeDamage` clamps `hp` to zero, the native applicator dispatches
 /// the reserved [`Death`] event exactly once: the "was_alive" guard means a
 /// second hit on an already-dead entity (`hp == 0` at entry) does not re-emit.
-fn install_base_combat(ctx: &mut SimContext) {
-    use tessera_core::events::{Death, Health, PART_HEALTH, install_minimal_combat};
-    // Attack -> TakeDamage (base 1), cancels when the defender has no Health.
-    install_minimal_combat(ctx);
+fn install_base_combat(ctx: &mut SimContext, tuning: tessera_core::combat::CombatTuning) {
+    use tessera_core::events::{Death, Health, PART_HEALTH};
+    // The ordered attack pipeline: `Attack` legality (EARLY) and resolution
+    // (NORMAL) — hit, block, damage rolls on the named combat stream.
+    tessera_core::combat::install_combat(ctx, tuning);
     // TakeDamage applicator: the actual native damage the base hit inflicts.
     ctx.register::<TakeDamage>(NORMAL, |ctx, ev| {
         let mut reduce = false;
@@ -1993,7 +2060,7 @@ mod tests {
             .insert_part(
                 goblin,
                 PART_POSITION,
-                Box::new(Position { x: 4, y: 4 }) as Box<dyn Part>,
+                Box::new(Position { x: 3, y: 2 }) as Box<dyn Part>,
             )
             .unwrap();
         broker
@@ -2196,6 +2263,34 @@ mod tests {
                 orig.next_u32(),
                 rel.next_u32(),
                 "RNG stream continues identically"
+            );
+        }
+        // The named per-system streams are part of the snapshot too. The
+        // goblin's attacks draw on the "combat" stream, so if the prefix
+        // trained one, the load must resume it at the same word position —
+        // otherwise a reloaded mid-fight world would replay different rolls
+        // even though the parent stream matched.
+        let label = tessera_core::combat::COMBAT_STREAM;
+        let saved_stream = before
+            .streams
+            .get(label)
+            .unwrap_or_else(|| panic!("the prefix must have drawn on {label:?}"));
+        let restored = loaded
+            .ctx
+            .streams()
+            .get(label)
+            .unwrap_or_else(|| panic!("the loaded context must carry {label:?}"));
+        assert_eq!(
+            saved_stream, restored,
+            "named stream state survives the save"
+        );
+        let mut orig_stream = saved_stream.clone();
+        let mut rel_stream = restored.clone();
+        for _ in 0..8 {
+            assert_eq!(
+                orig_stream.next_u32(),
+                rel_stream.next_u32(),
+                "named combat stream continues identically"
             );
         }
     }

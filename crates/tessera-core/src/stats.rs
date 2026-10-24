@@ -18,8 +18,9 @@
 //! platform-dependent order.
 
 use serde::de::Error as _;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::combat::DamageType;
 use crate::ecs::{PartError, PartRegistry};
 
 /// `parts.Attributes`: the five native attribute values.
@@ -133,7 +134,11 @@ pub struct Level {
 /// `parts.Bonuses`: flat additive bonuses for the derived stats, sourced by
 /// gear/skill layers that land later. All fields default to 0 so a partial
 /// table (`parts.Bonuses = { accuracy = 3 }`) loads as zeros elsewhere.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+///
+/// The per-type `resist`/`threshold` maps are the *innate* sources of the
+/// combat cache (race, skills): the rules script adds them to whatever the
+/// equipped items contribute, so an equipped item is never written back here.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bonuses {
     #[serde(default)]
@@ -146,6 +151,12 @@ pub struct Bonuses {
     pub damage_flat: i64,
     #[serde(default)]
     pub block: i64,
+    /// Innate per-type resistance in percent.
+    #[serde(default)]
+    pub resist: std::collections::BTreeMap<DamageType, i64>,
+    /// Innate per-type flat damage reduction.
+    #[serde(default)]
+    pub threshold: std::collections::BTreeMap<DamageType, i64>,
 }
 
 /// One attribute value, validated to `[ATTRIBUTE_MIN, ATTRIBUTE_MAX]`.
@@ -278,6 +289,24 @@ pub fn register_all(registry: &mut PartRegistry) -> Result<(), PartError> {
     Ok(())
 }
 
+impl Serialize for AttributeName {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for AttributeName {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        AttributeName::from_str(&name).ok_or_else(|| {
+            D::Error::custom(format!(
+                "unknown attribute '{name}' (expected one of: {})",
+                AttributeName::SORTED.map(AttributeName::as_str).join(", ")
+            ))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,11 +395,13 @@ mod tests {
                 dodge: 0,
                 ac: 0,
                 damage_flat: 0,
-                block: 0
+                block: 0,
+                resist: Default::default(),
+                threshold: Default::default(),
             }
         );
         // Empty table deserializes to zeros.
-        let b: Bonuses = parse(r#"{}"#).unwrap();
+        let b: Bonuses = parse(r#"{ }"#).unwrap();
         assert_eq!(b, Bonuses::default());
         // Partial tables fill zeros elsewhere.
         let b: Bonuses = parse(r#"{ accuracy = 3 }"#).unwrap();
@@ -378,15 +409,22 @@ mod tests {
             b,
             Bonuses {
                 accuracy: 3,
-                dodge: 0,
-                ac: 0,
-                damage_flat: 0,
-                block: 0
+                ..Default::default()
             }
         );
         let b: Bonuses = parse(r#"{ ac = 2 }"#).unwrap();
         assert_eq!(b.ac, 2);
         assert_eq!(b.accuracy, 0);
+        // Innate per-type resistances load and reject unknown types.
+        let b: Bonuses =
+            parse(r#"{ resist = { slash = 10 }, threshold = { pierce = 2 } }"#).unwrap();
+        assert_eq!(b.resist.get(&crate::combat::DamageType::Slash), Some(&10));
+        assert_eq!(
+            b.threshold.get(&crate::combat::DamageType::Pierce),
+            Some(&2)
+        );
+        let err = parse::<Bonuses>(r#"{ resist = { acid = 10 } }"#).unwrap_err();
+        assert!(err.to_string().contains("acid"), "{err}");
         // Unknown field fails closed.
         let err = parse::<Bonuses>(r#"{ accuracy = 3, evasion = 1 }"#).unwrap_err();
         assert!(err.to_string().contains("evasion"), "{err}");

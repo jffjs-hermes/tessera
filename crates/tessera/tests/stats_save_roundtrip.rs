@@ -9,9 +9,9 @@
 //!   `NON_PERSISTENT_PARTS` skip-list), the save never serializes it, and the
 //!   load path recomputes every restored stat-ful entity so the loaded world
 //!   has live derived values equal to the pre-save ones;
-//! - `SAVE_FORMAT_VERSION` is 2 and a v1 save (the header patched back to the
+//! - `SAVE_FORMAT_VERSION` is 3 and a v1 save (the header patched back to the
 //!   pre-stats format) rejects as `UnsupportedVersion { found: 1, supported:
-//!   2 }` — the named behavior, not an accident.
+//!   SAVE_FORMAT_VERSION }` — the named behavior, not an accident.
 //!
 //! Applied statuses stay non-persistent in this slice (status persistence is a
 //! later slice),
@@ -272,8 +272,8 @@ fn save_load_round_trip_preserves_stat_parts_and_rebuilds_derived() {
 }
 
 /// A v1 save (pre-stats format) loads as `UnsupportedVersion { found: 1,
-/// supported: 2 }` — the named rejection, and `SAVE_FORMAT_VERSION` is the
-/// bump the design doc pins.
+/// supported: SAVE_FORMAT_VERSION }` — the named rejection, and
+/// `SAVE_FORMAT_VERSION` is the bump the design doc pins.
 #[test]
 fn v1_saves_are_rejected_as_unsupported_version() {
     let (world, _tiles, broker, bridge) = load_real_content(Path::new(MODS));
@@ -281,7 +281,7 @@ fn v1_saves_are_rejected_as_unsupported_version() {
     let (sim, _bridge, _player, _goblin) = round_trip_sim(&world, broker, bridge);
 
     assert_eq!(
-        SAVE_FORMAT_VERSION, 2,
+        SAVE_FORMAT_VERSION, 3,
         "the format bump is the named constant"
     );
     let data = sim.save(&hooks).expect("save");
@@ -293,7 +293,10 @@ fn v1_saves_are_rejected_as_unsupported_version() {
     match load_from_bytes(&bytes) {
         Err(SaveError::UnsupportedVersion { found, supported }) => {
             assert_eq!(found, 1);
-            assert_eq!(supported, 2);
+            assert_eq!(
+                supported, SAVE_FORMAT_VERSION,
+                "the rejection names the current format version"
+            );
         }
         other => panic!("expected UnsupportedVersion for a v1 save, got {other:?}"),
     }
