@@ -33,13 +33,16 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::events::{Attack, BeforeHit, Blocked, HandlerAction, Hit, Missed, PART_HEALTH, SimContext, TakeDamage, EARLY, NORMAL};
+use crate::ecs::PartTypeId;
+use crate::events::Health;
+use crate::events::{
+    Attack, BeforeHit, Blocked, EARLY, HandlerAction, Hit, Missed, NORMAL, PART_HEALTH, SimContext,
+    TakeDamage,
+};
+use crate::kinds::TuningValue;
 use crate::rng::SimRng;
 use crate::script_part::PartValue;
 use crate::stats::{AttributeName, Attributes, Bonuses, PART_ATTRIBUTES, PART_BONUSES};
-use crate::events::Health;
-use crate::ecs::PartTypeId;
-use crate::kinds::TuningValue;
 
 /// `parts.Combat`: the cached combat inputs the rules script writes.
 pub const PART_COMBAT: &str = "Combat";
@@ -125,7 +128,10 @@ impl DamageType {
     /// Whether a shield can block this type: the three physical types only.
     /// Magic is never blocked.
     pub fn is_physical(self) -> bool {
-        matches!(self, DamageType::Slash | DamageType::Pierce | DamageType::Blunt)
+        matches!(
+            self,
+            DamageType::Slash | DamageType::Pierce | DamageType::Blunt
+        )
     }
 }
 
@@ -184,7 +190,9 @@ impl Combat {
         let mut combat = Combat::default();
         for (key, value) in fields {
             let PartValue::Int(n) = value else {
-                return Err(format!("Combat field '{key}' must be an integer, wrote {value:?}"));
+                return Err(format!(
+                    "Combat field '{key}' must be an integer, wrote {value:?}"
+                ));
             };
             match key.as_str() {
                 "block" => combat.block = n,
@@ -265,7 +273,10 @@ impl<'de> Deserialize<'de> for Weapon {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let w = WeaponWire::deserialize(deserializer)?;
         if w.lo < 0 {
-            return Err(serde::de::Error::custom(format!("weapon lo must be >= 0, found {}", w.lo)));
+            return Err(serde::de::Error::custom(format!(
+                "weapon lo must be >= 0, found {}",
+                w.lo
+            )));
         }
         if w.hi < w.lo {
             return Err(serde::de::Error::custom(format!(
@@ -325,10 +336,12 @@ impl CombatTuning {
     /// required and must be an integer; a missing key is an error rather than a
     /// silent default.
     pub fn from_values(values: &BTreeMap<String, TuningValue>) -> Result<CombatTuning, String> {
-        let mut required = |key: &str| -> Result<i64, String> {
+        let required = |key: &str| -> Result<i64, String> {
             match values.get(key) {
                 Some(TuningValue::Int(n)) => Ok(*n),
-                Some(other) => Err(format!("Tuning_Combat.{key} must be an integer, found {other:?}")),
+                Some(other) => Err(format!(
+                    "Tuning_Combat.{key} must be an integer, found {other:?}"
+                )),
                 None => Err(format!("Tuning_Combat.{key} is missing")),
             }
         };
@@ -447,7 +460,7 @@ pub fn damage_amount(
         return 0;
     }
     let resist = resist.clamp(tuning.res_floor, tuning.res_ceiling);
-    damage = damage * (100 - resist).div_euclid(100) - threshold;
+    damage = (damage * (100 - resist)).div_euclid(100) - threshold;
     damage.max(tuning.min_damage)
 }
 
@@ -522,7 +535,11 @@ pub fn register_all(registry: &mut crate::ecs::PartRegistry) -> Result<(), crate
 }
 
 /// Read a typed part, or `None`.
-fn part<T: crate::ecs::Part + Clone>(ctx: &SimContext, entity: hecs::Entity, name: &str) -> Option<T> {
+fn part<T: crate::ecs::Part + Clone>(
+    ctx: &SimContext,
+    entity: hecs::Entity,
+    name: &str,
+) -> Option<T> {
     ctx.broker
         .read()
         .unwrap_or_else(|p| p.into_inner())
@@ -588,7 +605,10 @@ pub fn install_combat(ctx: &mut SimContext, tuning: CombatTuning) {
 
     ctx.register::<Attack>(NORMAL, move |ctx, ev| {
         let weapon = wielded_weapon(ctx, ev.attacker);
-        let stat_value = match (weapon.stat, part::<Attributes>(ctx, ev.attacker, PART_ATTRIBUTES)) {
+        let stat_value = match (
+            weapon.stat,
+            part::<Attributes>(ctx, ev.attacker, PART_ATTRIBUTES),
+        ) {
             (Some(AttributeName::Might), Some(a)) => a.might,
             (Some(AttributeName::Agility), Some(a)) => a.agility,
             (Some(AttributeName::Toughness), Some(a)) => a.toughness,
@@ -597,9 +617,13 @@ pub fn install_combat(ctx: &mut SimContext, tuning: CombatTuning) {
             _ => 0,
         };
         let attacker = AttackInputs {
-            accuracy: part::<crate::effects::Derived>(ctx, ev.attacker, crate::effects::PART_DERIVED)
-                .and_then(|d| d.values.get("accuracy").copied())
-                .unwrap_or(0),
+            accuracy: part::<crate::effects::Derived>(
+                ctx,
+                ev.attacker,
+                crate::effects::PART_DERIVED,
+            )
+            .and_then(|d| d.values.get("accuracy").copied())
+            .unwrap_or(0),
             stat_value,
             flat_damage: part::<Bonuses>(ctx, ev.attacker, PART_BONUSES)
                 .map(|b| b.damage_flat)
@@ -607,9 +631,13 @@ pub fn install_combat(ctx: &mut SimContext, tuning: CombatTuning) {
             weapon: weapon.clone(),
         };
         let defender = DefenseInputs {
-            defense: part::<crate::effects::Derived>(ctx, ev.defender, crate::effects::PART_DERIVED)
-                .and_then(|d| d.values.get("defense").copied())
-                .unwrap_or(0),
+            defense: part::<crate::effects::Derived>(
+                ctx,
+                ev.defender,
+                crate::effects::PART_DERIVED,
+            )
+            .and_then(|d| d.values.get("defense").copied())
+            .unwrap_or(0),
             combat: part::<Combat>(ctx, ev.defender, PART_COMBAT).unwrap_or_default(),
         };
         let mut hit_pct = hit_chance(&tuning, attacker.accuracy, defender.defense);
@@ -630,7 +658,6 @@ pub fn install_combat(ctx: &mut SimContext, tuning: CombatTuning) {
         let inputs = attacker;
         let stream = ctx.stream(COMBAT_STREAM);
         let outcome = resolve_attack_at(&tuning, hit_pct, &inputs, &defender, stream);
-        drop(stream);
 
         match outcome {
             Resolution::Missed { roll, hit_pct } => {
@@ -740,7 +767,8 @@ mod tests {
 
     #[test]
     fn combat_part_validates_its_payload() {
-        let c: Combat = parse("{ block = 19, resist = { slash = 30 }, threshold = { blunt = 2 } }").unwrap();
+        let c: Combat =
+            parse("{ block = 19, resist = { slash = 30 }, threshold = { blunt = 2 } }").unwrap();
         assert_eq!(c.block, 19);
         assert_eq!(c.resist_of(DamageType::Slash), 30);
         assert_eq!(c.resist_of(DamageType::Pierce), 0);
@@ -776,11 +804,8 @@ mod tests {
         )]))
         .unwrap_err();
         assert!(err.contains("acid"), "{err}");
-        let err = Combat::from_fields(BTreeMap::from([(
-            "dodge".to_string(),
-            PartValue::Int(1),
-        )]))
-        .unwrap_err();
+        let err = Combat::from_fields(BTreeMap::from([("dodge".to_string(), PartValue::Int(1))]))
+            .unwrap_err();
         assert!(err.contains("dodge"), "{err}");
     }
 
@@ -823,16 +848,23 @@ mod tests {
     fn damage_chain_matches_the_worked_examples() {
         let t = tuning();
         // Knight: longsword 4..8, Might 14 (mod 2), flat +1 -> 7..11.
-        let knight: Vec<i64> = (4..=8).map(|b| damage_amount(&t, b, 14, 1, false, 0, 0)).collect();
+        let knight: Vec<i64> = (4..=8)
+            .map(|b| damage_amount(&t, b, 14, 1, false, 0, 0))
+            .collect();
         assert_eq!(knight, vec![7, 8, 9, 10, 11]);
         // Crit: 7*150//100 = 10 ... 11*150//100 = 16.
-        let crits: Vec<i64> = (4..=8).map(|b| damage_amount(&t, b, 14, 1, true, 0, 0)).collect();
+        let crits: Vec<i64> = (4..=8)
+            .map(|b| damage_amount(&t, b, 14, 1, true, 0, 0))
+            .collect();
         assert_eq!(crits, vec![10, 12, 13, 15, 16]);
-        // Goblin short blade 3..6 against mail (slash 30): 3->2, 4->2, 5->3, 6->4.
-        let mailed: Vec<i64> = (3..=6).map(|b| damage_amount(&t, b, 13, 0, false, 30, 0)).collect();
+        // Goblin short blade 3..6 against mail (slash 30), no stat modifier:
+        // 3->2, 4->2, 5->3, 6->4.
+        let mailed: Vec<i64> = (3..=6)
+            .map(|b| damage_amount(&t, b, 10, 0, false, 30, 0))
+            .collect();
         assert_eq!(mailed, vec![2, 2, 3, 4]);
         // Threshold subtracts after resistance; the floor then applies.
-        assert_eq!(damage_amount(&t, 5, 13, 0, false, 30, 3), 1);
+        assert_eq!(damage_amount(&t, 5, 10, 0, false, 30, 3), 1);
         // Resistance 100 is immunity: no threshold, no floor.
         assert_eq!(damage_amount(&t, 9, 14, 1, false, 100, 5), 0);
         // Resistance is clamped into the tuning range.
@@ -872,7 +904,13 @@ mod tests {
         // A miss takes exactly one draw and never rolls damage.
         let mut rolls = Scripted::new(&[80], &[]);
         let outcome = resolve_attack(&t, &attacker, &defender, &mut rolls);
-        assert!(matches!(outcome, Resolution::Missed { roll: 80, hit_pct: 54 }));
+        assert!(matches!(
+            outcome,
+            Resolution::Missed {
+                roll: 80,
+                hit_pct: 54
+            }
+        ));
         assert_eq!(rolls.calls, vec!["d100"]);
 
         // A blocked hit takes two draws and never rolls damage.

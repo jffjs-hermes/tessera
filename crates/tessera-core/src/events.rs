@@ -1507,7 +1507,10 @@ mod tests {
             Some(1),
             "an unarmed landed hit deals its 1 generic point"
         );
-        assert!(*seen_hit.borrow(), "a landed hit fires Hit before TakeDamage");
+        assert!(
+            *seen_hit.borrow(),
+            "a landed hit fires Hit before TakeDamage"
+        );
     }
 
     #[test]

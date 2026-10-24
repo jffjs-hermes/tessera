@@ -416,9 +416,13 @@ mod tests {
         assert_eq!(b.ac, 2);
         assert_eq!(b.accuracy, 0);
         // Innate per-type resistances load and reject unknown types.
-        let b: Bonuses = parse(r#"{ resist = { slash = 10 }, threshold = { pierce = 2 } }"#).unwrap();
+        let b: Bonuses =
+            parse(r#"{ resist = { slash = 10 }, threshold = { pierce = 2 } }"#).unwrap();
         assert_eq!(b.resist.get(&crate::combat::DamageType::Slash), Some(&10));
-        assert_eq!(b.threshold.get(&crate::combat::DamageType::Pierce), Some(&2));
+        assert_eq!(
+            b.threshold.get(&crate::combat::DamageType::Pierce),
+            Some(&2)
+        );
         let err = parse::<Bonuses>(r#"{ resist = { acid = 10 } }"#).unwrap_err();
         assert!(err.to_string().contains("acid"), "{err}");
         // Unknown field fails closed.
