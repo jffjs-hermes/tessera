@@ -336,7 +336,7 @@ impl CombatTuning {
     /// required and must be an integer; a missing key is an error rather than a
     /// silent default.
     pub fn from_values(values: &BTreeMap<String, TuningValue>) -> Result<CombatTuning, String> {
-        let mut required = |key: &str| -> Result<i64, String> {
+        let required = |key: &str| -> Result<i64, String> {
             match values.get(key) {
                 Some(TuningValue::Int(n)) => Ok(*n),
                 Some(other) => Err(format!(
@@ -659,9 +659,12 @@ pub fn install_combat(ctx: &mut SimContext, tuning: CombatTuning) {
         }
 
         let inputs = attacker;
-        let stream = ctx.stream(COMBAT_STREAM);
-        let outcome = resolve_attack_at(&tuning, hit_pct, &inputs, &defender, stream);
-        drop(stream);
+        // Scoped so the mutable borrow of `ctx` ends before the outcome events
+        // are dispatched below.
+        let outcome = {
+            let stream = ctx.stream(COMBAT_STREAM);
+            resolve_attack_at(&tuning, hit_pct, &inputs, &defender, stream)
+        };
 
         match outcome {
             Resolution::Missed { roll, hit_pct } => {
@@ -864,7 +867,7 @@ mod tests {
         // Goblin short blade 3..6 against mail (slash 30): 3->2, 4->2, 5->3, 6->4.
         // Stat 10 is mod 0: this vector pins the resistance arithmetic (the
         // Knight row above already pins the stat modifier), matching the
-        // spec's 3->2, 4->2, 5->3, 6->4 worked values.
+        // worked 3->2, 4->2, 5->3, 6->4 values.
         let mailed: Vec<i64> = (3..=6)
             .map(|b| damage_amount(&t, b, 10, 0, false, 30, 0))
             .collect();
