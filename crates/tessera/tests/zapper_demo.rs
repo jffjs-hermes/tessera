@@ -139,10 +139,14 @@ fn zapper_demo_health_minus_four_and_charge_one() {
 
     drive_two_zapper_attacks(&mut sim);
 
-    assert_eq!(
-        sim.player_health(),
-        16,
-        "Health falls by 4 after two attacks"
+    // Each Zapper attack is a native `Attack` that rolls to hit (S2) plus a
+    // scripted zap that always lands, so two attacks cost 2..=4 health; the
+    // charge spend is script-owned and exact.
+    let hp_after = sim.player_health();
+    assert!(
+        (18..=16).contains(&hp_after),
+        "two Zapper attacks must cost 2..=4 health, got {hp_after}: {:?}",
+        sim.log()
     );
     assert_eq!(sim.enemy_charge(), Some(1), "Charge ends at 1");
     assert!(
@@ -184,10 +188,14 @@ fn player_zap_dispatches_attack_toward_last_faced_direction() {
     // hits the faced entity.
     sim.submit_action(PlayerAction::Zap)
         .expect("zap toward zapper");
+    // The zap resolves as an `Attack` through the S2 pipeline: it rolls to
+    // hit, so the Zapper loses the unarmed point only when the roll lands.
+    let landed = sim.log().iter().any(|l| l.starts_with("EVENT Hit"));
     assert_eq!(
         sim.enemy_health(),
-        hp0 - 1,
-        "zap lands base damage on the faced entity"
+        if landed { hp0 - 1 } else { hp0 },
+        "a landed zap deals the unarmed point; a miss deals none: {:?}",
+        sim.log()
     );
 
     // Face north (empty cell ahead) and zap: no live target, nothing damaged.

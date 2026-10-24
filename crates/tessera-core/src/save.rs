@@ -24,12 +24,12 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::combat::{PART_COMBAT, PART_WEAPON, Weapon};
 use crate::ecs::{EntityBroker, Part, PartError, PartRegistry, PartTypeId};
 use crate::effects::{Abilities, Charges, PART_ABILITIES, PART_CHARGES, PART_DERIVED};
 use crate::events::{Health, PART_HEALTH, PART_POSITION, Position};
 use crate::rng::SimRng;
 use crate::script_part::{PartValue, ScriptPart};
-use crate::combat::{Weapon, PART_COMBAT, PART_WEAPON};
 use crate::stats::{Attributes, Bonuses, Level, PART_ATTRIBUTES, PART_BONUSES, PART_LEVEL};
 use crate::turns::{ActorEnergy, PART_ENERGY};
 use crate::world::RenderTile;
@@ -1235,7 +1235,7 @@ mod tests {
             Err(SaveError::UnsupportedVersion { found, supported }) => {
                 assert_eq!(found, 1);
                 assert_eq!(supported, SAVE_FORMAT_VERSION);
-                assert_eq!(supported, 2, "the constant is the named bump");
+                assert_eq!(supported, 3, "the constant is the named bump");
             }
             other => panic!("expected UnsupportedVersion for v1, got {other:?}"),
         }

@@ -272,8 +272,8 @@ fn save_load_round_trip_preserves_stat_parts_and_rebuilds_derived() {
 }
 
 /// A v1 save (pre-stats format) loads as `UnsupportedVersion { found: 1,
-/// supported: 2 }` — the named rejection, and `SAVE_FORMAT_VERSION` is the
-/// bump the design doc pins.
+/// supported: SAVE_FORMAT_VERSION }` — the named rejection, and
+/// `SAVE_FORMAT_VERSION` is the bump the design doc pins.
 #[test]
 fn v1_saves_are_rejected_as_unsupported_version() {
     let (world, _tiles, broker, bridge) = load_real_content(Path::new(MODS));
@@ -281,7 +281,7 @@ fn v1_saves_are_rejected_as_unsupported_version() {
     let (sim, _bridge, _player, _goblin) = round_trip_sim(&world, broker, bridge);
 
     assert_eq!(
-        SAVE_FORMAT_VERSION, 2,
+        SAVE_FORMAT_VERSION, 3,
         "the format bump is the named constant"
     );
     let data = sim.save(&hooks).expect("save");

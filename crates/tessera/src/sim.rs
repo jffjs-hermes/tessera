@@ -1021,10 +1021,24 @@ impl Sim {
             .position(actor)
             .map(|p| (p.x, p.y))
             .unwrap_or((0, 0));
-        let report = {
+        let mut report = {
             let mut sched = self.scheduler.lock().unwrap_or_else(|p| p.into_inner());
             sched.take_turn(&mut self.ctx, actor, action)?
         };
+        // Progress rule for scheduled actors: an action the native pipeline
+        // rejects (out of weapon reach, a wall, a blocking occupant) charges
+        // no energy, so the scheduler would hand this actor the same turn
+        // again on the next pass and the clock would never advance past it —
+        // the player would never act again. A scheduled turn is always a step
+        // of the clock, so an actor whose action was rejected waits that turn
+        // out instead. (The player's own cancelled actions stay free: the
+        // player is externally driven, so nothing spins on them.)
+        if !report.charged {
+            report = {
+                let mut sched = self.scheduler.lock().unwrap_or_else(|p| p.into_inner());
+                sched.take_turn(&mut self.ctx, actor, TurnAction::Wait)?
+            };
+        }
         // Post-turn derived-speed net (same as the player path).
         self.sync_derived_speeds();
         self.log.push(self.format_log_line(&report, from));
@@ -2046,7 +2060,7 @@ mod tests {
             .insert_part(
                 goblin,
                 PART_POSITION,
-                Box::new(Position { x: 4, y: 4 }) as Box<dyn Part>,
+                Box::new(Position { x: 3, y: 2 }) as Box<dyn Part>,
             )
             .unwrap();
         broker
@@ -2249,6 +2263,34 @@ mod tests {
                 orig.next_u32(),
                 rel.next_u32(),
                 "RNG stream continues identically"
+            );
+        }
+        // The named per-system streams are part of the snapshot too. The
+        // goblin's attacks draw on the "combat" stream, so if the prefix
+        // trained one, the load must resume it at the same word position —
+        // otherwise a reloaded mid-fight world would replay different rolls
+        // even though the parent stream matched.
+        let label = tessera_core::combat::COMBAT_STREAM;
+        let saved_stream = before
+            .streams
+            .get(label)
+            .unwrap_or_else(|| panic!("the prefix must have drawn on {label:?}"));
+        let restored = loaded
+            .ctx
+            .streams()
+            .get(label)
+            .unwrap_or_else(|| panic!("the loaded context must carry {label:?}"));
+        assert_eq!(
+            saved_stream, restored,
+            "named stream state survives the save"
+        );
+        let mut orig_stream = saved_stream.clone();
+        let mut rel_stream = restored.clone();
+        for _ in 0..8 {
+            assert_eq!(
+                orig_stream.next_u32(),
+                rel_stream.next_u32(),
+                "named combat stream continues identically"
             );
         }
     }
