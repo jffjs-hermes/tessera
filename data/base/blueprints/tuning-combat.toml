@@ -10,4 +10,4 @@
 # Specs/prototype_class_sim.py (K) — the two prototypes agree on all shared
 # values, so a single table serves both (§4.7).
 [Tuning_Combat]
-parts.Tuning = { hp_base = 10, hp_per_toughness = 2, hp_level_base = 3, hp_toughness_divisor = 3, acc_per_agility = 2, level_bonus = 1, base_hit = 50, hit_min = 5, hit_max = 95, ac_factor = 2, ac_cap = 30, speed_slope = 2, speed_min = 50, speed_max = 140, untrained_penalty = 15 }
+parts.Tuning = { hp_base = 10, hp_per_toughness = 2, hp_level_base = 3, hp_toughness_divisor = 3, acc_per_agility = 2, level_bonus = 1, base_hit = 50, hit_min = 5, hit_max = 95, ac_factor = 2, ac_cap = 30, speed_slope = 2, speed_min = 50, speed_max = 140, untrained_penalty = 15, crit_threshold = 5, crit_percent = 150, res_floor = -100, res_ceiling = 90, min_damage = 1 }

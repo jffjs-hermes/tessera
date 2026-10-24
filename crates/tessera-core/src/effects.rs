@@ -73,11 +73,11 @@ pub const PART_STATUS_EFFECTS: &str = "StatusEffects";
 /// first-expired-first-out (a deterministic cap, not an open knob).
 pub const INDEPENDENT_CAP: usize = 8;
 
-/// Fork label for the declarative `Damage` roll stream (the native
-/// counterpart of the script-visible `engine.rng("combat")` stream; both
-/// share the determinism rule — rolls are drawn from a forked stream, never
-/// the parent).
-pub const COMBAT_STREAM_LABEL: u64 = 1;
+/// Label of the combat RNG stream. Both the native attack resolver and the
+/// declarative `Damage` roll draw from this one persistent named stream (the
+/// same one the script-visible `engine.rng("combat")` names), never from the
+/// parent context stream.
+pub const COMBAT_STREAM_LABEL: &str = "combat";
 
 // ---------------------------------------------------------------------------
 // Declarative effect parts
@@ -739,7 +739,7 @@ fn resolve_use_ability(
         if dmg.lo > dmg.hi {
             return HandlerAction::Cancel;
         }
-        let mut stream = ctx.rng.fork(COMBAT_STREAM_LABEL);
+        let stream = ctx.stream(COMBAT_STREAM_LABEL);
         let span = ((dmg.hi - dmg.lo) + 1).max(1) as u32;
         let amount = dmg.lo + i64::from(stream.below(span));
         let _ = ctx.dispatch(TakeDamage {

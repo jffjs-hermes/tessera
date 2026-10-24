@@ -134,6 +134,8 @@ impl World {
             .expect("effect part names are fixed and never collide");
         crate::stats::register_all(&mut registry)
             .expect("stat part names are fixed and never collide");
+        crate::combat::register_all(&mut registry)
+            .expect("combat part names are fixed and never collide");
         Self {
             library: Arc::new(RwLock::new(BlueprintLibrary::new())),
             registry,

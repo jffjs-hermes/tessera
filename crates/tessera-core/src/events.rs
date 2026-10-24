@@ -218,6 +218,12 @@ pub struct SimContext {
     pub map: Zone,
     /// Forked, deterministic RNG available to handlers.
     pub rng: SimRng,
+    /// Named per-system streams, created lazily from [`Self::rng`] and kept for
+    /// the context's lifetime (and across save/load). This is the "one forked
+    /// stream per system" rule: the first draw of a label forks once from the
+    /// parent, and every later draw of that label touches only the cached
+    /// entry — so adding a roll in one system cannot shift another.
+    streams: BTreeMap<String, SimRng>,
     /// The typed handler store and dispatch bookkeeping.
     bus: EventBus,
     /// Deferred `RecomputeDerived` targets: dirtying observers queue here
@@ -244,9 +250,36 @@ impl SimContext {
             broker,
             map,
             rng,
+            streams: BTreeMap::new(),
             bus: EventBus::default(),
             pending_recompute: Vec::new(),
         }
+    }
+
+    /// The persistent named stream `label`, forked once from [`Self::rng`] on
+    /// first use and returned mutable thereafter. The parent is drawn exactly
+    /// once per label for the context's whole life, so a system's draws never
+    /// perturb another system's sequence.
+    pub fn stream(&mut self, label: &str) -> &mut SimRng {
+        if !self.streams.contains_key(label) {
+            let forked = self.rng.fork(stream_label_hash(label));
+            self.streams.insert(label.to_string(), forked);
+        }
+        self.streams
+            .get_mut(label)
+            .expect("stream inserted immediately above")
+    }
+
+    /// The named-stream map, for the save snapshot. Each entry carries its full
+    /// ChaCha8 state, so a load resumes every stream exactly where it stood.
+    pub fn streams(&self) -> &BTreeMap<String, SimRng> {
+        &self.streams
+    }
+
+    /// Replace the named-stream map from a loaded snapshot. Called by the
+    /// load path after the parent stream is restored.
+    pub fn restore_streams(&mut self, streams: BTreeMap<String, SimRng>) {
+        self.streams = streams;
     }
 
     /// Queue a derivable entity for recompute once the current dispatch
@@ -492,11 +525,89 @@ impl Event for Attack {
     }
 }
 
-/// Damage applied to `target`. Mutators may modify `amount` (armor,
-/// resistances) before the final mutation phase reads it. Negative `amount`
-/// is rejected at the boundary. `dtype` is the damage-type tag carried from
-/// declarative content (`"blunt"`, ...); only the tag itself is fixed now —
-/// its role in hit resolution is later work.
+/// Fired inside an [`Attack`] resolution, after the cached chance to hit is
+/// computed and before any roll is taken. Mutators may cancel it to veto the
+/// attack (a dodge/sidestep hook) or adjust `hit_pct`; observers see the final
+/// chance. The native pipeline itself registers no handler here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BeforeHit {
+    pub attacker: Entity,
+    pub defender: Entity,
+    /// The cached chance to hit the attack would use.
+    pub hit_pct: i64,
+}
+
+impl Event for BeforeHit {
+    const NAME: &'static str = "BeforeHit";
+
+    fn entity(&self) -> Entity {
+        self.defender
+    }
+}
+
+/// Fired when an [`Attack`]'s hit roll lands. Exactly one of `Hit`, `Missed`
+/// and `Blocked` fires per attack. `crit` is `roll <= min(crit_threshold,
+/// hit_pct)`; the damage itself travels in the follow-up `TakeDamage`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hit {
+    pub attacker: Entity,
+    pub defender: Entity,
+    /// The hit d100 that landed.
+    pub roll: i64,
+    /// The chance it was resolved against.
+    pub hit_pct: i64,
+    pub crit: bool,
+}
+
+impl Event for Hit {
+    const NAME: &'static str = "Hit";
+
+    fn entity(&self) -> Entity {
+        self.defender
+    }
+}
+
+/// Fired when the hit roll fails: no damage, no further draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Missed {
+    pub attacker: Entity,
+    pub defender: Entity,
+    pub roll: i64,
+    pub hit_pct: i64,
+}
+
+impl Event for Missed {
+    const NAME: &'static str = "Missed";
+
+    fn entity(&self) -> Entity {
+        self.defender
+    }
+}
+
+/// Fired when a landed physical hit is negated by the defender's shield. No
+/// damage, no damage draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Blocked {
+    pub attacker: Entity,
+    pub defender: Entity,
+    pub roll: i64,
+    pub hit_pct: i64,
+    pub block_pct: i64,
+}
+
+impl Event for Blocked {
+    const NAME: &'static str = "Blocked";
+
+    fn entity(&self) -> Entity {
+        self.defender
+    }
+}
+
+/// Damage applied to `target`. Mutators may modify `amount` (armor, statuses)
+/// before the final mutation phase reads it. Negative `amount` is rejected at
+/// the boundary, as is a `dtype` outside the closed damage-type vocabulary.
+/// `dtype` is the damage-type tag: `"generic"` (the compatibility tag, zero
+/// resistance and threshold) or one of [`crate::combat::DamageType`]'s names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TakeDamage {
     pub target: Entity,
@@ -530,6 +641,12 @@ impl Event for TakeDamage {
             return Err(EventError::InvalidPayload {
                 name: Self::NAME,
                 msg: format!("negative amount {}", self.amount),
+            });
+        }
+        if crate::combat::DamageType::from_str(&self.dtype).is_none() {
+            return Err(EventError::InvalidPayload {
+                name: Self::NAME,
+                msg: format!("unknown damage type '{}'", self.dtype),
             });
         }
         Ok(())
@@ -774,27 +891,16 @@ impl EventBus {
     }
 }
 
-/// Minimal combat walkthrough: register an
-/// `Attack` handler that cancels unless the defender has a [`Health`] part;
-/// on a hit it dispatches `TakeDamage { amount: 1, source: Attack }` with no
-/// modifiers. Extended combat is not yet implemented.
-pub fn install_minimal_combat(ctx: &mut SimContext) {
-    ctx.register::<Attack>(NORMAL, |ctx, ev| {
-        let has_health = ctx
-            .broker
-            .read()
-            .unwrap_or_else(|p| p.into_inner())
-            .typed_part::<Health>(ev.defender, &PartTypeId::new(PART_HEALTH))
-            .is_some();
-        if !has_health {
-            HandlerAction::Cancel
-        } else {
-            // Fire the follow-up TakeDamage. This is a nested dispatch of a
-            // different event type — re-entrancy control does not reject it.
-            let _ = ctx.dispatch(TakeDamage::generic(ev.defender, 1, DamageSource::Attack));
-            HandlerAction::Continue
-        }
-    });
+/// A deterministic 64-bit hash of a stream label, used as the fork label so
+/// distinct systems derive distinct streams from the parent. FNV-1a: fixed
+/// arithmetic, identical on every platform.
+pub fn stream_label_hash(label: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in label.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -1326,12 +1432,12 @@ mod tests {
         assert_eq!(ctx.position(e), Some(Position { x: 9, y: 3 }));
     }
 
-    // ---- minimal combat ----------------------------------------------------
+    // ---- the attack pipeline ----------------------------------------------
 
     #[test]
     fn attack_cancels_without_health_part() {
         let mut ctx = context();
-        install_minimal_combat(&mut ctx);
+        crate::combat::install_combat(&mut ctx, crate::combat::CombatTuning::default());
         let a = ctx
             .broker
             .write()
@@ -1351,7 +1457,7 @@ mod tests {
     #[test]
     fn attack_applies_takedamage_when_defender_has_health() {
         let mut ctx = context();
-        install_minimal_combat(&mut ctx);
+        crate::combat::install_combat(&mut ctx, crate::combat::CombatTuning::default());
         let a = ctx
             .broker
             .write()
@@ -1368,12 +1474,26 @@ mod tests {
             .insert_part(d, PartTypeId::new(PART_HEALTH), Box::new(Health { hp: 10 }))
             .unwrap();
 
+        // The `BeforeHit` mutator hook settles the chance to hit, so the test
+        // does not depend on a draw; an unarmed attacker deals its 1 point.
+        ctx.register::<BeforeHit>(NORMAL, |_ctx, ev| {
+            ev.hit_pct = 100;
+            HandlerAction::Continue
+        });
+
         // Observe the nested TakeDamage.
         let dmg = Rc::new(RefCell::new(None));
         {
             let dmg = dmg.clone();
             ctx.register_observer::<TakeDamage>(LATE, move |_ctx, ev| {
                 *dmg.borrow_mut() = Some(ev.amount);
+            });
+        }
+        let seen_hit = Rc::new(RefCell::new(false));
+        {
+            let seen_hit = seen_hit.clone();
+            ctx.register_observer::<Hit>(LATE, move |_ctx, _ev| {
+                *seen_hit.borrow_mut() = true;
             });
         }
 
@@ -1385,8 +1505,100 @@ mod tests {
         assert_eq!(
             *dmg.borrow(),
             Some(1),
-            "Attack must fire TakeDamage amount 1"
+            "an unarmed landed hit deals its 1 generic point"
         );
+        assert!(*seen_hit.borrow(), "a landed hit fires Hit before TakeDamage");
+    }
+
+    #[test]
+    fn before_hit_cancel_vetoes_the_attack() {
+        let mut ctx = context();
+        crate::combat::install_combat(&mut ctx, crate::combat::CombatTuning::default());
+        let a = ctx
+            .broker
+            .write()
+            .unwrap_or_else(|p| p.into_inner())
+            .spawn();
+        let d = spawn_actor_at(&mut ctx, 6, 5, Some(10));
+        ctx.set_position(a, Position { x: 5, y: 5 });
+        ctx.register::<BeforeHit>(NORMAL, |_ctx, _ev| HandlerAction::Cancel);
+        let dmg = Rc::new(RefCell::new(0));
+        {
+            let dmg = dmg.clone();
+            ctx.register_observer::<TakeDamage>(LATE, move |_ctx, _ev| {
+                *dmg.borrow_mut() += 1;
+            });
+        }
+        let outcome = ctx
+            .dispatch(Attack {
+                attacker: a,
+                defender: d,
+            })
+            .unwrap();
+        assert!(matches!(outcome, EventOutcome::Cancelled { .. }));
+        assert_eq!(*dmg.borrow(), 0, "a vetoed attack deals no damage");
+    }
+
+    #[test]
+    fn out_of_reach_attack_cancels_before_any_event() {
+        let mut ctx = context();
+        crate::combat::install_combat(&mut ctx, crate::combat::CombatTuning::default());
+        let a = spawn_pos(&mut ctx, 1, 1);
+        let d = spawn_actor_at(&mut ctx, 4, 1, Some(10)); // three cells away
+        let fired = Rc::new(RefCell::new(0));
+        {
+            let fired = fired.clone();
+            ctx.register_observer::<BeforeHit>(LATE, move |_ctx, _ev| {
+                *fired.borrow_mut() += 1;
+            });
+        }
+        let outcome = ctx
+            .dispatch(Attack {
+                attacker: a,
+                defender: d,
+            })
+            .unwrap();
+        assert!(matches!(outcome, EventOutcome::Cancelled { .. }));
+        assert_eq!(*fired.borrow(), 0, "legality runs before BeforeHit");
+    }
+
+    // ---- named streams -----------------------------------------------------
+
+    #[test]
+    fn named_stream_forks_once_and_persists() {
+        let mut ctx = context();
+        let parent_before = ctx.rng.clone();
+        // First use forks once from the parent...
+        let _ = ctx.stream("combat").next_u32();
+        let parent_after = ctx.rng.clone();
+        assert_ne!(
+            parent_before, parent_after,
+            "the first use of a label draws once from the parent"
+        );
+        // ...and every later use of the same label draws no more parent state.
+        let _ = ctx.stream("combat").next_u32();
+        let _ = ctx.stream("combat").next_u32();
+        assert_eq!(ctx.rng, parent_after, "later draws never touch the parent");
+        // A different label is a different stream.
+        let combat_next = ctx.stream("combat").next_u32();
+        let other_next = ctx.stream("other").next_u32();
+        assert_ne!(combat_next, other_next);
+        assert_eq!(ctx.streams().len(), 2);
+    }
+
+    #[test]
+    fn named_stream_round_trips_through_the_snapshot() {
+        let mut ctx = context();
+        let _ = ctx.stream("combat").below(100);
+        let saved = ctx.streams().clone();
+        let expected: Vec<u32> = (0..4).map(|_| ctx.stream("combat").next_u32()).collect();
+
+        let mut restored = context();
+        restored.restore_streams(saved);
+        let got: Vec<u32> = (0..4)
+            .map(|_| restored.stream("combat").next_u32())
+            .collect();
+        assert_eq!(got, expected, "a restored stream resumes exactly");
     }
 
     #[test]
