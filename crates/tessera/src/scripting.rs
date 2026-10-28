@@ -497,6 +497,16 @@ impl WorldAccess for SimWorldAccess {
             self.shared.push_recompute(entity);
             return Ok(());
         }
+        // The combat cache: written only by the rules script, validated here
+        // with the same fail-closed rules as the derived cache (non-integer
+        // fields and unknown damage types are errors).
+        if name == tessera_core::combat::PART_COMBAT {
+            let combat = tessera_core::combat::Combat::from_fields(fields)
+                .map_err(|msg| ScriptError::Internal(format!("Combat write rejected: {msg}")))?;
+            b.insert_part(e, id.clone(), Box::new(combat))
+                .map_err(|er| ScriptError::Internal(format!("set_part Combat: {er}")))?;
+            return Ok(());
+        }
         // The derived cache: the rules script's single write path. Built
         // through `Derived::from_values`, which validates every key against
         // the closed stat vocabulary (unknown/reserved keys fail closed).

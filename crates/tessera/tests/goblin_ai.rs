@@ -354,7 +354,7 @@ fn goblin_respawns_after_exactly_five_player_turns() {
         guard += 1;
         if goblin_adjacent(&broker) {
             let mut zaps = 0;
-            while creature_count(&broker) > 1 && zaps < 10 {
+            while creature_count(&broker) > 1 && zaps < 40 {
                 sim.submit_action(PlayerAction::Zap).unwrap();
                 zaps += 1;
             }
@@ -413,7 +413,7 @@ fn loaded_sim_scripted_goblin_respawn_uses_live_broker() {
         guard += 1;
         if goblin_adjacent(&broker) {
             let mut zaps = 0;
-            while creature_count(&broker) > 1 && zaps < 10 {
+            while creature_count(&broker) > 1 && zaps < 40 {
                 sim.submit_action(PlayerAction::Zap)
                     .expect("loaded sim should accept attack");
                 zaps += 1;

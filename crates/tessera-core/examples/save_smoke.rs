@@ -21,6 +21,7 @@ fn sample_data(clock: u64) -> SaveData {
         clock,
         actors: vec![],
         rng: SimRng::from_seed(1234),
+        streams: Default::default(),
         player_turns: 0,
         facing: (0, 0),
     }
