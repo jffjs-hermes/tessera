@@ -28,6 +28,7 @@ use crate::combat::{PART_COMBAT, PART_WEAPON, Weapon};
 use crate::ecs::{EntityBroker, Part, PartError, PartRegistry, PartTypeId};
 use crate::effects::{Abilities, Charges, PART_ABILITIES, PART_CHARGES, PART_DERIVED};
 use crate::events::{Health, PART_HEALTH, PART_POSITION, Position};
+use crate::items::{Equipment, Inventory, PART_EQUIPMENT, PART_INVENTORY};
 use crate::rng::SimRng;
 use crate::script_part::{PartValue, ScriptPart};
 use crate::stats::{Attributes, Bonuses, Level, PART_ATTRIBUTES, PART_BONUSES, PART_LEVEL};
@@ -38,6 +39,10 @@ use crate::world::RenderTile;
 /// 1 → 2: the stats parts are the first new persistent parts, and the legacy
 /// `Stats` part left the whitelist in the same increment (a v1 save would
 /// fail closed on the removed part anyway), so the bump lands here.
+/// 2 → 3: `Equipment` and `Inventory` join the whitelist as persistent build
+/// state; a v2 save (which cannot carry gear) is rejected as
+/// `UnsupportedVersion`, the accepted pre-release policy for every new
+/// persistent part.
 pub const SAVE_FORMAT_VERSION: u32 = 3;
 
 /// Four-byte magic that identifies a Tessera save file.
@@ -301,6 +306,39 @@ pub fn build_save_hooks(registry: &PartRegistry) -> (SaveHooks, BTreeSet<String>
             })
         },
         |v| typed_restore::<Bonuses>(PART_BONUSES, v),
+    );
+
+    // Gear build state: the fixed slot map and the ordered pack list are
+    // persistent parts (item blueprint ids only — item payloads stay in
+    // content, so a save is small and patches apply to it).
+    hooks.register(
+        PART_EQUIPMENT,
+        |part| {
+            let e = part
+                .as_any()
+                .downcast_ref::<Equipment>()
+                .ok_or_else(|| not_a(PART_EQUIPMENT, "Equipment"))?;
+            Ok(crate::items::equipment_to_toml(e))
+        },
+        |v| {
+            let e = crate::items::equipment_from_toml(v).map_err(|msg| PartError::BuildFailed {
+                name: PART_EQUIPMENT.to_string(),
+                msg,
+            })?;
+            Ok(Box::new(e))
+        },
+    );
+
+    hooks.register(
+        PART_INVENTORY,
+        |part| {
+            let i = part
+                .as_any()
+                .downcast_ref::<Inventory>()
+                .ok_or_else(|| not_a(PART_INVENTORY, "Inventory"))?;
+            Ok(crate::items::inventory_to_toml(i))
+        },
+        |v| typed_restore::<Inventory>(PART_INVENTORY, v),
     );
 
     // The wielded weapon profile: content state that must survive a save, so a
@@ -1225,19 +1263,19 @@ mod tests {
     }
 
     #[test]
-    fn v1_save_is_rejected_as_unsupported() {
-        // The first format bump: a format-1 save (pre-stats) loads as
-        // UnsupportedVersion { found: 1, supported: 2 } — rejected, not
+    fn v2_save_is_rejected_as_unsupported() {
+        // The second format bump: a format-2 save (pre-gear) loads as
+        // UnsupportedVersion { found: 2, supported: 3 } — rejected, not
         // guessed at.
         let mut bytes = save_to_bytes(&sample_data()).expect("save");
-        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
         match load_from_bytes(&bytes) {
             Err(SaveError::UnsupportedVersion { found, supported }) => {
-                assert_eq!(found, 1);
+                assert_eq!(found, 2);
                 assert_eq!(supported, SAVE_FORMAT_VERSION);
                 assert_eq!(supported, 3, "the constant is the named bump");
             }
-            other => panic!("expected UnsupportedVersion for v1, got {other:?}"),
+            other => panic!("expected UnsupportedVersion for v2, got {other:?}"),
         }
     }
 

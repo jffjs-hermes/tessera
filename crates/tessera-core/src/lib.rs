@@ -9,6 +9,7 @@ pub mod combat;
 pub mod ecs;
 pub mod effects;
 pub mod events;
+pub mod items;
 pub mod kinds;
 pub mod path;
 pub mod recompute;

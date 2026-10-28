@@ -134,6 +134,8 @@ impl World {
             .expect("effect part names are fixed and never collide");
         crate::stats::register_all(&mut registry)
             .expect("stat part names are fixed and never collide");
+        crate::items::register_all(&mut registry)
+            .expect("gear part names are fixed and never collide");
         crate::combat::register_all(&mut registry)
             .expect("combat part names are fixed and never collide");
         Self {
@@ -593,10 +595,10 @@ parts.Abilities = { list = ["Ability_Ghost"] }
         // The same single registry the loader validates against must declare a
         // storage class for every part name it accepts: the two engine parts
         // below, the six always-registered kind parts, the seven
-        // always-registered effect/status parts, and the three native stat
-        // parts (Attributes/Level/Bonuses) plus the two combat parts
-        // (Combat/Weapon) that `World::new` registers.
-        assert_eq!(w.registry.len(), 20);
+        // always-registered effect/status parts, the three native stat
+        // parts (Attributes/Level/Bonuses), the four gear parts and the two
+        // combat parts (Combat/Weapon) that `World::new` registers.
+        assert_eq!(w.registry.len(), 24);
         for (id, storage) in w.registry.iter_storage() {
             assert!(
                 matches!(storage, StorageClass::Component | StorageClass::Dynamic),
@@ -632,9 +634,9 @@ parts.Abilities = { list = ["Ability_Ghost"] }
         // Same name re-registered with a different storage class -> error.
         let err = w.register_part::<Stats>("Render").unwrap_err();
         assert!(matches!(err, PartError::DuplicatePartType(id) if id.as_str() == "Render"));
-        // The original entry is intact (6 kind + 7 effect + 3 stat + 2 combat
-        // parts are always registered by `World::new`).
-        assert_eq!(w.registry.len(), 19);
+        // The original entry is intact (6 kind + 7 effect + 3 stat + 4 gear
+        // + 2 combat parts are always registered by `World::new`).
+        assert_eq!(w.registry.len(), 23);
         assert_eq!(
             w.registry.storage(&PartTypeId::new("Render")),
             Some(StorageClass::Component)

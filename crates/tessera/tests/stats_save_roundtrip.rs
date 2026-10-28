@@ -271,11 +271,11 @@ fn save_load_round_trip_preserves_stat_parts_and_rebuilds_derived() {
     drop(b);
 }
 
-/// A v1 save (pre-stats format) loads as `UnsupportedVersion { found: 1,
-/// supported: SAVE_FORMAT_VERSION }` — the named rejection, and
-/// `SAVE_FORMAT_VERSION` is the bump the design doc pins.
+/// A v2 save (pre-gear format) loads as `UnsupportedVersion { found: 2,
+/// supported: 3 }` — the named rejection, and `SAVE_FORMAT_VERSION` is the
+/// bump the design doc pins.
 #[test]
-fn v1_saves_are_rejected_as_unsupported_version() {
+fn v2_saves_are_rejected_as_unsupported_version() {
     let (world, _tiles, broker, bridge) = load_real_content(Path::new(MODS));
     let hooks = world.save_hooks();
     let (sim, _bridge, _player, _goblin) = round_trip_sim(&world, broker, bridge);
@@ -287,18 +287,15 @@ fn v1_saves_are_rejected_as_unsupported_version() {
     let data = sim.save(&hooks).expect("save");
     let mut bytes = save_to_bytes(&data).expect("encode");
 
-    // Rewind the format-version field to 1 (the pre-stats format) — the
+    // Rewind the format-version field to 2 (the pre-gear format) — the
     // header is `TESS <u32 LE version> <u32 LE length> <zstd frame>`.
-    bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+    bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
     match load_from_bytes(&bytes) {
         Err(SaveError::UnsupportedVersion { found, supported }) => {
-            assert_eq!(found, 1);
-            assert_eq!(
-                supported, SAVE_FORMAT_VERSION,
-                "the rejection names the current format version"
-            );
+            assert_eq!(found, 2);
+            assert_eq!(supported, 3);
         }
-        other => panic!("expected UnsupportedVersion for a v1 save, got {other:?}"),
+        other => panic!("expected UnsupportedVersion for a v2 save, got {other:?}"),
     }
 }
 

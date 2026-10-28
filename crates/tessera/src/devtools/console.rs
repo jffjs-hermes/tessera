@@ -84,6 +84,21 @@ pub enum ConsoleCommand {
     Load {
         name: String,
     },
+    /// `inventory`: the player's pack and gear load summary.
+    Inventory,
+    /// `give <Item_id>`: add an item to the player's pack (capacity-checked).
+    Give {
+        item: String,
+    },
+    /// `equip <Item_id> [slot]`: move an owned item into a slot.
+    Equip {
+        item: String,
+        slot: Option<String>,
+    },
+    /// `unequip <slot>`: move one equipped item back to the pack.
+    Unequip {
+        slot: String,
+    },
     Clear,
 }
 
@@ -177,9 +192,34 @@ pub fn parse(line: &str) -> Result<ConsoleCommand, String> {
                 name: toks[0].to_string(),
             })
         }
+        "inventory" => take_no_args(cmd, &toks).map(|_| ConsoleCommand::Inventory),
+        "give" => match toks.as_slice() {
+            [item] => Ok(ConsoleCommand::Give {
+                item: item.to_string(),
+            }),
+            _ => Err("usage: give <Item_id>".into()),
+        },
+        "equip" => match toks.as_slice() {
+            [item] => Ok(ConsoleCommand::Equip {
+                item: item.to_string(),
+                slot: None,
+            }),
+            [item, slot] => Ok(ConsoleCommand::Equip {
+                item: item.to_string(),
+                slot: Some(slot.to_string()),
+            }),
+            _ => Err("usage: equip <Item_id> [slot]".into()),
+        },
+        "unequip" => match toks.as_slice() {
+            [slot] => Ok(ConsoleCommand::Unequip {
+                slot: slot.to_string(),
+            }),
+            _ => Err("usage: unequip <slot>".into()),
+        },
         other => Err(format!(
             "unknown command '{other}' — try 'help' \
-             (commands: help list entities spawn kill print stats sethp setpart tp save load clear)"
+             (commands: help list entities spawn kill print stats sethp setpart tp \
+             inventory give equip unequip save load clear)"
         )),
     }
 }
@@ -439,6 +479,47 @@ pub fn execute(sim: &mut Sim, ctx: &ConsoleContext<'_>, cmd: ConsoleCommand) -> 
                 Err(e) => ConsoleOutcome::Err(format!("load {name}: {e}")),
             }
         }
+        ConsoleCommand::Inventory => {
+            let player = sim.player_entity();
+            match sim.inventory_text(ctx.world, player) {
+                Ok(text) => ok_quiet(sim, "inventory", text),
+                Err(e) => ConsoleOutcome::Err(format!("inventory: {e}")),
+            }
+        }
+        ConsoleCommand::Give { item } => {
+            let tick = sim.ticks();
+            let player = sim.player_entity();
+            match sim.give_console(ctx.world, player, &item) {
+                Ok(text) => {
+                    sim.log_push(format!("CMD give {item} tick={tick}"));
+                    ConsoleOutcome::Ok(text)
+                }
+                Err(e) => ConsoleOutcome::Err(format!("give {item}: {e}")),
+            }
+        }
+        ConsoleCommand::Equip { item, slot } => {
+            let tick = sim.ticks();
+            let player = sim.player_entity();
+            let slot_label = slot.clone().unwrap_or_else(|| "auto".to_string());
+            match sim.equip_console(ctx.world, player, &item, slot.as_deref()) {
+                Ok(text) => {
+                    sim.log_push(format!("CMD equip {item} {slot_label} tick={tick}"));
+                    ConsoleOutcome::Ok(text)
+                }
+                Err(e) => ConsoleOutcome::Err(format!("equip {item}: {e}")),
+            }
+        }
+        ConsoleCommand::Unequip { slot } => {
+            let tick = sim.ticks();
+            let player = sim.player_entity();
+            match sim.unequip_console(ctx.world, player, &slot) {
+                Ok(text) => {
+                    sim.log_push(format!("CMD unequip {slot} tick={tick}"));
+                    ConsoleOutcome::Ok(text)
+                }
+                Err(e) => ConsoleOutcome::Err(format!("unequip {slot}: {e}")),
+            }
+        }
         ConsoleCommand::Clear => ConsoleOutcome::Ok("cleared".to_string()),
     }
 }
@@ -460,6 +541,10 @@ fn help_text() -> String {
      sethp <entity-id> <n>             write the Health part\n  \
      setpart <entity-id> <part> <k>=<v>... write Attributes/Level (recomputes Derived)\n  \
      tp <entity-id> <x> <y>            teleport (writes Position)\n  \
+     inventory                         list the player's pack and gear load\n  \
+     give <Item_id>                    add an item to the player's pack\n  \
+     equip <Item_id> [slot]            equip an owned item (recomputes Derived)\n  \
+     unequip <slot>                    return an equipped item to the pack\n  \
      save [name]                       write a save (default name \"quicksave\")\n  \
      load <name>                       replace live state from a save\n  \
      clear                             clear the transcript"
@@ -544,6 +629,7 @@ fn stats_text(sim: &Sim, world: &World, e: Entity) -> String {
     use tessera_core::stats::{
         Attributes, Bonuses, Level, PART_ATTRIBUTES, PART_BONUSES, PART_LEVEL,
     };
+    let gear = sim.gear_line(world, e);
     let b = sim.broker().read().unwrap_or_else(|p| p.into_inner());
     let id = entity_to_id(e);
     let bp = blueprint_of(world, &b, e);
@@ -563,6 +649,9 @@ fn stats_text(sim: &Sim, world: &World, e: Entity) -> String {
         v("defense"),
         v("speed")
     )];
+    if let Some(gear) = gear {
+        lines.push(format!("  gear: {gear}"));
+    }
     if let Some(a) = b.typed_part::<Attributes>(e, &PartTypeId::new(PART_ATTRIBUTES)) {
         let level = b
             .typed_part::<Level>(e, &PartTypeId::new(PART_LEVEL))
