@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::combat::{PART_COMBAT, PART_WEAPON, Weapon};
 use crate::ecs::{EntityBroker, Part, PartError, PartRegistry, PartTypeId};
 use crate::effects::{Abilities, Charges, PART_ABILITIES, PART_CHARGES, PART_DERIVED};
 use crate::events::{Health, PART_HEALTH, PART_POSITION, Position};
@@ -101,6 +102,9 @@ pub struct SaveData {
     pub actors: Vec<(u64, i64, u32)>,
     /// ChaCha8 stream state; round-trips so a loaded world resumes exactly.
     pub rng: SimRng,
+    /// The named per-system streams (label -> ChaCha8 state), so a load
+    /// resumes every system's sequence where it stood.
+    pub streams: BTreeMap<String, SimRng>,
     pub player_turns: u64,
     pub facing: (i32, i32),
 }
@@ -296,13 +300,10 @@ pub fn build_save_hooks(registry: &PartRegistry) -> (SaveHooks, BTreeSet<String>
                 .as_any()
                 .downcast_ref::<Bonuses>()
                 .ok_or_else(|| not_a(PART_BONUSES, "Bonuses"))?;
-            Ok(toml::Value::Table(toml::map::Map::from_iter([
-                ("accuracy".into(), toml::Value::Integer(p.accuracy)),
-                ("dodge".into(), toml::Value::Integer(p.dodge)),
-                ("ac".into(), toml::Value::Integer(p.ac)),
-                ("damage_flat".into(), toml::Value::Integer(p.damage_flat)),
-                ("block".into(), toml::Value::Integer(p.block)),
-            ])))
+            toml::Value::try_from(p).map_err(|e| PartError::BuildFailed {
+                name: PART_BONUSES.into(),
+                msg: e.to_string(),
+            })
         },
         |v| typed_restore::<Bonuses>(PART_BONUSES, v),
     );
@@ -338,6 +339,23 @@ pub fn build_save_hooks(registry: &PartRegistry) -> (SaveHooks, BTreeSet<String>
             Ok(crate::items::inventory_to_toml(i))
         },
         |v| typed_restore::<Inventory>(PART_INVENTORY, v),
+    );
+
+    // The wielded weapon profile: content state that must survive a save, so a
+    // loaded world still knows what its actors swing.
+    hooks.register(
+        PART_WEAPON,
+        |part| {
+            let p = part
+                .as_any()
+                .downcast_ref::<Weapon>()
+                .ok_or_else(|| not_a(PART_WEAPON, "Weapon"))?;
+            toml::Value::try_from(p).map_err(|e| PartError::BuildFailed {
+                name: PART_WEAPON.into(),
+                msg: e.to_string(),
+            })
+        },
+        |v| typed_restore::<Weapon>(PART_WEAPON, v),
     );
 
     // The declarative ability ownership stub and its runtime charge pool:
@@ -512,7 +530,7 @@ pub struct Snapshot {
 /// Rebuilt-class: it is genuinely cache, not state, so a present cache is
 /// skipped (an absent/stale `Derived` on disk would otherwise make every save
 /// of a stat-ful entity fail with `UnserializablePart`).
-pub const NON_PERSISTENT_PARTS: &[&str] = &[PART_DERIVED];
+pub const NON_PERSISTENT_PARTS: &[&str] = &[PART_DERIVED, PART_COMBAT];
 
 /// Snapshot every live entity in `broker` into [`SavedEntity`]s via `hooks`,
 /// in deterministic entity-id order. Any part not whitelisted fails closed
@@ -886,6 +904,7 @@ mod tests {
             clock: 42,
             actors: vec![(1, 0, 10), (2, -5, 8)],
             rng: SimRng::from_seed(1234),
+            streams: Default::default(),
             player_turns: 6,
             facing: (0, -1),
         }
@@ -1148,10 +1167,8 @@ mod tests {
         let id = PartTypeId::new(PART_BONUSES);
         let b: Box<dyn Part> = Box::new(Bonuses {
             accuracy: 3,
-            dodge: 0,
             ac: 2,
-            damage_flat: 0,
-            block: 0,
+            ..Default::default()
         });
         let v = hooks.snapshot(&id, b.as_ref()).unwrap();
         let restored = hooks.restore(&id, &v).unwrap();
@@ -1159,13 +1176,11 @@ mod tests {
             restored.as_ref().as_any().downcast_ref::<Bonuses>(),
             Some(&Bonuses {
                 accuracy: 3,
-                dodge: 0,
                 ac: 2,
-                damage_flat: 0,
-                block: 0
+                ..Default::default()
             })
         );
-        // The canonical snapshot spells all five keys; a partial payload is a
+        // The canonical snapshot spells every key; a partial payload is a
         // legal authored shape (zeros fill in) but the engine writes the full
         // table.
         let partial: toml::Value = toml::from_str("accuracy = 4\n").unwrap();
@@ -1174,10 +1189,7 @@ mod tests {
             restored.as_ref().as_any().downcast_ref::<Bonuses>(),
             Some(&Bonuses {
                 accuracy: 4,
-                dodge: 0,
-                ac: 0,
-                damage_flat: 0,
-                block: 0
+                ..Default::default()
             })
         );
 
@@ -1352,6 +1364,7 @@ mod tests {
             clock: 100,
             actors: vec![(player.to_bits().get(), 5, 100)],
             rng: SimRng::from_seed(1),
+            streams: Default::default(),
             player_turns: 0,
             facing: (1, 0),
         };
@@ -1404,6 +1417,7 @@ mod tests {
             clock: 0,
             actors: Vec::new(),
             rng: SimRng::from_seed(1),
+            streams: Default::default(),
             player_turns: 0,
             facing: (1, 0),
         };

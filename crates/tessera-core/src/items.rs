@@ -30,10 +30,10 @@ pub const PART_EQUIPMENT: &str = "Equipment";
 pub const PART_INVENTORY: &str = "Inventory";
 /// `parts.Item`: the item identity part (registered by [`crate::kinds`]).
 pub const PART_ITEM: &str = "Item";
-/// `parts.Weapon`: the melee weapon payload of an `Item_*` blueprint.
-pub const PART_WEAPON: &str = "Weapon";
-/// `parts.Armor`: the armor payload of an `Item_*` blueprint.
-pub const PART_ARMOR: &str = "Armor";
+/// `parts.ItemWeapon`: the melee weapon payload of an `Item_*` blueprint.
+pub const PART_WEAPON: &str = "ItemWeapon";
+/// `parts.ItemArmor`: the armor payload of an `Item_*` blueprint.
+pub const PART_ARMOR: &str = "ItemArmor";
 
 /// Pack capacity per point of Might (design: `10 × Might`).
 pub const PACK_CAPACITY_PER_MIGHT: i64 = 10;
@@ -210,7 +210,7 @@ impl Inventory {
     }
 }
 
-/// `parts.Weapon`: the melee payload of an item blueprint.
+/// `parts.ItemWeapon`: the melee payload of an item blueprint.
 ///
 /// `stat` names the attribute that scales damage; `cost` is the attack's
 /// energy cost in the scheduler's units. Damage-type resolution belongs to the
@@ -275,7 +275,7 @@ impl TryFrom<WeaponWire> for Weapon {
     }
 }
 
-/// `parts.Armor`: flat AC/block plus per-damage-type resistance and threshold
+/// `parts.ItemArmor`: flat AC/block plus per-damage-type resistance and threshold
 /// maps. Keys are damage-type names validated as lowercase identifiers; the
 /// combat pipeline owns the authoritative type enum and consumes these maps.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -619,7 +619,7 @@ pub fn load_summary(
     )
 }
 
-/// Parse a `parts.Weapon`/`parts.Armor`/`parts.Equipment` payload from a TOML
+/// Parse a `parts.ItemWeapon`/`parts.ItemArmor`/`parts.Equipment` payload from a TOML
 /// table, the same `toml::Value -> T` seam the loader uses.
 pub fn parse<'de, T>(value: &'de toml::Value) -> Result<T, String>
 where
@@ -779,7 +779,13 @@ mod tests {
         let mut registry = PartRegistry::new();
         register_all(&mut registry).unwrap();
         let names: Vec<&str> = registry.iter_storage().map(|(id, _)| id.as_str()).collect();
-        assert_eq!(names, vec!["Armor", "Equipment", "Inventory", "Weapon"]);
+        // The item payload parts are deliberately `Item*`-named: `Weapon` is
+        // the combat pipeline's resolved wielded profile, not a blueprint
+        // payload, so the two never collide in the shared registry.
+        assert_eq!(
+            names,
+            vec!["Equipment", "Inventory", "ItemArmor", "ItemWeapon"]
+        );
         for name in names {
             assert_eq!(
                 registry.storage(&crate::ecs::PartTypeId::new(name)),

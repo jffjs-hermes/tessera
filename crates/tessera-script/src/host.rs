@@ -1266,6 +1266,11 @@ impl ScriptHost {
             // apply seam builds the typed part through Derived::from_values,
             // which rejects unknown/reserved stat names fail-closed) — the
             // field-set whitelist cannot express an open map.
+        } else if name == tessera_core::combat::PART_COMBAT {
+            // Same shape as the derived cache: an open field map (`block`,
+            // `resist_<type>`, `threshold_<type>`), validated natively when
+            // the write commits (Combat::from_fields rejects non-integers,
+            // unknown keys and unknown damage types).
         } else {
             let writable = self.writable_native.get(name).cloned().unwrap_or_default();
             if fields.keys().any(|f| !writable.contains(f.as_str())) {

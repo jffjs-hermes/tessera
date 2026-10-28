@@ -5,6 +5,7 @@
 //! Use `BTreeMap`/`Vec` instead.
 
 pub mod blueprints;
+pub mod combat;
 pub mod ecs;
 pub mod effects;
 pub mod events;

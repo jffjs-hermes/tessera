@@ -4,8 +4,9 @@
 //! shipped `data/base` pack.
 //!
 //! Covers:
-//!   - a player bump on an adjacent goblin lands the base hit (Health - 1) and
-//!     does NOT move the player into the goblin's tile;
+//!   - a player bump on an adjacent goblin resolves as an `Attack` through the
+//!     native pipeline (hit roll, unarmed 1 point on a hit) and does NOT move
+//!     the player into the goblin's tile;
 //!   - a seeded run of wander and chase turns never leaves two live creatures
 //!     on the same tile, asserted over every tick, and is byte-identical across
 //!     two runs.
@@ -177,27 +178,46 @@ fn goblin_hp(broker: &RwLock<EntityBroker>) -> Option<i32> {
     .map(|h| h.hp)
 }
 
-/// A player bump into an adjacent goblin deals the base hit (Health - 1) and
-/// does NOT move the player onto the goblin's tile (no overlap).
+/// A player bump into an adjacent goblin resolves through the native attack
+/// pipeline — an `Attack` that rolls to hit, not a move — and never moves the
+/// player onto the goblin's tile. A landed unarmed hit deals exactly one
+/// point; a miss (or a block) deals none. Either way the attack resolves
+/// rather than cancelling, and the player stays put.
 #[test]
-fn player_bump_deals_base_hit_without_overlapping() {
+fn player_bump_attacks_without_overlapping() {
     let (mut sim, broker) = build_sim(2, 1); // goblin adjacent right of player
     let hp0 = goblin_hp(&broker).expect("goblin alive");
     assert_eq!(hp0, 3, "goblin baseline Health");
 
     let p_before = player_pos(&broker);
-    // Moving east hits the goblin: an Attack (+1 base, no move).
-    sim.submit_action(PlayerAction::Move { dx: 1, dy: 0 })
+    // Moving east hits the goblin: an Attack (+1 unarmed, no move).
+    let report = sim
+        .submit_action(PlayerAction::Move { dx: 1, dy: 0 })
         .expect("bump turn");
-    assert_eq!(
-        goblin_hp(&broker),
-        Some(hp0 - 1),
-        "the bump must land the base hit"
-    );
     assert_eq!(
         player_pos(&broker),
         p_before,
         "the bump must NOT move the player into the goblin's tile"
+    );
+    assert!(
+        report.charged,
+        "a bump the reach gate accepts charges the attack energy: {:?}",
+        sim.log()
+    );
+    let resolved = ["EVENT Hit", "EVENT Missed", "EVENT Blocked"]
+        .iter()
+        .any(|p| sim.log().iter().any(|l| l.starts_with(p)));
+    assert!(
+        resolved,
+        "the bump must fire exactly one resolution event, got {:?}",
+        sim.log()
+    );
+    let landed = sim.log().iter().any(|l| l.starts_with("EVENT Hit"));
+    assert_eq!(
+        goblin_hp(&broker),
+        Some(if landed { hp0 - 1 } else { hp0 }),
+        "a landed unarmed hit deals exactly one point; a miss deals none: {:?}",
+        sim.log()
     );
 
     // The event log records the Attack (base hit) but no Move onto the tile.

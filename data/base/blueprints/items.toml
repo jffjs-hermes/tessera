@@ -1,7 +1,7 @@
 # Base item blueprints: the melee slice's gear, authored as data.
 #
 # Item blueprints are plain content: `parts.Item` is the identity/weight part
-# (kind schema), and the optional `parts.Weapon`/`parts.Armor` payloads are
+# (kind schema), and the optional `parts.ItemWeapon`/`parts.ItemArmor` payloads are
 # native typed parts validated at load time (unknown fields, bad ranges and an
 # unknown `stat`/`slot` all fail closed). Nothing here contains a formula: the
 # rules script owns every tunable term, and the engine only sums what is worn.
@@ -16,28 +16,28 @@
 
 [Item_Longsword]
 parts.Item = { name = "Longsword", slot = "main_hand", weight = 3, tier = "common", price = 40 }
-parts.Weapon = { lo = 4, hi = 8, stat = "might", hands = 1, reach = 1, cost = 100, accuracy_bonus = 0 }
+parts.ItemWeapon = { lo = 4, hi = 8, stat = "might", hands = 1, reach = 1, cost = 100, accuracy_bonus = 0 }
 
 [Item_Greatsword]
 parts.Item = { name = "Greatsword", slot = "main_hand", weight = 8, tier = "fine", price = 90 }
-parts.Weapon = { lo = 7, hi = 12, stat = "might", hands = 2, reach = 1, cost = 130, accuracy_bonus = -1 }
+parts.ItemWeapon = { lo = 7, hi = 12, stat = "might", hands = 2, reach = 1, cost = 130, accuracy_bonus = -1 }
 
 [Item_RoundShield]
 parts.Item = { name = "Round shield", slot = "off_hand", weight = 6, tier = "common", price = 25 }
-parts.Armor = { ac = 2, block = 15, resist = { slash = 0, pierce = 0, blunt = 0 }, threshold = {} }
+parts.ItemArmor = { ac = 2, block = 15, resist = { slash = 0, pierce = 0, blunt = 0 }, threshold = {} }
 
 [Item_MailHauberk]
 parts.Item = { name = "Mail hauberk", slot = "body", weight = 14, tier = "common", price = 90 }
-parts.Armor = { ac = 4, block = 0, resist = { slash = 30, pierce = 20, blunt = 0 }, threshold = {} }
+parts.ItemArmor = { ac = 4, block = 0, resist = { slash = 30, pierce = 20, blunt = 0 }, threshold = {} }
 
 [Item_HalfHelm]
 parts.Item = { name = "Half-helm", slot = "head", weight = 5, tier = "common", price = 15 }
-parts.Armor = { ac = 2, block = 0, resist = { slash = 0, pierce = 0, blunt = 0 }, threshold = {} }
+parts.ItemArmor = { ac = 2, block = 0, resist = { slash = 0, pierce = 0, blunt = 0 }, threshold = {} }
 
 [Item_MailSleeves]
 parts.Item = { name = "Mail sleeves", slot = "arms", weight = 4, tier = "common", price = 20 }
-parts.Armor = { ac = 2, block = 0, resist = { slash = 10, pierce = 5, blunt = 0 }, threshold = {} }
+parts.ItemArmor = { ac = 2, block = 0, resist = { slash = 10, pierce = 5, blunt = 0 }, threshold = {} }
 
 [Item_MailBoots]
 parts.Item = { name = "Mail boots", slot = "legs", weight = 4, tier = "common", price = 20 }
-parts.Armor = { ac = 2, block = 0, resist = { slash = 0, pierce = 0, blunt = 0 }, threshold = {} }
+parts.ItemArmor = { ac = 2, block = 0, resist = { slash = 0, pierce = 0, blunt = 0 }, threshold = {} }

@@ -12,4 +12,4 @@
 # otherwise drop every base key — s1-stats §4.1), then adds the campaign's
 # own keys. The base table is `data/base/blueprints/tuning-combat.toml`.
 [Tuning_Combat]
-parts.Tuning = { hp_base = 10, hp_per_toughness = 2, hp_level_base = 3, hp_toughness_divisor = 3, acc_per_agility = 2, level_bonus = 1, base_hit = 50, hit_min = 5, hit_max = 95, ac_factor = 2, ac_cap = 30, speed_slope = 2, speed_min = 50, speed_max = 140, untrained_penalty = 15, armor_threshold_per_might = 2, armor_speed_per_weight = 2, pack_capacity_per_might = 10, goblin_hp = 20, bash_lo = 3, bash_hi = 6 }
+parts.Tuning = { hp_base = 10, hp_per_toughness = 2, hp_level_base = 3, hp_toughness_divisor = 3, acc_per_agility = 2, level_bonus = 1, base_hit = 50, hit_min = 5, hit_max = 95, ac_factor = 2, ac_cap = 30, speed_slope = 2, speed_min = 50, speed_max = 140, untrained_penalty = 15, armor_threshold_per_might = 2, armor_speed_per_weight = 2, pack_capacity_per_might = 10, goblin_hp = 20, bash_lo = 3, bash_hi = 6, crit_threshold = 5, crit_percent = 150, res_floor = -100, res_ceiling = 90, min_damage = 1 }

@@ -136,6 +136,8 @@ impl World {
             .expect("stat part names are fixed and never collide");
         crate::items::register_all(&mut registry)
             .expect("gear part names are fixed and never collide");
+        crate::combat::register_all(&mut registry)
+            .expect("combat part names are fixed and never collide");
         Self {
             library: Arc::new(RwLock::new(BlueprintLibrary::new())),
             registry,
@@ -594,9 +596,9 @@ parts.Abilities = { list = ["Ability_Ghost"] }
         // storage class for every part name it accepts: the two engine parts
         // below, the six always-registered kind parts, the seven
         // always-registered effect/status parts, the three native stat
-        // parts (Attributes/Level/Bonuses), and the four gear parts that
-        // `World::new` registers.
-        assert_eq!(w.registry.len(), 22);
+        // parts (Attributes/Level/Bonuses), the four gear parts and the two
+        // combat parts (Combat/Weapon) that `World::new` registers.
+        assert_eq!(w.registry.len(), 24);
         for (id, storage) in w.registry.iter_storage() {
             assert!(
                 matches!(storage, StorageClass::Component | StorageClass::Dynamic),
@@ -633,8 +635,8 @@ parts.Abilities = { list = ["Ability_Ghost"] }
         let err = w.register_part::<Stats>("Render").unwrap_err();
         assert!(matches!(err, PartError::DuplicatePartType(id) if id.as_str() == "Render"));
         // The original entry is intact (6 kind + 7 effect + 3 stat + 4 gear
-        // parts are always registered by `World::new`).
-        assert_eq!(w.registry.len(), 21);
+        // + 2 combat parts are always registered by `World::new`).
+        assert_eq!(w.registry.len(), 23);
         assert_eq!(
             w.registry.storage(&PartTypeId::new("Render")),
             Some(StorageClass::Component)

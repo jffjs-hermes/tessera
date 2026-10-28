@@ -118,4 +118,35 @@ engine.on("RecomputeDerived", engine.NORMAL, function(ev)
     defense = defense(d, ac_v),
     speed = speed_with_load(speed_base(agi), gear),
   })
+
+  -- The combat cache: block chance plus per-type resistance and threshold.
+  -- Written in the same handler as `Derived` so one recompute fills both
+  -- caches. The values are the INNATE sources (the authored Bonuses part):
+  -- equipment contributions are the gear layer's terms and are added there,
+  -- never written back into Bonuses, so nothing is counted twice.
+  --
+  -- Block: the shield's block base plus +1 per Might above 10 (the design
+  -- table's `15 + (Might - 10)`); a negative total floors at 0.
+  local block = (bonuses.block or 0) + (attrs.might - 10)
+  if block < 0 then block = 0 end
+
+  local combat = { block = block }
+  local res = bonuses.resist or {}
+  local thr = bonuses.threshold or {}
+  -- Iterated in the native vocabulary's declaration order so the written
+  -- field set is deterministic.
+  local TYPES = { "slash", "pierce", "blunt", "fire", "cold",
+                  "lightning", "poison", "holy", "shadow" }
+  for _, t in ipairs(TYPES) do
+    local r = res[t]
+    if r ~= nil then
+      if r < T.res_floor then r = T.res_floor end
+      if r > T.res_ceiling then r = T.res_ceiling end
+      combat["resist_" .. t] = r
+    end
+    local v = thr[t]
+    if v ~= nil then combat["threshold_" .. t] = v end
+  end
+
+  engine.set_part(ev.target, "Combat", combat)
 end)

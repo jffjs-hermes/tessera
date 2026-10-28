@@ -9,9 +9,9 @@
 //!   `NON_PERSISTENT_PARTS` skip-list), the save never serializes it, and the
 //!   load path recomputes every restored stat-ful entity so the loaded world
 //!   has live derived values equal to the pre-save ones;
-//! - `SAVE_FORMAT_VERSION` is 2 and a v1 save (the header patched back to the
+//! - `SAVE_FORMAT_VERSION` is 3 and a v1 save (the header patched back to the
 //!   pre-stats format) rejects as `UnsupportedVersion { found: 1, supported:
-//!   2 }` — the named behavior, not an accident.
+//!   SAVE_FORMAT_VERSION }` — the named behavior, not an accident.
 //!
 //! Applied statuses stay non-persistent in this slice (status persistence is a
 //! later slice),
