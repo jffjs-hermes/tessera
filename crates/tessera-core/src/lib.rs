@@ -8,6 +8,7 @@ pub mod blueprints;
 pub mod ecs;
 pub mod effects;
 pub mod events;
+pub mod items;
 pub mod kinds;
 pub mod path;
 pub mod recompute;

@@ -23,7 +23,7 @@
 use std::sync::{Arc, Mutex, RwLock};
 
 use hecs::Entity;
-use tessera_core::ecs::EntityBroker;
+use tessera_core::ecs::{EntityBroker, PartTypeId};
 use tessera_core::events::{
     EARLY, HandlerAction, HandlerId, Health, LATE, Move, NORMAL, PART_HEALTH, PART_POSITION, Point,
     Position, RecomputeDerived, SimContext, TakeDamage, TileEntry,
@@ -284,6 +284,250 @@ impl Sim {
         let _ = self.ctx.dispatch(RecomputeDerived { entity });
         self.log.extend(drain_event_lines(&self.event_lines));
         Ok(())
+    }
+
+    /// Give one item blueprint id to the player's pack (console `give`).
+    /// Capacity (`10 × Might`) is a native invariant: over-capacity pickups
+    /// are refused with the load/capacity numbers, never silently dropped.
+    pub fn give_console(
+        &mut self,
+        world: &World,
+        entity: Entity,
+        item_id: &str,
+    ) -> Result<String, String> {
+        let might = {
+            let broker = self
+                .ctx
+                .broker
+                .read()
+                .map_err(|_| "broker poisoned".to_string())?;
+            broker
+                .typed_part::<tessera_core::stats::Attributes>(
+                    entity,
+                    &PartTypeId::new(tessera_core::stats::PART_ATTRIBUTES),
+                )
+                .map(|a| a.might)
+                .unwrap_or(10)
+        };
+        let mut broker = self
+            .ctx
+            .broker
+            .write()
+            .map_err(|_| "broker poisoned".to_string())?;
+        let mut inventory = broker
+            .typed_part::<tessera_core::items::Inventory>(
+                entity,
+                &PartTypeId::new(tessera_core::items::PART_INVENTORY),
+            )
+            .cloned()
+            .unwrap_or_default();
+        tessera_core::items::give(&mut inventory, might, item_id, world)
+            .map_err(|e| e.to_string())?;
+        broker
+            .insert_part(
+                entity,
+                tessera_core::items::PART_INVENTORY.to_string(),
+                Box::new(inventory.clone()),
+            )
+            .map_err(|e| format!("give {item_id}: {e}"))?;
+        Ok(format!(
+            "gave {item_id}  pack {}/{}",
+            tessera_core::items::inventory_weight(&inventory, world),
+            tessera_core::items::pack_capacity(might)
+        ))
+    }
+
+    /// Move an owned item into a slot (console `equip`). Dispatches the same
+    /// `RecomputeDerived` the stat writes dispatch — the gear dirtying event —
+    /// so the cache (and the scheduler speed) settles before the next action.
+    pub fn equip_console(
+        &mut self,
+        world: &World,
+        entity: Entity,
+        item_id: &str,
+        slot: Option<&str>,
+    ) -> Result<String, String> {
+        let slot = match slot {
+            Some(name) => Some(tessera_core::items::slot_arg(name).map_err(|e| e.to_string())?),
+            None => None,
+        };
+        let target = {
+            let mut broker = self
+                .ctx
+                .broker
+                .write()
+                .map_err(|_| "broker poisoned".to_string())?;
+            let mut equipment = broker
+                .typed_part::<tessera_core::items::Equipment>(
+                    entity,
+                    &PartTypeId::new(tessera_core::items::PART_EQUIPMENT),
+                )
+                .cloned()
+                .unwrap_or_default();
+            let mut inventory = broker
+                .typed_part::<tessera_core::items::Inventory>(
+                    entity,
+                    &PartTypeId::new(tessera_core::items::PART_INVENTORY),
+                )
+                .cloned()
+                .unwrap_or_default();
+            let target =
+                tessera_core::items::equip(&mut equipment, &mut inventory, item_id, slot, world)
+                    .map_err(|e| e.to_string())?;
+            broker
+                .insert_part(
+                    entity,
+                    tessera_core::items::PART_EQUIPMENT.to_string(),
+                    Box::new(equipment.clone()),
+                )
+                .map_err(|e| format!("equip {item_id}: {e}"))?;
+            broker
+                .insert_part(
+                    entity,
+                    tessera_core::items::PART_INVENTORY.to_string(),
+                    Box::new(inventory.clone()),
+                )
+                .map_err(|e| format!("equip {item_id}: {e}"))?;
+            target
+        };
+        let _ = self.ctx.dispatch(RecomputeDerived { entity });
+        self.log.extend(drain_event_lines(&self.event_lines));
+        Ok(format!("equipped {item_id} in {}", target.as_str()))
+    }
+
+    /// Move an equipped item back to the pack (console `unequip`), then
+    /// recompute (the same gear dirtying event).
+    pub fn unequip_console(
+        &mut self,
+        world: &World,
+        entity: Entity,
+        slot: &str,
+    ) -> Result<String, String> {
+        let slot = tessera_core::items::slot_arg(slot).map_err(|e| e.to_string())?;
+        let item = {
+            let mut broker = self
+                .ctx
+                .broker
+                .write()
+                .map_err(|_| "broker poisoned".to_string())?;
+            let mut equipment = broker
+                .typed_part::<tessera_core::items::Equipment>(
+                    entity,
+                    &PartTypeId::new(tessera_core::items::PART_EQUIPMENT),
+                )
+                .cloned()
+                .ok_or_else(|| {
+                    tessera_core::items::EquipError::NotEquipped {
+                        slot: slot.as_str().to_string(),
+                    }
+                    .to_string()
+                })?;
+            let mut inventory = broker
+                .typed_part::<tessera_core::items::Inventory>(
+                    entity,
+                    &PartTypeId::new(tessera_core::items::PART_INVENTORY),
+                )
+                .cloned()
+                .unwrap_or_default();
+            let item = tessera_core::items::unequip(&mut equipment, &mut inventory, slot)
+                .map_err(|e| e.to_string())?;
+            broker
+                .insert_part(
+                    entity,
+                    tessera_core::items::PART_EQUIPMENT.to_string(),
+                    Box::new(equipment),
+                )
+                .map_err(|e| format!("unequip {}: {e}", slot.as_str()))?;
+            broker
+                .insert_part(
+                    entity,
+                    tessera_core::items::PART_INVENTORY.to_string(),
+                    Box::new(inventory),
+                )
+                .map_err(|e| format!("unequip {}: {e}", slot.as_str()))?;
+            item
+        };
+        let _ = world;
+        let _ = self.ctx.dispatch(RecomputeDerived { entity });
+        self.log.extend(drain_event_lines(&self.event_lines));
+        Ok(format!("unequipped {item} from {}", slot.as_str()))
+    }
+
+    /// The console `inventory` listing: the pack in pickup order plus the gear
+    /// load summary (the same numbers the inspector row shows).
+    pub fn inventory_text(&self, world: &World, entity: Entity) -> Result<String, String> {
+        let broker = self
+            .ctx
+            .broker
+            .read()
+            .map_err(|_| "broker poisoned".to_string())?;
+        let inventory = broker
+            .typed_part::<tessera_core::items::Inventory>(
+                entity,
+                &PartTypeId::new(tessera_core::items::PART_INVENTORY),
+            )
+            .cloned()
+            .unwrap_or_default();
+        drop(broker);
+        let mut lines = vec![
+            self.gear_line(world, entity)
+                .unwrap_or_else(|| "no equipment".to_string()),
+        ];
+        if inventory.is_empty() {
+            lines.push("pack: empty".to_string());
+        } else {
+            for id in &inventory.items {
+                let name = tessera_core::items::item_info(world, id)
+                    .map(|i| i.name)
+                    .unwrap_or_else(|| id.clone());
+                lines.push(format!("pack: {id} ({name})"));
+            }
+        }
+        Ok(lines.join("\n"))
+    }
+
+    /// The one-line gear summary (inspector row + console `inventory` head).
+    pub fn gear_line(&self, world: &World, entity: Entity) -> Option<String> {
+        let broker = self.ctx.broker.read().unwrap_or_else(|p| p.into_inner());
+        let equipment = broker
+            .typed_part::<tessera_core::items::Equipment>(
+                entity,
+                &PartTypeId::new(tessera_core::items::PART_EQUIPMENT),
+            )
+            .cloned()?;
+        let inventory = broker
+            .typed_part::<tessera_core::items::Inventory>(
+                entity,
+                &PartTypeId::new(tessera_core::items::PART_INVENTORY),
+            )
+            .cloned()
+            .unwrap_or_default();
+        let might = broker
+            .typed_part::<tessera_core::stats::Attributes>(
+                entity,
+                &PartTypeId::new(tessera_core::stats::PART_ATTRIBUTES),
+            )
+            .map(|a| a.might)
+            .unwrap_or(10);
+        drop(broker);
+        let tuning = world.tuning_values("Tuning_Combat").unwrap_or_default();
+        let threshold = tuning
+            .get("armor_threshold_per_might")
+            .and_then(|v| match v {
+                tessera_core::kinds::TuningValue::Int(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(2);
+        let per_weight = tuning
+            .get("armor_speed_per_weight")
+            .and_then(|v| match v {
+                tessera_core::kinds::TuningValue::Int(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(1);
+        Some(tessera_core::items::load_summary(
+            &equipment, &inventory, might, threshold, per_weight, world,
+        ))
     }
 
     /// The scheduler speed of an actor (the row the recompute sync keeps in
@@ -1605,7 +1849,12 @@ fn install_recompute_derived(
         {
             let id = entity_to_id(entity);
             let mut host = b.host.lock().unwrap_or_else(|p| p.into_inner());
-            let _ = host.dispatch(RULES_RECOMPUTE_EVENT, id, &int_params(&[]));
+            let res = host.dispatch(RULES_RECOMPUTE_EVENT, id, &int_params(&[]));
+            for o in &res.outcomes {
+                if let tessera_script::host::HandlerOutcome::Errored { error } = o {
+                    eprintln!("DEBUG RECOMPUTE DISPATCH ERR: {error}");
+                }
+            }
             // The host's dispatch already applied the script's pending
             // set_part (the cache write). Drain any engine.log lines so they
             // never leak into a later forward's drain out of causal order.

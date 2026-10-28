@@ -311,6 +311,10 @@ pub trait WorldRead: Send + Sync + 'static {
     /// loaded. Fail-closed: scripts may not mutate tuning — the host wraps
     /// the returned values in a read-only binding.
     fn tuning_table(&self, table: &str) -> Option<BTreeMap<String, TuningValue>>;
+    /// Read-only item lookup by blueprint id: the flat identity/payload summary
+    /// an item-policy script needs (name, slot, weight, tier, price, weapon and
+    /// armor numbers). `None` for an unknown id — scripts fail closed.
+    fn item_info(&self, id: &str) -> Option<tessera_core::items::ItemInfo>;
 }
 
 /// A default [`WorldRead`] used when a host is built without a reader (tests /
@@ -360,6 +364,9 @@ impl WorldRead for DefaultWorldRead {
         None
     }
     fn tuning_table(&self, _table: &str) -> Option<BTreeMap<String, TuningValue>> {
+        None
+    }
+    fn item_info(&self, _id: &str) -> Option<tessera_core::items::ItemInfo> {
         None
     }
 }
@@ -865,6 +872,37 @@ impl ScriptHost {
         t.set(
             "world_state",
             lua.create_function(move |_, ()| Ok(world_read.world_state().map(|e| e as i64)))?,
+        )?;
+
+        // item -> read-only summary of one `Item_*` blueprint. `nil` for an
+        // unknown id, so a policy script can test an id before using it
+        // (fail-closed nil-read, never a fabricated zero row).
+        let world_read = shared.world_read.clone();
+        t.set(
+            "item",
+            lua.create_function(move |lua2, id: String| {
+                let value: Value = match world_read.item_info(&id) {
+                    None => Value::Nil,
+                    Some(info) => {
+                        let tbl = lua2.create_table()?;
+                        tbl.set("id", id.clone())?;
+                        tbl.set("name", info.name)?;
+                        tbl.set("slot", info.slot)?;
+                        tbl.set("weight", info.weight)?;
+                        tbl.set("tier", info.tier)?;
+                        tbl.set("price", info.price)?;
+                        tbl.set("ac", info.ac)?;
+                        tbl.set("block", info.block)?;
+                        tbl.set("hands", info.hands)?;
+                        tbl.set("cost", info.cost)?;
+                        tbl.set("lo", info.lo)?;
+                        tbl.set("hi", info.hi)?;
+                        tbl.set("accuracy_bonus", info.accuracy_bonus)?;
+                        Value::Table(tbl)
+                    }
+                };
+                Ok(value)
+            })?,
         )?;
 
         // tuning -> read-only view of one typed tuning table. Returns a Lua

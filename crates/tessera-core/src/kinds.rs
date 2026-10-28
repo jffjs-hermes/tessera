@@ -141,6 +141,15 @@ pub struct Item {
     pub slot: String,
     pub weight: i64,
     pub price: i64,
+    /// Item tier (`common`/`fine`/`masterwork`/`rare`); the axis exists for
+    /// later affix work, so an omitted tier defaults to `common`.
+    #[serde(default = "default_tier")]
+    pub tier: String,
+}
+
+/// The default item tier.
+fn default_tier() -> String {
+    "common".to_string()
 }
 
 /// `parts.Quest`: identity plus the ordered stage list. Each stage is reached

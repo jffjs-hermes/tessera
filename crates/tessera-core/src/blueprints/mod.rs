@@ -897,6 +897,7 @@ parts.Tuning = { base_hit = 50, crit_pct = { pct = 150 }, speed_table = [50, 90,
                 slot: "misc".into(),
                 weight: 1,
                 price: 0,
+                tier: "common".into(),
             })
         );
 
