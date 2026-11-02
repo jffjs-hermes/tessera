@@ -261,6 +261,9 @@ impl WorldRead for NavWorld {
     fn tuning_table(&self, table: &str) -> Option<BTreeMap<String, TuningValue>> {
         self.tuning.get(table).cloned()
     }
+    fn item_info(&self, _id: &str) -> Option<tessera_core::items::ItemInfo> {
+        None
+    }
 }
 
 /// Build a host over a fresh [`NavWorld`] with the given reader installed.

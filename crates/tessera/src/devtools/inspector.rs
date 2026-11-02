@@ -97,7 +97,7 @@ pub fn build_snapshot(b: &EntityBroker, world: &World, hooks: &SaveHooks) -> Ins
 fn build_row(b: &EntityBroker, world: &World, hooks: &SaveHooks, e: Entity) -> EntityRow {
     let id = entity_to_id(e);
     let blueprint = blueprint_of(world, b, e);
-    let summary = summary_line(id, &blueprint, b, e);
+    let summary = summary_line(id, &blueprint, b, e, world);
     let (x, y, hp) = row_of(b, e);
     let parts = native_part_debug(b, hooks, e);
     EntityRow {
@@ -117,7 +117,7 @@ fn build_row(b: &EntityBroker, world: &World, hooks: &SaveHooks, e: Entity) -> E
 /// `HP 36/99  Acc 4  Dodge 8  Def 21  Spd 106`. Reads the live
 /// `Attributes`/`Level`/`Derived` parts; entities without them keep just the
 /// position line ("where applicable"). Read-only: snapshot data, no writes.
-fn summary_line(id: u64, blueprint: &str, b: &EntityBroker, e: Entity) -> String {
+fn summary_line(id: u64, blueprint: &str, b: &EntityBroker, e: Entity, world: &World) -> String {
     use tessera_core::effects::{Derived, PART_DERIVED};
     use tessera_core::stats::{Attributes, Level, PART_ATTRIBUTES, PART_LEVEL};
     let (x, y, hp) = row_of(b, e);
@@ -142,6 +142,41 @@ fn summary_line(id: u64, blueprint: &str, b: &EntityBroker, e: Entity) -> String
             v("dodge"),
             v("defense"),
             v("speed")
+        ));
+    }
+    // The gear segment (Q5): what is wielded/worn plus the armor load the
+    // rules script uses for the speed penalty. Read-only, live part data.
+    if let Some(eq) = b.typed_part::<tessera_core::items::Equipment>(
+        e,
+        &PartTypeId::new(tessera_core::items::PART_EQUIPMENT),
+    ) {
+        let inventory = b
+            .typed_part::<tessera_core::items::Inventory>(
+                e,
+                &PartTypeId::new(tessera_core::items::PART_INVENTORY),
+            )
+            .cloned()
+            .unwrap_or_default();
+        let tuning = world.tuning_values("Tuning_Combat").unwrap_or_default();
+        let int_tuning = |key: &str, fallback: i64| {
+            tuning
+                .get(key)
+                .and_then(|v| match v {
+                    tessera_core::kinds::TuningValue::Int(n) => Some(*n),
+                    _ => None,
+                })
+                .unwrap_or(fallback)
+        };
+        s.push_str(&format!(
+            "  gear: {}",
+            tessera_core::items::load_summary(
+                eq,
+                &inventory,
+                attrs.might,
+                int_tuning("armor_threshold_per_might", 2),
+                int_tuning("armor_speed_per_weight", 1),
+                world,
+            )
         ));
     }
     s

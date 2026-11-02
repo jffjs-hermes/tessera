@@ -347,6 +347,36 @@ impl SimWorldAccess {
                 ("block".to_string(), PartValue::Int(b.block)),
             ]));
         }
+        if let Some(eq) = part
+            .as_any()
+            .downcast_ref::<tessera_core::items::Equipment>()
+        {
+            return Some(
+                tessera_core::items::EquipmentSlot::ALL
+                    .into_iter()
+                    .map(|slot| {
+                        (
+                            slot.as_str().to_string(),
+                            PartValue::Str(eq.slot(slot).to_string()),
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        if let Some(inv) = part
+            .as_any()
+            .downcast_ref::<tessera_core::items::Inventory>()
+        {
+            return Some(BTreeMap::from([(
+                "items".to_string(),
+                PartValue::List(
+                    inv.items
+                        .iter()
+                        .map(|id| PartValue::Str(id.clone()))
+                        .collect(),
+                ),
+            )]));
+        }
         if let Some(d) = part
             .as_any()
             .downcast_ref::<tessera_core::effects::Derived>()
@@ -528,6 +558,64 @@ impl WorldAccess for SimWorldAccess {
                 .map_err(|msg| ScriptError::Internal(format!("Derived write rejected: {msg}")))?;
             b.insert_part(e, id.clone(), Box::new(derived))
                 .map_err(|er| ScriptError::Internal(format!("set_part Derived: {er}")))?;
+            return Ok(());
+        }
+        // Gear build state: a scripted write to `Equipment` replaces the whole
+        // slot map (strings only, fixed slot vocabulary) and queues the same
+        // recompute the console equip/unequip path dispatches. `Inventory` is
+        // a whole-list replace. Ownership/hands invariants are enforced by the
+        // equip seam, not by a raw build-state write (which is how a spawn
+        // kit is authored).
+        if name == tessera_core::items::PART_EQUIPMENT {
+            let mut equipment = tessera_core::items::Equipment::default();
+            for (key, value) in fields {
+                let slot = tessera_core::items::EquipmentSlot::from_str(&key).ok_or_else(|| {
+                    ScriptError::Internal(format!("unknown equipment slot '{key}'"))
+                })?;
+                match value {
+                    PartValue::Str(id) => equipment.set(slot, id),
+                    other => {
+                        return Err(ScriptError::Internal(format!(
+                            "equipment slot '{key}' must be a string, wrote {other:?}"
+                        )));
+                    }
+                }
+            }
+            b.insert_part(e, id.clone(), Box::new(equipment))
+                .map_err(|er| ScriptError::Internal(format!("set_part Equipment: {er}")))?;
+            self.shared.push_recompute(entity);
+            return Ok(());
+        }
+        if name == tessera_core::items::PART_INVENTORY {
+            let mut inventory = tessera_core::items::Inventory::default();
+            for (key, value) in fields {
+                if key != "items" {
+                    return Err(ScriptError::Internal(format!(
+                        "unknown Inventory field '{key}'"
+                    )));
+                }
+                match value {
+                    PartValue::List(items) => {
+                        for item in items {
+                            match item {
+                                PartValue::Str(id) => inventory.push(id),
+                                other => {
+                                    return Err(ScriptError::Internal(format!(
+                                        "inventory items must be strings, wrote {other:?}"
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(ScriptError::Internal(format!(
+                            "Inventory.items must be a list, wrote {other:?}"
+                        )));
+                    }
+                }
+            }
+            b.insert_part(e, id.clone(), Box::new(inventory))
+                .map_err(|er| ScriptError::Internal(format!("set_part Inventory: {er}")))?;
             return Ok(());
         }
         // Not a currently-held part: treat as a scripted upsert (the host
@@ -770,6 +858,11 @@ impl WorldRead for SimWorldAccess {
     fn tuning_table(&self, table: &str) -> Option<BTreeMap<String, TuningValue>> {
         let world = self.shared.read_world()?;
         world.tuning_values(table)
+    }
+
+    fn item_info(&self, id: &str) -> Option<tessera_core::items::ItemInfo> {
+        let world = self.shared.read_world()?;
+        tessera_core::items::item_info(&world, id)
     }
 }
 
