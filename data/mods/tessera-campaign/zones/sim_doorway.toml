@@ -1,0 +1,30 @@
+# Fixed arena for the doorway batch scenario: a player room, a one-tile
+# doorway, and a guard room. No generated arenas in phase 1 — the point of
+# this map is the single-file queue through the choke point.
+id = "sim_doorway"
+
+[gen]
+type = "ascii"
+start = { x = 3, y = 7 }
+
+[gen.glyphs]
+"." = "terrain.floor"
+"#" = "terrain.wall"
+
+[gen.ascii]
+rows = [
+  "######################",
+  "#.........#..........#",
+  "#.........#..........#",
+  "#.........#..........#",
+  "#.........#..........#",
+  "#.........#..........#",
+  "#.........#..........#",
+  "#....................#",
+  "#.........#..........#",
+  "#.........#..........#",
+  "#.........#..........#",
+  "#.........#..........#",
+  "#.........#..........#",
+  "######################",
+]

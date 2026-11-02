@@ -1,0 +1,6 @@
+# The naive-tier build: same Knight, no positioning or HP awareness. Reported
+# alongside the expert rows as the comparison bracket, never asserted.
+[build]
+id = "knight_human_lv3_naive"
+blueprint = "Knight"
+policy = "sim/policies/knight_naive.luau"

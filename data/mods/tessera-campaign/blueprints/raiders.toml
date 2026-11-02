@@ -1,0 +1,17 @@
+# Campaign creatures: the goblin raider, the batch runs' enemy.
+#
+# Calibrated from the class prototype's enemy table: hp 34 (L2, T9), accuracy 8
+# (L2, A13), and the short blade's 2-5 slash. It carries its own brain part and
+# policy so a raider never runs the demo goblin's respawn response, which would
+# make a "clear the room" scenario unwinnable by construction.
+
+[GoblinRaider]
+inherits = "Humanoid"
+parts.Render = { tile = "creature.goblin" }
+parts.RaiderBrain = { detect = 40 }
+parts.Health = { hp = 34 }
+parts.Attributes = { might = 9, agility = 13, toughness = 9, will = 6, intellect = 7 }
+parts.Level = { level = 2 }
+parts.Equipment = { main_hand = "Item_ShortBlade" }
+parts.Weapon = { lo = 2, hi = 5, dtype = "slash", stat = "agility", reach = 1 }
+scripts = ["scripts/policies/raider_ai.luau"]

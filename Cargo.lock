@@ -2527,6 +2527,7 @@ dependencies = [
  "hecs",
  "mlua",
  "notify",
+ "serde",
  "tempfile",
  "tessera-core",
  "tessera-mods",

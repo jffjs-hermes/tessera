@@ -1208,6 +1208,18 @@ impl Sim {
     /// handlers share this dispatch. Used for both the player (in
     /// `submit_action`) and the enemy (Zapper).
     fn take_turn(&mut self, actor: Entity, action: TurnAction) -> anyhow::Result<TurnReport> {
+        self.take_turn_inner(actor, action, true)
+    }
+
+    /// [`Self::take_turn`] with control over the `ActorTurnStart` forwarding:
+    /// the policy-driven player turn has already dispatched the hook to derive
+    /// its action and must not run it twice.
+    fn take_turn_inner(
+        &mut self,
+        actor: Entity,
+        action: TurnAction,
+        forward_start: bool,
+    ) -> anyhow::Result<TurnReport> {
         let from = self
             .ctx
             .position(actor)
@@ -1238,7 +1250,9 @@ impl Sim {
         // `ActorTurnStart` hook can read the world. We forward the hook for
         // every actor turn, then the actor's own action event.
         if self.bridge.is_some() {
-            self.forward_actor_turn_start(actor);
+            if forward_start {
+                self.forward_actor_turn_start(actor);
+            }
             self.forward_scripted_action(actor, action);
         }
         Ok(report)
@@ -1609,6 +1623,76 @@ impl Sim {
             .map(|(_, line)| line)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Schedule an already-spawned entity as a clock actor (the batch-runner
+    /// seam: a scenario spawns several enemies before the clock starts, and
+    /// each of them takes ordinary scheduled turns through its policy).
+    pub fn schedule_actor(&mut self, entity: Entity) -> Result<(), String> {
+        let speed = self
+            .ctx
+            .broker
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .typed_part::<ActorEnergy>(entity, &PART_ENERGY.into())
+            .map(|a| a.speed)
+            .unwrap_or(BASE_SPEED);
+        let mut sched = self
+            .scheduler
+            .lock()
+            .map_err(|_| "scheduler lock poisoned".to_string())?;
+        sched.add_actor(entity, ActorEnergy::at_threshold(speed));
+        Ok(())
+    }
+
+    /// Re-seed the context's master RNG (the per-run determinism seam: a batch
+    /// runner builds a fresh sim per run and seeds it from the run's named
+    /// stream, so every run is reproducible on its own). No named stream
+    /// exists yet at construction time, so this cannot strand cached state.
+    pub fn reseed(&mut self, seed: u64) {
+        self.ctx.rng = SimRng::from_seed(seed);
+    }
+
+    /// Take the player's turn from its own script policy: advance the clock
+    /// until the player is ready (resolving other actors' policy turns on the
+    /// way), run the player's `ActorTurnStart` handlers, and resolve the first
+    /// queued action. A policy that queues nothing waits — the deliberate
+    /// "hold position" branch of the reference policy.
+    pub fn policy_turn(&mut self) -> anyhow::Result<TurnReport> {
+        self.drain_recompute_queue();
+        self.sync_player();
+        loop {
+            let mut sched = self
+                .scheduler
+                .lock()
+                .map_err(|_| anyhow::anyhow!("scheduler lock poisoned"))?;
+            if let Err(stalled) = sched.advance_until_ready() {
+                anyhow::bail!("{stalled}");
+            }
+            if sched.ready().contains(&self.player) {
+                break;
+            }
+            let other = sched.ready().into_iter().find(|e| *e != self.player);
+            match other {
+                Some(actor) => {
+                    drop(sched);
+                    self.take_scripted_turn(actor)?;
+                    self.sync_player();
+                }
+                None => anyhow::bail!("no actor became ready"),
+            }
+        }
+        let pending = self.forward_actor_turn_start(self.player);
+        let action = self
+            .pending_to_turn_action(self.player, &pending)
+            .unwrap_or(TurnAction::Wait);
+        self.player_turns += 1;
+        if let Some(b) = &self.bridge {
+            b.set_player_turns(self.player_turns);
+        }
+        // The start hook already ran above; the turn resolution must not
+        // dispatch it a second time.
+        self.take_turn_inner(self.player, action, false)
     }
 
     /// Run `n` scripted actions headlessly (no window), returning the final

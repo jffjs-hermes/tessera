@@ -21,6 +21,8 @@ mlua = { version = "0.12.2", features = ["luau", "send"] }
 notify = "8.2.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+toml = "1.1.8"
 tessera-core = { path = "../tessera-core" }
 tessera-mods = { path = "../tessera-mods" }
 tessera-script = { path = "../tessera-script" }
@@ -39,5 +41,6 @@ egui-wgpu = { version = "0.37", optional = true, default-features = false, featu
 
 [dev-dependencies]
 tempfile = "3.27.0"
+serde = { version = "1", features = ["derive"] }
 toml = "1.1.8"
 zip = { version = "6", default-features = false, features = ["deflate"] }
