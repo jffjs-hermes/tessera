@@ -9,7 +9,10 @@
 
 [Knight]
 inherits = "Humanoid"
-parts.Render = { tile = "creature.player" }
+# Own tile id, never `creature.player`: the devtools identity resolver
+# (`blueprint_of`) fingerprints an entity by its live `RenderTile`, so a second
+# blueprint claiming the player's tile would mislabel every player entity.
+parts.Render = { tile = "creature.knight" }
 parts.Health = { hp = 50 }
 parts.Attributes = { might = 14, agility = 9, toughness = 13, will = 8, intellect = 11 }
 parts.Level = { level = 3 }

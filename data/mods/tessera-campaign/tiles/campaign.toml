@@ -1,0 +1,8 @@
+# Campaign tileset additions. Every id here is new, never a redefinition of a
+# base id: `tiles/*.toml` files layer id-by-id, so an accidental duplicate would
+# shadow the base appearance and (worse) collide in the blueprint identity
+# resolver, which matches entities to blueprints by tile id.
+#
+# The Knight is a player class, so it keeps the player's look but owns its own
+# tile id (`creature.player` belongs to the base `Player` blueprint alone).
+"creature.knight" = { glyph = "@", fg = "#c8d4ff" }
