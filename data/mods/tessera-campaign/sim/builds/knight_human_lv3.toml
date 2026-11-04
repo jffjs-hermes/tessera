@@ -1,0 +1,6 @@
+# The reference build for the batch scenarios: the Knight blueprint IS the
+# build in phase 1 (no loadout swapping yet), and the policy is chosen here.
+[build]
+id = "knight_human_lv3"
+blueprint = "Knight"
+policy = "sim/policies/knight_expert.luau"

@@ -396,6 +396,11 @@ pub struct ItemInfo {
     pub lo: i64,
     pub hi: i64,
     pub accuracy_bonus: i64,
+    /// The armor's per-damage-type resistance profile (material), as authored
+    /// on the blueprint. Empty for weapons and for pieces with no profile.
+    pub resist: BTreeMap<String, i64>,
+    /// The armor's per-damage-type flat threshold. Empty in the melee slice.
+    pub threshold: BTreeMap<String, i64>,
 }
 
 /// Read the script-facing summary of one item blueprint.
@@ -416,6 +421,11 @@ pub fn item_info(world: &World, id: &str) -> Option<ItemInfo> {
         lo: weapon.as_ref().map(|w| w.lo).unwrap_or(0),
         hi: weapon.as_ref().map(|w| w.hi).unwrap_or(0),
         accuracy_bonus: weapon.as_ref().map(|w| w.accuracy_bonus).unwrap_or(0),
+        resist: armor.as_ref().map(|a| a.resist.clone()).unwrap_or_default(),
+        threshold: armor
+            .as_ref()
+            .map(|a| a.threshold.clone())
+            .unwrap_or_default(),
     })
 }
 

@@ -10,7 +10,9 @@ pub mod devtools;
 pub mod mods;
 pub mod scripting;
 pub mod sim;
+pub mod sim_run;
 
 pub use mods::{Overlay, apply_mod_patches, discover_sources};
 pub use scripting::ScriptBridge;
 pub use sim::{PlayerAction, RenderTarget, Sim, build_cells};
+pub use sim_run::{BuildSpec, RunResult, Scenario, SimPack, SimSummary};

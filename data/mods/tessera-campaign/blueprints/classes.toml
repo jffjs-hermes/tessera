@@ -1,0 +1,25 @@
+# Campaign classes: the reference player builds the headless batch runs use.
+#
+# The Knight is the level-3 reference build from the design tables and the
+# class prototype: hp 50 from the shared hp formula, the mail kit from the base
+# item set, and the Blade I passives standing in as authored bonuses until the
+# skill slice lands. AC and block are NOT authored here: the rules script
+# derives both from the equipped pieces (mail 8 + half-helm 2 + shield 2 = 12
+# AC, block 15 from the round shield + 1 per Might above 10 = 19).
+
+[Knight]
+inherits = "Humanoid"
+# Own tile id, never `creature.player`: the devtools identity resolver
+# (`blueprint_of`) fingerprints an entity by its live `RenderTile`, so a second
+# blueprint claiming the player's tile would mislabel every player entity.
+parts.Render = { tile = "creature.knight" }
+parts.Health = { hp = 50 }
+parts.Attributes = { might = 14, agility = 9, toughness = 13, will = 8, intellect = 11 }
+parts.Level = { level = 3 }
+parts.Bonuses = { accuracy = 3, damage_flat = 1 }
+parts.Equipment = { main_hand = "Item_Longsword", off_hand = "Item_RoundShield", head = "Item_HalfHelm", body = "Item_MailHauberk", arms = "Item_MailSleeves", legs = "Item_MailBoots" }
+# The resolved wielded profile the attack resolver reads. Equipment holds the
+# blueprint id; the native resolver reads one typed profile, so the two are
+# stamped together here (re-stamping on a mid-run equip change is the later
+# loadout seam, not phase 1).
+parts.Weapon = { lo = 4, hi = 8, dtype = "slash", stat = "might", reach = 1 }

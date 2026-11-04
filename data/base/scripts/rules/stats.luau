@@ -70,7 +70,7 @@ engine.on("RecomputeDerived", engine.NORMAL, function(ev)
   local ARMOR_SLOTS = { "head", "body", "arms", "legs" }
 
   local function gear_totals(equipment, might)
-    local totals = { ac = 0, accuracy = 0, worn = 0, over = 0 }
+    local totals = { ac = 0, accuracy = 0, worn = 0, over = 0, block = 0, resist = {} }
     if equipment == nil then return totals end
     local function add(id)
       if id == nil or id == "" then return end
@@ -79,6 +79,11 @@ engine.on("RecomputeDerived", engine.NORMAL, function(ev)
       totals.ac = totals.ac + (item.ac or 0)
       totals.accuracy = totals.accuracy + (item.accuracy_bonus or 0)
       totals.worn = totals.worn + (item.weight or 0)
+      totals.block = totals.block + (item.block or 0)
+      local profile = item.resist or {}
+      for t, v in pairs(profile) do
+        totals.resist[t] = (totals.resist[t] or 0) + v
+      end
     end
     for _, slot in ipairs(ARMOR_SLOTS) do
       add(equipment[slot])
@@ -125,21 +130,25 @@ engine.on("RecomputeDerived", engine.NORMAL, function(ev)
   -- equipment contributions are the gear layer's terms and are added there,
   -- never written back into Bonuses, so nothing is counted twice.
   --
-  -- Block: the shield's block base plus +1 per Might above 10 (the design
-  -- table's `15 + (Might - 10)`); a negative total floors at 0.
-  local block = (bonuses.block or 0) + (attrs.might - 10)
+  -- Block: the equipped shield's block base plus +1 per Might above 10 (the
+  -- design table's `15 + (Might - 10)`); a negative total floors at 0.
+  local block = (bonuses.block or 0) + gear.block + (attrs.might - 10)
   if block < 0 then block = 0 end
 
   local combat = { block = block }
   local res = bonuses.resist or {}
   local thr = bonuses.threshold or {}
   -- Iterated in the native vocabulary's declaration order so the written
-  -- field set is deterministic.
+  -- field set is deterministic. Armor-sourced resistance is the material
+  -- profile of the equipped pieces; the physical total is clamped to the
+  -- armor cap, and every value to the shared resistance range.
+  local PHYSICAL = { slash = true, pierce = true, blunt = true }
   local TYPES = { "slash", "pierce", "blunt", "fire", "cold",
                   "lightning", "poison", "holy", "shadow" }
   for _, t in ipairs(TYPES) do
-    local r = res[t]
-    if r ~= nil then
+    local r = (res[t] or 0) + (gear.resist[t] or 0)
+    if r ~= 0 then
+      if PHYSICAL[t] and r > T.armor_resist_cap then r = T.armor_resist_cap end
       if r < T.res_floor then r = T.res_floor end
       if r > T.res_ceiling then r = T.res_ceiling end
       combat["resist_" .. t] = r

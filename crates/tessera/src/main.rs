@@ -72,6 +72,17 @@ struct Args {
     /// Console command lines to run at startup before scripted actions
     /// (`--exec <line>`, repeatable).
     exec: Vec<String>,
+    /// Run a batch scenario headlessly (`--sim <scenario path>`): no window, no
+    /// interactive input, JSON output. Requires `--build`.
+    sim: Option<String>,
+    /// The build file for `--sim` (`--build <path>`).
+    build: Option<String>,
+    /// How many runs a `--sim` batch plays (`--runs <n>`, default 500).
+    runs: u32,
+    /// The master seed for `--sim` (`--seed <n>`, default 12345).
+    seed: u64,
+    /// Where to write the `--sim` report (`--out <path>`); stdout when absent.
+    out: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -83,6 +94,11 @@ fn parse_args() -> Result<Args> {
     let mut save_dir = PathBuf::from("saves");
     let mut load = None;
     let mut exec = Vec::new();
+    let mut sim = None;
+    let mut build = None;
+    let mut runs: u32 = 500;
+    let mut seed: u64 = 12345;
+    let mut out = None;
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -100,6 +116,17 @@ fn parse_args() -> Result<Args> {
             "--headless" => {
                 headless = Some(it.next().context("--headless needs a number")?.parse()?)
             }
+            "--sim" => {
+                sim = Some(
+                    it.next()
+                        .context("--sim needs a scenario path")?
+                        .to_string(),
+                )
+            }
+            "--build" => build = Some(it.next().context("--build needs a build path")?.to_string()),
+            "--runs" => runs = it.next().context("--runs needs a number")?.parse()?,
+            "--seed" => seed = it.next().context("--seed needs a number")?.parse()?,
+            "--out" => out = Some(it.next().context("--out needs a path")?.into()),
             "-h" | "--help" => {
                 println!(
                     "tessera [--data <dir>] [--mods() <dir>] [--zone <id>] [--frames <n>] [--headless <n>]\n\
@@ -139,6 +166,11 @@ fn parse_args() -> Result<Args> {
         save_dir,
         load,
         exec,
+        sim,
+        build,
+        runs,
+        seed,
+        out,
     })
 }
 
@@ -730,6 +762,52 @@ fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = parse_args()?;
+
+    // Batch-simulator path: no window, no interactive input, no content
+    // pipeline beyond what the runner needs. Prints (or writes) one JSON line
+    // per run plus the summary, then exits 0.
+    if let Some(scenario_path) = &args.sim {
+        let build_path = args
+            .build
+            .as_deref()
+            .context("--sim requires --build <path>")?;
+        let pack = tessera::SimPack::load(&args.data, &args.mods).with_context(|| {
+            format!(
+                "loading content from {} (mods() {})",
+                args.data.display(),
+                args.mods.display()
+            )
+        })?;
+        let scenario = pack
+            .scenario(scenario_path)
+            .with_context(|| format!("loading scenario {scenario_path}"))?;
+        let build = pack
+            .build(build_path)
+            .with_context(|| format!("loading build {build_path}"))?;
+        let results = tessera::sim_run::run_batch(&pack, &scenario, &build, args.runs, args.seed)
+            .with_context(|| format!("running scenario {}", scenario.id))?;
+        let summary = tessera::SimSummary::from_runs(&results);
+        let text =
+            tessera::sim_run::report_json(&results, &summary, &build.build.policy, args.seed);
+        match &args.out {
+            Some(path) => {
+                std::fs::write(path, &text)
+                    .with_context(|| format!("writing report {}", path.display()))?;
+                println!("wrote {}", path.display());
+            }
+            None => print!("{text}"),
+        }
+        println!(
+            "{}: {} runs, win rate {}%, mean turns {}, median turns {}",
+            scenario.id,
+            summary.runs,
+            summary.win_rate_pct,
+            summary.mean_turns,
+            summary.median_turns
+        );
+        return Ok(());
+    }
+
     let content = load_content(&args.data, &args.mods).with_context(|| {
         format!(
             "loading content from {} (mods() {})",

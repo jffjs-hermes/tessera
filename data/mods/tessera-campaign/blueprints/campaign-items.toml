@@ -1,0 +1,9 @@
+# Campaign items: the raider's short blade.
+#
+# 2-5 slash on Agility, cost 100 (one turn at speed 100) — the prototype's
+# goblin weapon. The Knight kit itself lives in the base item set, so a mod can
+# replace any piece without restating the set.
+
+[Item_ShortBlade]
+parts.Item = { name = "Short blade", slot = "main_hand", weight = 2, tier = "common", price = 20 }
+parts.ItemWeapon = { lo = 2, hi = 5, stat = "agility", hands = 1, reach = 1, cost = 100, accuracy_bonus = 0 }

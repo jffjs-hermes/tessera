@@ -296,6 +296,12 @@ pub trait WorldRead: Send + Sync + 'static {
     /// cell qualifies. The caller passes the host RNG fork so the draw is
     /// deterministic and does not cross a value boundary.
     fn random_walkable_tile(&self, rng: &mut HostRng) -> Option<(i32, i32)>;
+    /// Every placed entity id, ascending — the battlefield the dispatch
+    /// snapshot covers, so a policy script can scan targets (distance and HP)
+    /// in one turn without per-target parameter plumbing.
+    fn positioned_entities(&self) -> Vec<u64> {
+        Vec::new()
+    }
     /// The simulation's player-turn clock (increments once per submitted player
     /// action, cancelled or not).
     fn player_turns(&self) -> u64;
@@ -643,6 +649,41 @@ impl ScriptHost {
             })?,
         )?;
 
+        // entities -> every entity id in the dispatch snapshot, ascending.
+        // The snapshot is BTreeMap-keyed, so the list order is deterministic;
+        // a policy can therefore scan candidates without a hash-order hazard.
+        let slot = shared.slot.clone();
+        t.set(
+            "entities",
+            lua.create_function(move |lua2, ()| {
+                let tbl = lua2.create_table()?;
+                for (idx, id) in slot.snapshot().keys().enumerate() {
+                    tbl.set(idx + 1, *id as i64)
+                        .map_err(|e: mlua::Error| mlua::Error::RuntimeError(e.to_string()))?;
+                }
+                Ok(tbl)
+            })?,
+        )?;
+
+        // hp -> the entity's live Health.hp from the snapshot, or nil when it
+        // carries no Health part (a non-creature entity).
+        let slot = shared.slot.clone();
+        t.set(
+            "hp",
+            lua.create_function(move |_, entity: i64| {
+                let hp = slot
+                    .snapshot()
+                    .get(&(entity as u64))
+                    .and_then(|parts| parts.get("Health"))
+                    .and_then(|fields| fields.get("hp"))
+                    .and_then(|v| match v {
+                        PartValue::Int(n) => Some(*n),
+                        _ => None,
+                    });
+                Ok(hp)
+            })?,
+        )?;
+
         // pos -> read-only Position accessor from the snapshot ({x, y} or nil).
         let slot = shared.slot.clone();
         t.set(
@@ -898,6 +939,16 @@ impl ScriptHost {
                         tbl.set("lo", info.lo)?;
                         tbl.set("hi", info.hi)?;
                         tbl.set("accuracy_bonus", info.accuracy_bonus)?;
+                        let resist = lua2.create_table()?;
+                        for (k, v) in &info.resist {
+                            resist.set(k.as_str(), *v)?;
+                        }
+                        tbl.set("resist", resist)?;
+                        let threshold = lua2.create_table()?;
+                        for (k, v) in &info.threshold {
+                            threshold.set(k.as_str(), *v)?;
+                        }
+                        tbl.set("threshold", threshold)?;
                         Value::Table(tbl)
                     }
                 };
@@ -1119,6 +1170,9 @@ impl ScriptHost {
         }
         ids.sort_unstable();
         ids.dedup();
+        // Policy scripts need the whole battlefield in the snapshot (target
+        // scan by distance and HP), not just the event's own entities.
+        ids.extend(self.shared.world_read.positioned_entities());
 
         let mut snapshot: PartSnapshot = BTreeMap::new();
         for id in ids {

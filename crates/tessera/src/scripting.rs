@@ -790,6 +790,21 @@ impl WorldRead for SimWorldAccess {
         self.try_entity(entity)
     }
 
+    /// Every placed entity, ascending: the dispatch snapshot's battlefield.
+    /// `entities_with_part` is broker-ordered (hecs), so the result is sorted
+    /// here to make the script-visible list order a declared contract.
+    fn positioned_entities(&self) -> Vec<u64> {
+        let broker = self.broker.read().unwrap_or_else(|p| p.into_inner());
+        let mut ids: Vec<u64> = broker
+            .entities_with_part(tessera_core::events::PART_POSITION)
+            .into_iter()
+            .map(|e| u64::from(e.to_bits()))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     fn distance(&self, a: u64, b: u64) -> Option<u32> {
         let (ax, ay) = self.cell_of(a)?;
         let (bx, by) = self.cell_of(b)?;

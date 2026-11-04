@@ -1,0 +1,31 @@
+# Fixed arena for the open batch scenario: one clear room with a few pillars
+# for texture. Same dimensions as the doorway arena so a run's clock and
+# distances are comparable; the difference is that every attacker can reach the
+# player without queueing.
+id = "sim_open"
+
+[gen]
+type = "ascii"
+start = { x = 3, y = 7 }
+
+[gen.glyphs]
+"." = "terrain.floor"
+"#" = "terrain.wall"
+
+[gen.ascii]
+rows = [
+  "######################",
+  "#....................#",
+  "#...#....#....#......#",
+  "#....................#",
+  "#........#...........#",
+  "#....................#",
+  "#....#...............#",
+  "#....................#",
+  "#...............#....#",
+  "#....................#",
+  "#........#...........#",
+  "#....................#",
+  "#....................#",
+  "######################",
+]
